@@ -1332,6 +1332,11 @@ class Settings_Page {
 			$badges .= ' ' . ( $ready ? $this->badge( __( 'Ready to scan', 'wp-cyber-security' ), 'ok' ) : $this->badge( __( 'Not in use', 'wp-cyber-security' ), 'muted' ) );
 		}
 		$this->field( __( 'Status', 'wp-cyber-security' ), '<div class="wpcs-badges">' . $badges . '</div>' );
+
+		// Step-by-step install guide with copyable commands.
+		$info = Sysadmin_Tools::call( 'scanner', 'clamav_info', array(), array() );
+		echo '<h3 class="wpcs-guide-title">' . esc_html__( 'How to install ClamAV', 'wp-cyber-security' ) . '</h3>';
+		Clamav_Guide::render( (string) $detected, (bool) $exec, ! empty( $info['daemon'] ) );
 		$this->card_close();
 	}
 
