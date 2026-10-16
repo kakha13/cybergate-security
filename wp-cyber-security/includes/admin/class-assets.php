@@ -22,11 +22,23 @@ defined( 'ABSPATH' ) || exit;
 class Assets {
 
 	/**
+	 * Cache-busting version for an asset: plugin version plus the file's
+	 * modification time, so browsers fetch a changed file right away.
+	 *
+	 * @param string $rel Path inside the plugin, e.g. assets/css/base.css.
+	 * @return string
+	 */
+	public static function ver( $rel ) {
+		$mtime = @filemtime( WPCYBERSEC_DIR . $rel ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		return WPCYBERSEC_VERSION . ( $mtime ? '.' . $mtime : '' );
+	}
+
+	/**
 	 * Registers handles (call on admin_enqueue_scripts).
 	 */
 	public static function register() {
-		wp_register_style( 'wpcybersec-base', WPCYBERSEC_URL . 'assets/css/base.css', array( 'dashicons' ), WPCYBERSEC_VERSION );
-		wp_register_script( 'wpcybersec-core', WPCYBERSEC_URL . 'assets/js/core.js', array(), WPCYBERSEC_VERSION, true );
+		wp_register_style( 'wpcybersec-base', WPCYBERSEC_URL . 'assets/css/base.css', array( 'dashicons' ), Assets::ver( 'assets/css/base.css' ) );
+		wp_register_script( 'wpcybersec-core', WPCYBERSEC_URL . 'assets/js/core.js', array(), Assets::ver( 'assets/js/core.js' ), true );
 		wp_localize_script(
 			'wpcybersec-core',
 			'wpcybersecData',

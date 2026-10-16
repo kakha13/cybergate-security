@@ -300,8 +300,8 @@ class Admin {
 		}
 
 		Assets::enqueue();
-		wp_enqueue_style( 'wpcybersec-admin', WPCYBERSEC_URL . 'assets/css/admin.css', array( 'wpcybersec-base' ), WPCYBERSEC_VERSION );
-		wp_enqueue_script( 'wpcybersec-admin', WPCYBERSEC_URL . 'assets/js/admin.js', array( 'wpcybersec-core' ), WPCYBERSEC_VERSION, true );
+		wp_enqueue_style( 'wpcybersec-admin', WPCYBERSEC_URL . 'assets/css/admin.css', array( 'wpcybersec-base' ), \WPCyberSecurity\Admin\Assets::ver( 'assets/css/admin.css' ) );
+		wp_enqueue_script( 'wpcybersec-admin', WPCYBERSEC_URL . 'assets/js/admin.js', array( 'wpcybersec-core' ), \WPCyberSecurity\Admin\Assets::ver( 'assets/js/admin.js' ), true );
 		wp_localize_script(
 			'wpcybersec-admin',
 			'wpcybersecAdmin',

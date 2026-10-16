@@ -846,8 +846,28 @@
 	display: none !important;
 }
 
-/* Dashicons inside buttons follow the button text color. */
-.wpcs-wrap .button .dashicons {
-	color: currentColor;
+/* Buttons with an icon (before or after the label): centered, evenly spaced,
+   icon in the button's own text color in every state. */
+.wpcs-wrap .button:has(> .dashicons) {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+}
+.wpcs-wrap .button .dashicons,
+.wpcs-wrap .button:hover .dashicons,
+.wpcs-wrap .button:focus .dashicons {
+	color: inherit;
+	line-height: 1;
+	margin: 0;
 	vertical-align: middle;
+	transition: transform 0.15s ease;
+}
+.wpcs-wrap .button-hero:has(> .dashicons) {
+	gap: 8px;
+}
+/* Trailing arrows nudge forward on hover. */
+.wpcs-wrap .button:hover .dashicons-arrow-right-alt2,
+.wpcs-wrap .button:hover .dashicons-arrow-right-alt {
+	transform: translateX(2px);
 }

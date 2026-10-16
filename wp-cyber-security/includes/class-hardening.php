@@ -82,7 +82,7 @@ class Hardening {
 		if ( ! wp_script_is( 'wpcybersec-core', 'registered' ) ) {
 			Admin\Assets::register();
 		}
-		wp_enqueue_script( 'wpcybersec-fixes', WPCYBERSEC_URL . 'assets/js/fixes.js', array( 'wpcybersec-core' ), WPCYBERSEC_VERSION, true );
+		wp_enqueue_script( 'wpcybersec-fixes', WPCYBERSEC_URL . 'assets/js/fixes.js', array( 'wpcybersec-core' ), \WPCyberSecurity\Admin\Assets::ver( 'assets/js/fixes.js' ), true );
 		wp_localize_script(
 			'wpcybersec-fixes',
 			'wpcybersecFixes',

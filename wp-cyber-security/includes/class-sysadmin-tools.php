@@ -125,8 +125,8 @@ class Sysadmin_Tools {
 		$css_deps = wp_style_is( 'wpcybersec-base', 'registered' ) ? array( 'wpcybersec-base' ) : array( 'dashicons' );
 		$js_deps  = wp_script_is( 'wpcybersec-core', 'registered' ) ? array( 'wpcybersec-core' ) : array();
 
-		wp_enqueue_style( 'wpcybersec-setup', WPCYBERSEC_URL . 'assets/css/setup.css', $css_deps, WPCYBERSEC_VERSION );
-		wp_enqueue_script( 'wpcybersec-setup', WPCYBERSEC_URL . 'assets/js/setup.js', $js_deps, WPCYBERSEC_VERSION, true );
+		wp_enqueue_style( 'wpcybersec-setup', WPCYBERSEC_URL . 'assets/css/setup.css', $css_deps, \WPCyberSecurity\Admin\Assets::ver( 'assets/css/setup.css' ) );
+		wp_enqueue_script( 'wpcybersec-setup', WPCYBERSEC_URL . 'assets/js/setup.js', $js_deps, \WPCyberSecurity\Admin\Assets::ver( 'assets/js/setup.js' ), true );
 		wp_localize_script(
 			'wpcybersec-setup',
 			'wpcybersecSetup',
