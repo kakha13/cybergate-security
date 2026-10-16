@@ -19,9 +19,12 @@ WP Cyber Security works like a door that only opens for files you know.
 * **Allow once, allowed always.** Approving a file remembers its SHA-256 fingerprint. The same file is never held again, wherever it shows up. A file approved as an image is never accepted as a PHP file.
 * **Shows exactly what changed.** For a modified file you get a line-by-line diff against the last approved version or the official original, with every malware match linked to its line. Passwords, keys and salts are masked.
 * **Detects new and changed files.** A fingerprint of every file is recorded once; later scans report only what is new or different.
+* **Recent changes for incidents.** If a site was already infected when the fingerprints were recorded, the infected files look normal. Reports > Recent changes lists every PHP, script and configuration file modified in the last 7, 14 or 30 days and says what explains each change: a WordPress, plugin or theme update, an official checksum, or nothing. Unexplained files can be read on screen and reported for review with one click.
+* **A report for your developer.** "Download report" creates one HTML file with the scan results, everything waiting for a decision with the code that triggered it, settings, server checks and recent activity. Passwords, keys and email addresses are hidden, so it is safe to send.
+* **Clean-room scan.** `php wp-content/plugins/wp-cyber-security/bin/cron.php --isolated --full` scans with every other plugin and the theme switched off for that run only, so a compromised plugin cannot hide files from the scanner.
 * **Setup wizard.** Checks your server and fixes most findings with one click: wp-config.php permissions, the code editor, PHP in uploads, a data folder outside the web root.
 * **For system administrators.** An optional early upload guard (auto_prepend_file) holds uploads sent to any PHP script, not only WordPress. Real cron, fapolicyd, inotify, nginx and Apache rules, ClamAV and a tamper check for the allowlist.
-* **WP-CLI.** `wp wpcybersec status`, `scan`, `pending`, `approve`, `deny`, `allowlist`, `guard`, `unlock`, `lock`.
+* **WP-CLI.** `wp wpcybersec status`, `scan`, `pending`, `approve`, `deny`, `allowlist`, `guard`, `unlock`, `lock`, `report`.
 
 == Installation ==
 
@@ -42,6 +45,10 @@ Updates of installed plugins, themes and core are re-checked right away against 
 = Does it change wp-config.php or .htaccess? =
 
 Only when you press a fix button. Every change to wp-config.php is checked for errors first, and the plugin's own lines are marked so you can find them.
+
+= What does the isolated scan not cover? =
+
+Must-use plugins (wp-content/mu-plugins) and drop-ins (db.php, object-cache.php, advanced-cache.php) always load with WordPress and cannot be switched off for a scan. The isolated scan lists them so you can check them yourself.
 
 = Where are held files kept? =
 

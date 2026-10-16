@@ -62,8 +62,8 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
 | admin | `Admin\Admin` | admin UI |
 
 Static helpers: `Paths` (core), `Guard_Config` (core), `Installer` (core), `Cli` (setup),
-`Signatures` (engine), `Admin\Assets` (core), `Diff` (changes view). `Originals` is created on
-demand (`new Originals()`).
+`Signatures` (engine), `Admin\Assets` (core), `Diff` (changes view). `Originals`,
+`Recent_Changes` and `Site_Report` are created on demand (`new Originals()`, ...).
 
 ## Core API (already written - read the source in `includes/`)
 
@@ -122,7 +122,9 @@ created_at, updated_at, decided_by, decided_at
 
 Sources (`source` column): `media`, `sideload`, `rest`, `plugin_zip`, `theme_zip`, `guard`,
 `scan`, `install`, `database` (Db_Scanner finding; `sha256` is the place-bound fingerprint, only
-"ignore" applies, which stores it in the allowlist as kind `db`), `user` (User_Watch real time).
+"ignore" applies, which stores it in the allowlist as kind `db`), `user` (User_Watch real time),
+`review` (a file an administrator reported from Reports > Recent changes; type `file`,
+`user_id` = who reported it, `details.context` = `recent_changes`).
 
 Database findings (`Db_Scanner`): options (decoder + eval payloads, document.write(unescape,
 fromCharCode + eval; scripts from other sites and hidden iframes only in widget_*, theme_mods_*,
@@ -177,6 +179,55 @@ Files: `includes/class-snapshots.php`, `includes/class-originals.php`, `includes
   Secrets are redacted (`Diff::redact()`) before comparing or showing. Rendering uses core's
   `Text_Diff` engine with its own escaped renderer (wp_text_diff() collapses whitespace).
 - AJAX `diff_summary` (id) feeds the "Changes: +N -M lines vs ..." line in the expandable details.
+- `Diff::excerpt($item, $max = 200, $network = false)`: plain rows `{ kind ' '|'+'|'-'|'@'|'!', old, new,
+  text }` of the redacted diff (changes with 3 context lines) or of the content (lines around the
+  matches, else the start), for output that cannot use the screen HTML (the downloadable report).
+  `for_item()` takes `texts => true` so a render-less call still returns the redacted `current`.
+
+## Recent changes (incident mode)
+
+Files: `includes/class-recent-changes.php`, `Admin\Reports_Page::render_recent_tab()` /
+`render_file_view()` (`admin.php?page=wpcybersec-reports&tab=recent&days=7|14|30&show=no_updates`,
+`...&view=file&path=<relative path>`), admin-post `wpcybersec_recent_report` (nonce
+`wpcybersec_recent_report`, POST `path`).
+
+- Why: changes are judged against the baseline; files infected before the baseline look normal.
+- `query({days, search, hide_updates, page, per_page})`: manifest rows with `mtime >= now - days`
+  (index `mtime`, DB version 4), newest first, at most `SCAN_CAP` rows read, filtered to
+  `Paths::is_executable()` and not excluded. Times are what the last scan saw.
+- `explain($row)`: `update` (an update mark covers the path and the mtime is within 1 h before or
+  15 min after it: "WordPress update", "<Plugin> update", "<Theme> install"), `checksum`
+  (`Scanner::verify()` match of the live file), `allowed` (allowlisted hash), `reported` (open
+  file/threat item), else `none` ("Unexplained", highlighted).
+- Update marks: option `wpcybersec_update_marks` (list of `{ p: relative prefix, t: unix, a:
+  update|install }`, 45 days, at most 600) written by `Install_Gate::process_complete()` through
+  `Recent_Changes::remember_update()`, plus the `rebaselined` activity log events (older updates).
+- `resolve($rel)`: accepts only an exact manifest path whose real path is inside the scan root
+  and outside the data folder. `file_item()` describes it like an item (id 0) for
+  `Diff::for_item()` (live file, matches from `scan_file()`, last trusted copy as the base when the
+  file changed after the scan, else the official original, else the content).
+- `report($rel)`: "Report for review" creates a pending `file` item (source `review`, hits,
+  checksum verdict, snapshot of the current version) and sets the manifest row to pending, so the
+  normal Allow / Quarantine / Delete decisions apply. An open report of the file is reused.
+
+## Downloadable report
+
+Files: `includes/class-site-report.php`; admin-post `wpcybersec_report` (GET, nonce
+`wpcybersec_report`, `Admin::report_url()` / `Admin::report_button()` on the Reports and Dashboard
+headers) sends `<host>-security-report-<Y-m-d>.html` as an attachment; `wp wpcybersec report
+[--file=path]`.
+
+- One HTML document, inline CSS, no scripts or external assets: overview (site, versions),
+  last scan (`last_result` incl. missing core, database findings, new administrators, last
+  database scan), open items (pending, most severe first, up to 300; hits with
+  `Diff::redact_snippet()` snippets; `Diff::excerpt()` of the first 40 file/threat items, 200
+  lines each), administrator accounts, protection settings, `Sysadmin_Tools::diagnostics()`,
+  allowlist size, last 100 log entries.
+- Never included: secret values, wp-config.php beyond redacted excerpts, nonces, webhook URLs,
+  the data folder path or held copy paths, full email addresses (masked `j***@example.com`).
+  A final pass replaces every value of a defined constant whose name looks secret (DB_PASSWORD,
+  keys, salts, WPCYBERSEC_HMAC_KEY), the snapshot key and the webhook URL with `********`, and the
+  data folder path with `[plugin data folder]`.
 
 ## Engine module (owner: engine builder)
 
@@ -242,9 +293,21 @@ Only one job at a time. State in option `wpcybersec_job` (not autoloaded); file 
   `wpcybersec()->notifier->scan_finished($status)` at the end.
 
 ### `bin/cron.php`
-CLI runner for real cron without WP-CLI: `php bin/cron.php [--full|--baseline] [--no-malware] [--wp=/abs/path]`.
+CLI runner for real cron without WP-CLI: `php bin/cron.php [--full|--baseline] [--no-malware] [--isolated] [--wp=/abs/path]`.
 Refuses to run from the web (`PHP_SAPI !== 'cli'` -> exit). Loads `wp-load.php`, runs a scan
 to completion, prints a one-line summary.
+
+`--isolated` (clean-room scan): before `wp-load.php`, filters are pre-registered in the
+`$wp_filter` global (turned into WP_Hook objects by `WP_Hook::build_preinitialized_hooks()`):
+`option_active_plugins` / `site_option_active_sitewide_plugins` keep only this plugin (matched by
+real path), `template_directory` / `stylesheet_directory` return a folder without functions.php
+(wp-settings.php includes a theme's functions.php only when it exists there), and
+`pre_update_option_active_plugins`, `pre_update_site_option_active_sitewide_plugins`,
+`pre_update_option_template`, `pre_update_option_stylesheet` keep the old value, so nothing is
+deactivated persistently. After boot it checks `get_included_files()` for code of any other plugin
+or theme (symlinked folders resolved) and exits 2 without scanning when it finds some. mu-plugins
+and drop-ins cannot be isolated: they are listed ("mu-plugins still load: N found").
+`wp wpcybersec scan --isolated` only explains this (WP-CLI has loaded plugins already).
 
 ## Gates module (owner: gates builder)
 
@@ -273,7 +336,8 @@ Files: `includes/class-upload-gate.php`, `includes/class-install-gate.php`,
   `Allowlist::is_allowed_install`; return WP_Error with a clear message and create an item of
   type install), optional update holding (`hold_updates`), `upgrader_process_complete`
   (call `file_monitor->rebaseline_paths()` for just the updated plugin/theme folders, or core
-  folders after a core update), `file_mod_allowed` (when `freeze_mods` is on, return false
+  folders after a core update; the same folders are remembered as update marks with
+  `Recent_Changes::remember_update()`), `file_mod_allowed` (when `freeze_mods` is on, return false
   unless unlocked).
 - `on_approve(array $item)`: allowlist install key (and package hash if known).
 - `unlock($minutes)`, `lock()`, `is_unlocked()`, `unlocked_until()` (unix, 0 when locked).
@@ -328,13 +392,13 @@ Files: `includes/admin/class-admin.php`, `includes/admin/class-dashboard-page.ph
   admin, AJAX). Admin bar node "Cyber Security (N)" for admins when N pending. Admin notice on
   other screens when the wizard is not completed. "Settings" and "Setup" action links on the
   plugins screen. admin-post handlers: `wpcybersec_download` (stream held file),
-  `wpcybersec_allowlist_remove`.
+  `wpcybersec_allowlist_remove`, `wpcybersec_report` (download report), `wpcybersec_recent_report`.
 - Header partial used by every page: `Admin\Admin::header($title, $subtitle, $actions_html)`
   renders `.wpcs-header` with the shield icon. **The setup builder uses this too.**
 - Dashboard: status cards (protection level, pending approvals, threats, quarantine, files
   monitored, last scan), scan buttons (Quick scan = incremental, Full malware scan, Rebuild
   baseline) with a progress block, recent activity, guard and freeze status, link to wizard.
-- Reports: tabs Pending approvals / Threats / Quarantine / Allowlist / Activity. Tables with
+- Reports: tabs Pending approvals / Threats / Quarantine / History / Recent changes / Allowlist / Activity. Tables with
   type badge, file, size, hash, who/where, when, verdict/hits, status cell
   (`data-wpcs-status`), action buttons (`data-wpcs-action`) from `Decisions::available()`,
   expandable details (hits with snippet and line), bulk actions, search, pagination.
@@ -360,4 +424,4 @@ Files: `includes/admin/class-wizard.php`, `includes/admin/class-settings-page.ph
   `fapolicyd_trust_export()`, `fapolicyd_rules()`, `inotify_script()`, `maldet_snippet()`,
   `write_uploads_htaccess()`, `hmac_snippet()`.
 - `Cli`: static `register()` -> `WP_CLI::add_command('wpcybersec', ...)` with `status`, `scan`,
-  `pending`, `approve`, `deny`, `allowlist`, `guard`, `unlock`, `lock`.
+  `pending`, `approve`, `deny`, `allowlist`, `guard`, `unlock`, `lock`, `report`.

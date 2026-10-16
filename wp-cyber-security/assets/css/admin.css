@@ -1381,6 +1381,56 @@
 	outline-offset: -2px;
 }
 
+/* Recent changes. */
+.wpcs-recent td {
+	vertical-align: middle;
+}
+.wpcs-recent .column-modified {
+	width: 170px;
+}
+.wpcs-recent .column-size {
+	width: 80px;
+}
+.wpcs-recent .column-explained {
+	width: 230px;
+}
+.wpcs-recent .column-actions {
+	width: 230px;
+}
+.wpcs-recent .column-actions .wpcs-row-links {
+	margin-top: 0;
+}
+.wpcs-recent tr.is-unexplained > td {
+	background: #fff7f7;
+}
+.wpcs-recent tr.is-unexplained > td:first-child {
+	box-shadow: inset 3px 0 0 var(--wpcs-bad);
+}
+.wpcs-explained {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	white-space: normal;
+}
+.wpcs-inline-form {
+	display: inline;
+	margin: 0;
+}
+.wpcs-row-links .wpcs-report-file {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	font-size: 12px;
+	color: var(--wpcs-bad);
+	text-decoration: none;
+	cursor: pointer;
+}
+.wpcs-change-item__actions .wpcs-inline-form .button {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
 /* ---------- Responsive ---------- */
 .wpcs-narrow-when,
 .wpcs-narrow-source {
@@ -1421,7 +1471,8 @@
 		align-items: flex-start;
 	}
 	.wpcs-activity-table .column-ip,
-	.wpcs-allowlist .column-note {
+	.wpcs-allowlist .column-note,
+	.wpcs-recent .column-size {
 		display: none;
 	}
 }
@@ -1491,6 +1542,10 @@
 	.wpcs-allowlist .column-when,
 	.wpcs-activity-table .column-user {
 		display: none;
+	}
+	.wpcs-recent .column-explained,
+	.wpcs-recent .column-actions {
+		width: auto;
 	}
 }
 

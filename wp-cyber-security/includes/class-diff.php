@@ -131,6 +131,9 @@ class Diff {
 	 *     @type string $layout  unified | split. Default unified.
 	 *     @type bool   $network Allow downloading the official original. Default true.
 	 *     @type bool   $render  Build the HTML (false: counts only). Default true.
+	 *     @type bool   $texts   With render false: still read and redact the current
+	 *                           version when there is nothing to compare with (for
+	 *                           excerpt()). Default false.
 	 * }
 	 * @return array {
 	 *     mode: diff|content|unavailable, reason: string code, reason_text, base_label,
@@ -146,6 +149,7 @@ class Diff {
 				'layout'  => 'unified',
 				'network' => true,
 				'render'  => true,
+				'texts'   => false,
 			),
 			$args
 		);
@@ -207,7 +211,7 @@ class Diff {
 		}
 
 		// Counts only and nothing to compare with: the content is not needed.
-		if ( null === $base['text'] && ! $args['render'] ) {
+		if ( null === $base['text'] && ! $args['render'] && ! $args['texts'] ) {
 			$out['mode']        = 'content';
 			$out['reason']      = $too_long ? 'too_large_to_diff' : self::no_base_reason( $item, $details );
 			$out['reason_text'] = self::reason_text( $out['reason'] );
@@ -353,6 +357,166 @@ class Diff {
 			'base_label' => (string) $result['base_label'],
 			'text'       => (string) $text,
 		);
+	}
+
+	/**
+	 * Plain rows of what changed (or of the content around the matches) for
+	 * places that cannot use the screen HTML, such as the downloadable report.
+	 * Every line comes from the redacted texts of for_item().
+	 *
+	 * @param array $item Item (a real one, or a file description with id 0).
+	 * @param int   $max  Rows at most (hunk separators included).
+	 * @param bool  $network Allow downloading the official original.
+	 * @return array {
+	 *     mode: diff|content|unavailable, reason_text, base_label, current_label,
+	 *     added, removed, notes (plain texts), truncated (bool), total (lines of the
+	 *     current version), rows: list of { kind: ' '|'+'|'-'|'@'|'!', old: int, new: int, text }
+	 * }
+	 */
+	public static function excerpt( array $item, $max = 200, $network = false ) {
+		$max    = max( 10, (int) $max );
+		$result = self::for_item(
+			$item,
+			array(
+				'network' => (bool) $network,
+				'render'  => false,
+				'texts'   => true,
+			)
+		);
+		$out    = array(
+			'mode'          => (string) $result['mode'],
+			'reason_text'   => (string) $result['reason_text'],
+			'base_label'    => (string) $result['base_label'],
+			'current_label' => (string) $result['current_label'],
+			'added'         => (int) $result['added'],
+			'removed'       => (int) $result['removed'],
+			'notes'         => array(),
+			'truncated'     => false,
+			'total'         => 0,
+			'rows'          => array(),
+		);
+		foreach ( (array) $result['notes'] as $note ) {
+			if ( isset( $note[1] ) && '' !== (string) $note[1] ) {
+				$out['notes'][] = (string) $note[1];
+			}
+		}
+		$short = static function ( $text ) {
+			$text = (string) $text;
+			if ( strlen( $text ) > 500 ) {
+				$text = ( function_exists( 'mb_strcut' ) ? mb_strcut( $text, 0, 500, 'UTF-8' ) : substr( $text, 0, 500 ) ) . ' ...';
+			}
+			return $text;
+		};
+
+		$current = self::lines( (string) $result['current'] );
+		$out['total'] = count( $current );
+
+		if ( 'diff' === $out['mode'] ) {
+			$ops = self::compute( self::lines( (string) $result['base'] ), $current );
+			if ( null === $ops ) {
+				$out['mode'] = 'unavailable';
+				return $out;
+			}
+			// Flatten to one entry per line, then keep the changes with CONTEXT lines around them.
+			$flat = array();
+			$o    = 1;
+			$n    = 1;
+			foreach ( $ops as $op ) {
+				$orig  = isset( $op->orig ) && is_array( $op->orig ) ? $op->orig : array();
+				$final = isset( $op->final ) && is_array( $op->final ) ? $op->final : array();
+				if ( $op instanceof \Text_Diff_Op_copy ) {
+					foreach ( $final as $line ) {
+						$flat[] = array( ' ', $o++, $n++, $line );
+					}
+					continue;
+				}
+				foreach ( $orig as $line ) {
+					$flat[] = array( '-', $o++, 0, $line );
+				}
+				foreach ( $final as $line ) {
+					$flat[] = array( '+', 0, $n++, $line );
+				}
+			}
+			$keep  = array();
+			$count = count( $flat );
+			foreach ( $flat as $i => $entry ) {
+				if ( ' ' !== $entry[0] ) {
+					for ( $j = max( 0, $i - self::CONTEXT ); $j <= min( $count - 1, $i + self::CONTEXT ); $j++ ) {
+						$keep[ $j ] = true;
+					}
+				}
+			}
+			ksort( $keep );
+			$last = -2;
+			foreach ( array_keys( $keep ) as $i ) {
+				if ( count( $out['rows'] ) >= $max ) {
+					$out['truncated'] = true;
+					break;
+				}
+				if ( $i !== $last + 1 ) {
+					$out['rows'][] = array(
+						'kind' => '@',
+						'old'  => $flat[ $i ][1],
+						'new'  => $flat[ $i ][2],
+						'text' => '',
+					);
+				}
+				$out['rows'][] = array(
+					'kind' => $flat[ $i ][0],
+					'old'  => $flat[ $i ][1],
+					'new'  => $flat[ $i ][2],
+					'text' => $short( $flat[ $i ][3] ),
+				);
+				$last = $i;
+			}
+			return $out;
+		}
+
+		if ( 'content' !== $out['mode'] ) {
+			return $out;
+		}
+
+		// Content: the lines around every match, else the start of the file.
+		$details = isset( $item['details'] ) && is_array( $item['details'] ) ? $item['details'] : array();
+		$hits    = array_flip( self::hit_line_numbers( $details ) );
+		$keep    = array();
+		foreach ( array_keys( $hits ) as $line ) {
+			for ( $j = max( 1, $line - 5 ); $j <= min( $out['total'], $line + 5 ); $j++ ) {
+				$keep[ $j ] = true;
+			}
+		}
+		if ( ! $keep ) {
+			for ( $j = 1; $j <= min( $out['total'], $max ); $j++ ) {
+				$keep[ $j ] = true;
+			}
+		}
+		ksort( $keep );
+		$last = 0;
+		foreach ( array_keys( $keep ) as $line ) {
+			if ( count( $out['rows'] ) >= $max ) {
+				$out['truncated'] = true;
+				break;
+			}
+			if ( $line !== $last + 1 ) {
+				$out['rows'][] = array(
+					'kind' => '@',
+					'old'  => 0,
+					'new'  => $line,
+					'text' => '',
+				);
+			}
+			$out['rows'][] = array(
+				'kind' => isset( $hits[ $line ] ) ? '!' : ' ',
+				'old'  => 0,
+				'new'  => $line,
+				'text' => $short( $current[ $line - 1 ] ),
+			);
+			$last = $line;
+		}
+		if ( $last < $out['total'] ) {
+			$out['truncated'] = true;
+		}
+		return $out;
 	}
 
 	/**

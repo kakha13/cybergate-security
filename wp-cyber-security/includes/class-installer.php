@@ -94,7 +94,8 @@ class Installer {
 				updated_at datetime NOT NULL,
 				PRIMARY KEY  (path_hash),
 				KEY run_id (run_id),
-				KEY state (state)
+				KEY state (state),
+				KEY mtime (mtime)
 			) {$charset};",
 			"CREATE TABLE {$allow} (
 				id bigint(20) unsigned NOT NULL AUTO_INCREMENT,

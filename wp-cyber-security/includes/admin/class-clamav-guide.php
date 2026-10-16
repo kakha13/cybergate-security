@@ -124,6 +124,26 @@ class Clamav_Guide {
 	}
 
 	/**
+	 * Optional Linux Malware Detect steps for root servers, followed by the
+	 * EICAR test again (a broken signature file would stop clamd from loading).
+	 * The download is the official one from rfxn.com.
+	 *
+	 * @return array[]
+	 */
+	private static function maldet_steps() {
+		return array(
+			array(
+				'text' => __( 'Optional: install Linux Malware Detect. It adds signatures made for website malware such as PHP web shells and injected scripts, and because ClamAV is installed, its installer links them into ClamAV\'s signature folders (each update checks them and reloads clamd), so clamdscan and this plugin use them automatically:', 'wp-cyber-security' ),
+				'code' => "cd /tmp\ncurl -sO https://www.rfxn.com/downloads/maldetect-current.tar.gz\ntar xzf maldetect-current.tar.gz\ncd maldetect-*\nsudo ./install.sh\nsudo maldet -u",
+			),
+			array_merge(
+				self::test_step( 'clamdscan --fdpass' ),
+				array( 'text' => __( 'Run the same EICAR test again to confirm ClamAV still starts with the added signatures. The last line should end with "FOUND":', 'wp-cyber-security' ) )
+			),
+		);
+	}
+
+	/**
 	 * @return array[]
 	 */
 	private static function steps_debian() {
@@ -141,6 +161,7 @@ class Clamav_Guide {
 				'code' => "sudo systemctl enable --now clamav-daemon\nsudo systemctl status clamav-daemon --no-pager",
 			),
 			self::test_step( 'clamdscan --fdpass' ),
+			...self::maldet_steps(),
 			array( 'text' => __( 'Come back here, press "Check again", then turn on "Also scan uploads with ClamAV" and save. The database updates itself several times a day from now on.', 'wp-cyber-security' ) ),
 		);
 	}
@@ -167,6 +188,7 @@ class Clamav_Guide {
 				'code' => "sudo setsebool -P antivirus_can_scan_system 1\nsudo systemctl enable --now clamd@scan\nsudo systemctl status clamd@scan --no-pager",
 			),
 			self::test_step( 'clamdscan --fdpass' ),
+			...self::maldet_steps(),
 			array( 'text' => __( 'Come back here, press "Check again", then turn on "Also scan uploads with ClamAV" and save.', 'wp-cyber-security' ) ),
 		);
 	}

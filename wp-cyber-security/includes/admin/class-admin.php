@@ -9,6 +9,8 @@ namespace WPCyberSecurity\Admin;
 
 use WPCyberSecurity\Decisions;
 use WPCyberSecurity\Installer;
+use WPCyberSecurity\Recent_Changes;
+use WPCyberSecurity\Site_Report;
 use WPCyberSecurity\Store;
 
 defined( 'ABSPATH' ) || exit;
@@ -104,6 +106,8 @@ class Admin {
 		add_action( 'admin_post_wpcybersec_allowlist_remove', array( $this, 'handle_allowlist_remove' ) );
 		add_action( 'admin_post_wpcybersec_reports_bulk', array( $this, 'handle_reports_bulk' ) );
 		add_action( 'admin_post_wpcybersec_dismiss_notice', array( $this, 'handle_dismiss_notice' ) );
+		add_action( 'admin_post_wpcybersec_report', array( $this, 'handle_report' ) );
+		add_action( 'admin_post_wpcybersec_recent_report', array( $this, 'handle_recent_report' ) );
 
 		$this->register_admin_bar();
 	}
@@ -1079,6 +1083,78 @@ class Admin {
 				'wpcs_failed' => count( $errors ),
 			)
 		);
+	}
+
+	/**
+	 * Address of the "Download report" button (admin-post with a nonce).
+	 *
+	 * @return string Unescaped URL.
+	 */
+	public static function report_url() {
+		return wp_nonce_url( add_query_arg( 'action', 'wpcybersec_report', admin_url( 'admin-post.php' ) ), 'wpcybersec_report' );
+	}
+
+	/**
+	 * "Download report" header button.
+	 *
+	 * @return string Escaped HTML.
+	 */
+	public static function report_button() {
+		return '<a class="button" href="' . esc_url( self::report_url() ) . '" title="' . esc_attr__( 'One HTML file with the scan results, open items and recent activity, safe to send to your developer (secrets are hidden)', 'wp-cyber-security' ) . '"><span class="dashicons dashicons-download" aria-hidden="true"></span> ' . esc_html__( 'Download report', 'wp-cyber-security' ) . '</a>';
+	}
+
+	/**
+	 * Sends the security report as an HTML attachment.
+	 */
+	public function handle_report() {
+		$this->require_cap();
+		check_admin_referer( 'wpcybersec_report' );
+
+		try {
+			$report = new Site_Report();
+			$html   = $report->build();
+		} catch ( \Throwable $e ) {
+			self::debug_log( $e );
+			wp_die( esc_html__( 'The report could not be created. Try again in a moment.', 'wp-cyber-security' ), '', array( 'response' => 500, 'back_link' => true ) );
+		}
+		self::call( 'logger', 'log', array( 'report_downloaded', __( 'Downloaded the security report.', 'wp-cyber-security' ) ) );
+
+		nocache_headers();
+		header( 'Content-Type: text/html; charset=utf-8' );
+		header( 'Content-Disposition: attachment; filename="' . Site_Report::filename() . '"' );
+		header( 'Content-Length: ' . strlen( $html ) );
+		header( 'X-Content-Type-Options: nosniff' );
+		header( 'Cache-Control: no-store, private' );
+		echo $html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- built escaped by Site_Report.
+		exit;
+	}
+
+	/**
+	 * Reports > Recent changes > "Report for review": a pending file item.
+	 */
+	public function handle_recent_report() {
+		$this->require_cap();
+		check_admin_referer( 'wpcybersec_recent_report' );
+		// Not sanitized as text (that would change file names); Recent_Changes::resolve() accepts only an exact manifest path inside the scan root.
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- verified above / validated in resolve().
+		$rel = isset( $_POST['path'] ) && is_string( $_POST['path'] ) ? substr( (string) wp_unslash( $_POST['path'] ), 0, 4096 ) : '';
+
+		$id = Recent_Changes::report( $rel );
+		if ( is_wp_error( $id ) ) {
+			wp_die( esc_html( $id->get_error_message() ), esc_html__( 'Not found', 'wp-cyber-security' ), array( 'response' => 404, 'back_link' => true ) );
+		}
+		self::$counts = null;
+		wp_safe_redirect(
+			self::page_url(
+				self::PAGE_REPORTS,
+				array(
+					'view' => 'changes',
+					'item' => (int) $id,
+					'from' => 'pending',
+				)
+			)
+		);
+		exit;
 	}
 
 	/**

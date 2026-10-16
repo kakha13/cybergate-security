@@ -223,6 +223,9 @@ class Cli {
 	 * [--database]
 	 * : Also scan the database (options and posts) for injected code. On by default for --full and --baseline; use --no-database to skip it, or --database to add it to a quick scan.
 	 *
+	 * [--isolated]
+	 * : Not available here: a scan where other plugins and the theme cannot run has to start before WordPress loads them. Use the standalone runner instead: php wp-content/plugins/wp-cyber-security/bin/cron.php --isolated [--full]
+	 *
 	 * ## EXAMPLES
 	 *
 	 *     $ wp wpcybersec scan
@@ -234,6 +237,15 @@ class Cli {
 	 */
 	public function scan( $args, $assoc_args ) {
 		unset( $args );
+		if ( isset( $assoc_args['isolated'] ) ) {
+			\WP_CLI::error(
+				sprintf(
+					/* translators: %s: command */
+					__( 'WP-CLI has already loaded the active plugins and the theme, so this scan cannot isolate them. Run the isolated scan with the standalone runner: %s', 'wp-cyber-security' ),
+					'php ' . WPCYBERSEC_DIR . 'bin/cron.php --isolated --full --wp=' . untrailingslashit( ABSPATH )
+				)
+			);
+		}
 		$job      = $this->service( 'scan_job' );
 		$full     = (bool) $this->flag( $assoc_args, 'full', false );
 		$baseline = (bool) $this->flag( $assoc_args, 'baseline', false );
@@ -329,6 +341,51 @@ class Cli {
 			return;
 		}
 		\WP_CLI::success( __( 'Scan complete.', 'wp-cyber-security' ) );
+	}
+
+	/* ------------------------------------------------------------------ */
+	/* report                                                              */
+	/* ------------------------------------------------------------------ */
+
+	/**
+	 * Creates the security report: one self-contained HTML file with the scan
+	 * results, open items with their code, settings, environment checks and
+	 * recent activity. Secret values are hidden and email addresses shortened,
+	 * so it is safe to send to a developer.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--file=<path>]
+	 * : Write the report to this file. Without it, the HTML is printed (redirect it to a file).
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     $ wp wpcybersec report --file=/tmp/security-report.html
+	 *     $ wp wpcybersec report > report.html
+	 *
+	 * @param array $args       Positional arguments.
+	 * @param array $assoc_args Associative arguments.
+	 */
+	public function report( $args, $assoc_args ) {
+		unset( $args );
+		$html = ( new Site_Report() )->build();
+		$file = (string) $this->flag( $assoc_args, 'file', '' );
+		if ( '' === $file ) {
+			\WP_CLI::line( $html );
+			return;
+		}
+		if ( is_dir( $file ) ) {
+			$file = trailingslashit( $file ) . Site_Report::filename();
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- CLI output file chosen by the operator.
+		if ( false === @file_put_contents( $file, $html ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			/* translators: %s: file path */
+			\WP_CLI::error( sprintf( __( 'Could not write %s.', 'wp-cyber-security' ), $file ) );
+		}
+		@chmod( $file, 0600 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_system_operations_chmod
+		wpcybersec()->logger->log( 'report_downloaded', __( 'Created the security report with WP-CLI.', 'wp-cyber-security' ) );
+		/* translators: 1: file path, 2: size */
+		\WP_CLI::success( sprintf( __( 'Report written to %1$s (%2$s).', 'wp-cyber-security' ), $file, size_format( strlen( $html ), 1 ) ) );
 	}
 
 	/* ------------------------------------------------------------------ */

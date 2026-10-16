@@ -17,7 +17,7 @@
 defined( 'ABSPATH' ) || exit;
 
 define( 'WPCYBERSEC_VERSION', '1.0.0' );
-define( 'WPCYBERSEC_DB_VERSION', '3' );
+define( 'WPCYBERSEC_DB_VERSION', '4' ); // 4: manifest mtime index (Reports > Recent changes).
 define( 'WPCYBERSEC_FILE', __FILE__ );
 define( 'WPCYBERSEC_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPCYBERSEC_URL', plugin_dir_url( __FILE__ ) );

@@ -10,6 +10,7 @@ namespace WPCyberSecurity\Admin;
 use WPCyberSecurity\Db_Scanner;
 use WPCyberSecurity\Decisions;
 use WPCyberSecurity\Diff;
+use WPCyberSecurity\Recent_Changes;
 use WPCyberSecurity\Store;
 use WPCyberSecurity\User_Watch;
 
@@ -60,6 +61,7 @@ class Reports_Page {
 			'threats'    => array( __( 'Threats', 'wp-cyber-security' ), 'warning', 'threats' ),
 			'quarantine' => array( __( 'Quarantine', 'wp-cyber-security' ), 'lock', 'quarantined' ),
 			'history'    => array( __( 'History', 'wp-cyber-security' ), 'backup', '' ),
+			'recent'     => array( __( 'Recent changes', 'wp-cyber-security' ), 'calendar-alt', '' ),
 			'allowlist'  => array( __( 'Allowlist', 'wp-cyber-security' ), 'yes-alt', '' ),
 			'activity'   => array( __( 'Activity', 'wp-cyber-security' ), 'list-view', '' ),
 		);
@@ -75,8 +77,13 @@ class Reports_Page {
 		$this->read_request();
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only routing.
-		if ( isset( $_GET['view'] ) && 'changes' === sanitize_key( wp_unslash( $_GET['view'] ) ) ) {
+		$view = isset( $_GET['view'] ) ? sanitize_key( wp_unslash( $_GET['view'] ) ) : '';
+		if ( 'changes' === $view ) {
 			$this->render_changes();
+			return;
+		}
+		if ( 'file' === $view ) {
+			$this->render_file_view();
 			return;
 		}
 
@@ -84,6 +91,7 @@ class Reports_Page {
 
 		$actions  = '<a class="button" href="' . esc_url( Admin::page_url( Admin::PAGE_DASHBOARD ) ) . '"><span class="dashicons dashicons-dashboard" aria-hidden="true"></span> ' . esc_html__( 'Dashboard', 'wp-cyber-security' ) . '</a>';
 		$actions .= '<a class="button" href="' . esc_url( Admin::page_url( Admin::PAGE_SETTINGS ) ) . '"><span class="dashicons dashicons-admin-generic" aria-hidden="true"></span> ' . esc_html__( 'Settings', 'wp-cyber-security' ) . '</a>';
+		$actions .= Admin::report_button();
 		Admin::header(
 			__( 'Reports', 'wp-cyber-security' ),
 			__( 'Review what was held or found and decide. Anything you allow is remembered permanently.', 'wp-cyber-security' ),
@@ -99,6 +107,9 @@ class Reports_Page {
 				break;
 			case 'activity':
 				$this->render_activity_tab();
+				break;
+			case 'recent':
+				$this->render_recent_tab();
 				break;
 			default:
 				$this->render_items_tab();
@@ -135,6 +146,8 @@ class Reports_Page {
 		$type     = isset( $_GET['type'] ) ? sanitize_key( wp_unslash( $_GET['type'] ) ) : '';
 		$kind     = isset( $_GET['kind'] ) ? sanitize_key( wp_unslash( $_GET['kind'] ) ) : '';
 		$event    = isset( $_GET['event'] ) ? sanitize_key( wp_unslash( $_GET['event'] ) ) : '';
+		$days     = isset( $_GET['days'] ) ? absint( wp_unslash( $_GET['days'] ) ) : 7;
+		$show     = isset( $_GET['show'] ) ? sanitize_key( wp_unslash( $_GET['show'] ) ) : '';
 		// phpcs:enable
 
 		$this->filters = array(
@@ -142,6 +155,8 @@ class Reports_Page {
 			'type'     => in_array( $type, array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE, Store::TYPE_THREAT, Store::TYPE_USER ), true ) ? $type : '',
 			'kind'     => in_array( $kind, array( 'hash', 'install', 'db' ), true ) ? $kind : '',
 			'event'    => substr( $event, 0, 50 ),
+			'days'     => in_array( $days, Recent_Changes::WINDOWS, true ) ? $days : 7,
+			'show'     => 'no_updates' === $show ? 'no_updates' : '',
 		);
 	}
 
@@ -160,6 +175,10 @@ class Reports_Page {
 			'kind'     => $this->filters['kind'],
 			'event'    => $this->filters['event'],
 		);
+		if ( 'recent' === $this->tab ) {
+			$args['days'] = 7 === $this->filters['days'] ? '' : $this->filters['days'];
+			$args['show'] = $this->filters['show'];
+		}
 		if ( isset( $_GET['orderby'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 			$args['orderby'] = $this->orderby;
 			$args['order']   = strtolower( $this->order );
@@ -880,6 +899,11 @@ class Reports_Page {
 			return array( $who, __( 'Database scan', 'wp-cyber-security' ) );
 		}
 
+		if ( 'review' === $source ) {
+			/* translators: %s: user display name */
+			$who = '' !== $user ? sprintf( __( 'Reported by %s', 'wp-cyber-security' ), $user ) : __( 'Reported by an administrator', 'wp-cyber-security' );
+			return array( $who, __( 'Recent changes', 'wp-cyber-security' ) );
+		}
 		if ( 'scan' === $source || ( '' === $source && in_array( $item['type'], array( Store::TYPE_FILE, Store::TYPE_THREAT ), true ) ) ) {
 			/* translators: %s: user display name */
 			$who     = '' !== $user ? sprintf( __( 'Scan by %s', 'wp-cyber-security' ), $user ) : __( 'Scheduled scan', 'wp-cyber-security' );
@@ -1750,6 +1774,337 @@ class Reports_Page {
 			echo '<nav class="wpcs-pagination" aria-label="' . esc_attr__( 'Pages', 'wp-cyber-security' ) . '">' . wp_kses_post( (string) $links ) . '</nav>';
 		}
 		echo '</div>';
+	}
+
+	/* ------------------------------------------------------------------ */
+	/* Recent changes tab (incident mode)                                  */
+	/* ------------------------------------------------------------------ */
+
+	/**
+	 * Executable and config files modified in the last 7, 14 or 30 days,
+	 * whatever the baseline says, with what explains each change.
+	 */
+	private function render_recent_tab() {
+		echo '<div class="wpcs-notice"><span class="dashicons dashicons-calendar-alt" aria-hidden="true"></span><div><p>'
+			. esc_html__( 'Scans compare files with the baseline, so a file that was already infected when the baseline was recorded looks normal; this list shows every PHP, script and configuration file modified recently, whatever the baseline says, so you can check what nothing explains.', 'wp-cyber-security' )
+			. '</p></div></div>';
+
+		$recent   = new Recent_Changes();
+		$per_page = 50;
+		try {
+			$result = $recent->query(
+				array(
+					'days'         => $this->filters['days'],
+					'search'       => $this->search,
+					'hide_updates' => 'no_updates' === $this->filters['show'],
+					'page'         => $this->paged,
+					'per_page'     => $per_page,
+				)
+			);
+		} catch ( \Throwable $e ) {
+			Admin::debug_log( $e );
+			$this->notice( 'bad', 'warning', __( 'The list could not be loaded. The plugin database tables may be missing; deactivate and activate the plugin to recreate them.', 'wp-cyber-security' ) );
+			return;
+		}
+
+		$last = Admin::call( 'scan_job', 'last_result', array(), array() );
+		$when = is_array( $last ) && ! empty( $last['finished_at'] ) ? (int) $last['finished_at'] : 0;
+		echo '<p class="wpcs-muted wpcs-tab-hint">' . esc_html(
+			$when
+				/* translators: %s: date and time of the last scan */
+				? sprintf( __( 'Modification times as the last scan saw them (%s). Run a quick scan first to include changes made since then.', 'wp-cyber-security' ), Admin::datetime( $when ) )
+				: __( 'No scan has finished yet, so there is nothing to list. Run a scan from the dashboard first.', 'wp-cyber-security' )
+		) . '</p>';
+
+		echo '<div class="wpcs-toolbar"><div></div>';
+		echo '<form class="wpcs-filters" method="get" action="' . esc_url( admin_url( 'admin.php' ) ) . '">';
+		echo '<input type="hidden" name="page" value="' . esc_attr( Admin::PAGE_REPORTS ) . '"><input type="hidden" name="tab" value="recent">';
+		$days = array();
+		foreach ( Recent_Changes::WINDOWS as $n ) {
+			/* translators: %s: number of days */
+			$days[ (string) $n ] = sprintf( _n( 'Last %s day', 'Last %s days', $n, 'wp-cyber-security' ), number_format_i18n( $n ) );
+		}
+		$this->select( 'days', (string) $this->filters['days'], $days, __( 'Time window', 'wp-cyber-security' ) );
+		$this->select(
+			'show',
+			$this->filters['show'],
+			array(
+				''           => __( 'All changed files', 'wp-cyber-security' ),
+				'no_updates' => __( 'Hide files changed by updates', 'wp-cyber-security' ),
+			),
+			__( 'Show', 'wp-cyber-security' )
+		);
+		$this->search_box( __( 'Search path', 'wp-cyber-security' ) );
+		echo '</form></div>';
+
+		$rows  = (array) $result['rows'];
+		$total = (int) $result['total'];
+		if ( $result['capped'] ) {
+			$this->notice(
+				'warn',
+				'info-outline',
+				sprintf(
+					/* translators: %s: number of files */
+					__( 'More than %s files changed in this window; only the newest are listed. Choose a shorter window or search for a folder.', 'wp-cyber-security' ),
+					number_format_i18n( Recent_Changes::SCAN_CAP )
+				)
+			);
+		}
+		if ( ! $rows ) {
+			if ( '' !== $this->search || $this->filters['show'] ) {
+				$this->empty_state( 'search', __( 'No matching files', 'wp-cyber-security' ), __( 'No changed file matches the current search or filter.', 'wp-cyber-security' ), '<a class="button" href="' . esc_url( Admin::page_url( Admin::PAGE_REPORTS, array( 'tab' => 'recent', 'days' => $this->filters['days'] ) ) ) . '">' . esc_html__( 'Show everything', 'wp-cyber-security' ) . '</a>' );
+			} else {
+				$this->empty_state( 'yes-alt', __( 'No recent changes', 'wp-cyber-security' ), __( 'No PHP, script or configuration file was modified in this time window.', 'wp-cyber-security' ) );
+			}
+			return;
+		}
+
+		$unexplained = 0;
+		$html        = '';
+		foreach ( $rows as $row ) {
+			$why = $recent->explain( $row );
+			if ( 'none' === $why['kind'] ) {
+				++$unexplained;
+			}
+			$html .= $this->recent_row( $row, $why );
+		}
+
+		if ( $unexplained ) {
+			$this->notice(
+				'warn',
+				'warning',
+				sprintf(
+					/* translators: %s: number of files */
+					_n( '%s file on this page changed without an update, an official checksum or your approval to explain it. Look at its code; if you do not recognise the change, report it for review.', '%s files on this page changed without an update, an official checksum or your approval to explain them. Look at their code; if you do not recognise a change, report it for review.', $unexplained, 'wp-cyber-security' ),
+					number_format_i18n( $unexplained )
+				)
+			);
+		}
+
+		echo '<div class="wpcs-card wpcs-card--flush wpcs-table-card"><table class="widefat wpcs-table wpcs-recent">';
+		echo '<thead><tr>';
+		echo '<th scope="col" class="column-file">' . esc_html__( 'File', 'wp-cyber-security' ) . '</th>';
+		echo '<th scope="col" class="column-modified">' . esc_html__( 'Modified', 'wp-cyber-security' ) . '</th>';
+		echo '<th scope="col" class="column-size">' . esc_html__( 'Size', 'wp-cyber-security' ) . '</th>';
+		echo '<th scope="col" class="column-explained">' . esc_html__( 'Explained by', 'wp-cyber-security' ) . '</th>';
+		echo '<th scope="col" class="column-actions">' . esc_html__( 'Actions', 'wp-cyber-security' ) . '</th>';
+		echo '</tr></thead><tbody>';
+		echo $html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- built with escaping in recent_row().
+		echo '</tbody></table></div>';
+
+		$this->render_pagination( $total, $per_page );
+	}
+
+	/**
+	 * One row of the Recent changes table.
+	 *
+	 * @param array $row Recent_Changes::query() row.
+	 * @param array $why Recent_Changes::explain() result.
+	 * @return string HTML.
+	 */
+	private function recent_row( array $row, array $why ) {
+		$rel   = (string) $row['path'];
+		$mtime = (int) $row['mtime'];
+		$none  = 'none' === $why['kind'];
+		$icons = array(
+			'update'   => array( 'update', 'ok' ),
+			'checksum' => array( 'yes-alt', 'ok' ),
+			'allowed'  => array( 'yes-alt', 'ok' ),
+			'reported' => array( 'clock', 'pending' ),
+			'none'     => array( 'warning', 'high' ),
+		);
+		$icon  = isset( $icons[ $why['kind'] ] ) ? $icons[ $why['kind'] ] : $icons['none'];
+
+		$html  = '<tr class="wpcs-recent-row' . ( $none ? ' is-unexplained' : '' ) . '">';
+		$html .= '<td class="column-file">' . $this->path_html( $rel );
+		$meta  = array();
+		if ( Store::STATE_THREAT === $row['state'] ) {
+			$meta[] = '<span class="wpcs-chip wpcs-chip--warn">' . esc_html__( 'reported as a threat', 'wp-cyber-security' ) . '</span>';
+		} elseif ( Store::STATE_PENDING === $row['state'] ) {
+			$meta[] = '<span class="wpcs-chip">' . esc_html__( 'waiting for approval', 'wp-cyber-security' ) . '</span>';
+		}
+		if ( ! $why['exists'] ) {
+			$meta[] = '<span class="wpcs-chip">' . esc_html__( 'deleted since the last scan', 'wp-cyber-security' ) . '</span>';
+		} elseif ( $why['changed'] ) {
+			$meta[] = '<span class="wpcs-chip wpcs-chip--warn">' . esc_html__( 'changed again since the last scan', 'wp-cyber-security' ) . '</span>';
+		}
+		if ( $meta ) {
+			$html .= '<span class="wpcs-sub wpcs-meta">' . implode( ' ', $meta ) . '</span>';
+		}
+		$html .= '</td>';
+		$html .= '<td class="column-modified"><span title="' . esc_attr( Admin::datetime( $mtime ) ) . '">' . esc_html( Admin::ago( $mtime ) ) . '</span><span class="wpcs-sub">' . esc_html( Admin::datetime( $mtime ) ) . '</span></td>';
+		$html .= '<td class="column-size">' . esc_html( size_format( (int) $row['size'], (int) $row['size'] >= KB_IN_BYTES ? 1 : 0 ) ) . '</td>';
+		$html .= '<td class="column-explained"><span class="wpcs-badge wpcs-badge--' . esc_attr( $icon[1] ) . ' wpcs-explained"><span class="dashicons dashicons-' . esc_attr( $icon[0] ) . '" aria-hidden="true"></span>' . esc_html( $why['label'] ) . '</span></td>';
+
+		$html .= '<td class="column-actions"><div class="wpcs-row-links">';
+		if ( is_array( $why['item'] ) ) {
+			$html .= '<a href="' . esc_url( $this->changes_url( $why['item'], 'recent' ) ) . '"><span class="dashicons dashicons-visibility" aria-hidden="true"></span>' . esc_html__( 'Open the report', 'wp-cyber-security' ) . '</a>';
+		} elseif ( $why['exists'] ) {
+			$html .= '<a href="' . esc_url( $this->file_url( $rel ) ) . '"><span class="dashicons dashicons-editor-code" aria-hidden="true"></span>' . esc_html__( 'View code', 'wp-cyber-security' ) . '</a>';
+			if ( $none ) {
+				$html .= $this->report_form( $rel, 'button-link' );
+			}
+		}
+		$html .= '</div></td></tr>';
+		return $html;
+	}
+
+	/**
+	 * Address of the read-only code view of a monitored file.
+	 *
+	 * @param string $rel Relative path.
+	 * @return string Unescaped URL.
+	 */
+	private function file_url( $rel ) {
+		return Admin::page_url(
+			Admin::PAGE_REPORTS,
+			array(
+				'view' => 'file',
+				'path' => $rel,
+				'days' => 7 === $this->filters['days'] ? '' : $this->filters['days'],
+			)
+		);
+	}
+
+	/**
+	 * "Report for review" button (admin-post with nonce).
+	 *
+	 * @param string $rel   Relative path.
+	 * @param string $class Button class.
+	 * @return string HTML.
+	 */
+	private function report_form( $rel, $class ) {
+		return '<form class="wpcs-inline-form" method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '">'
+			. '<input type="hidden" name="action" value="wpcybersec_recent_report">'
+			. '<input type="hidden" name="path" value="' . esc_attr( $rel ) . '">'
+			. wp_nonce_field( 'wpcybersec_recent_report', '_wpnonce', true, false )
+			. '<button type="submit" class="' . esc_attr( $class ) . ' wpcs-report-file" title="' . esc_attr__( 'Add this file to Pending approvals, where you can allow or quarantine it', 'wp-cyber-security' ) . '"><span class="dashicons dashicons-flag" aria-hidden="true"></span>' . esc_html__( 'Report for review', 'wp-cyber-security' ) . '</button>'
+			. '</form>';
+	}
+
+	/**
+	 * Read-only code of a monitored file that has no report
+	 * (view=file&path=<relative path>): the matches, and the content (or what
+	 * changed since the last trusted copy, or since the official release),
+	 * secrets hidden.
+	 */
+	private function render_file_view() {
+		// phpcs:disable WordPress.Security.NonceVerification.Recommended -- read-only view.
+		$rel = isset( $_GET['path'] ) && is_string( $_GET['path'] ) ? substr( (string) wp_unslash( $_GET['path'] ), 0, 4096 ) : ''; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- validated by Recent_Changes::resolve().
+		// phpcs:enable
+		$this->tab = 'recent';
+		$back      = '<a class="button" href="' . esc_url( $this->view_url() ) . '"><span class="dashicons dashicons-arrow-left-alt" aria-hidden="true"></span> '
+			. esc_html__( 'Back to Recent changes', 'wp-cyber-security' ) . '</a>';
+
+		echo '<div class="wrap wpcs-wrap wpcs-reports wpcs-changes">';
+		$file = Recent_Changes::resolve( $rel );
+		if ( is_wp_error( $file ) ) {
+			Admin::header( __( 'File contents', 'wp-cyber-security' ), '', $back );
+			$this->empty_state( 'search', __( 'File not available', 'wp-cyber-security' ), $file->get_error_message() );
+			echo '</div>';
+			return;
+		}
+
+		// A file with an open report is shown in its report, with the decision buttons.
+		foreach ( array( Store::TYPE_THREAT, Store::TYPE_FILE ) as $type ) {
+			$open = Admin::call( 'store', 'item_find_open', array( $type, $file['rel'] ), null );
+			if ( is_array( $open ) ) {
+				$back .= '<a class="button" href="' . esc_url( $this->changes_url( $open, 'recent' ) ) . '">' . esc_html__( 'Open the report', 'wp-cyber-security' ) . '</a>';
+				break;
+			}
+		}
+
+		$item = Recent_Changes::file_item( $file );
+		try {
+			$result = Diff::for_item( $item, array( 'layout' => 'split' === get_user_meta( get_current_user_id(), self::META_LAYOUT, true ) ? 'split' : 'unified' ) );
+		} catch ( \Throwable $e ) {
+			Admin::debug_log( $e );
+			$result = array(
+				'mode'          => 'unavailable',
+				'reason_text'   => __( 'The file could not be read because of an unexpected error. Try again in a moment.', 'wp-cyber-security' ),
+				'base_label'    => '',
+				'current_label' => '',
+				'added'         => 0,
+				'removed'       => 0,
+				'html'          => '',
+				'notes'         => array(),
+				'hit_lines'     => array(),
+				'layout'        => 'unified',
+			);
+		}
+
+		Admin::header( 'diff' === $result['mode'] ? __( 'What changed', 'wp-cyber-security' ) : __( 'File contents', 'wp-cyber-security' ), $file['rel'], $back );
+
+		$why   = ( new Recent_Changes() )->explain( $file['row'] );
+		$mtime = (int) $file['row']['mtime'];
+		echo '<section class="wpcs-card wpcs-change-item wpcs-sev-' . esc_attr( (string) (int) $item['severity'] ) . '">';
+		echo '<div class="wpcs-change-item__badges"><span class="wpcs-badge wpcs-type wpcs-type--file"><span class="dashicons dashicons-media-code" aria-hidden="true"></span>' . esc_html__( 'File', 'wp-cyber-security' ) . '</span>';
+		$tone = 'none' === $why['kind'] ? 'high' : ( 'reported' === $why['kind'] ? 'pending' : 'ok' );
+		echo '<span class="wpcs-badge wpcs-badge--' . esc_attr( $tone ) . '">' . esc_html( $why['label'] ) . '</span></div>';
+		echo '<h2 class="wpcs-change-item__path">' . $this->path_html( $file['rel'] ) . '</h2>'; // phpcs:ignore WordPress.Security.EscapeOutput -- built with escaping.
+		$facts = array(
+			__( 'Modified', 'wp-cyber-security' ) => '<span title="' . esc_attr( Admin::datetime( $mtime ) ) . '">' . esc_html( Admin::ago( $mtime ) ) . '</span><span class="wpcs-sub">' . esc_html( Admin::datetime( $mtime ) ) . '</span>',
+			__( 'Size', 'wp-cyber-security' )     => esc_html( size_format( (int) $item['size'], (int) $item['size'] >= KB_IN_BYTES ? 1 : 0 ) ),
+		);
+		if ( '' !== (string) $item['sha256'] ) {
+			$facts[ __( 'SHA-256', 'wp-cyber-security' ) ] = $this->short_hash( (string) $item['sha256'] );
+		}
+		echo '<dl class="wpcs-change-item__facts">';
+		foreach ( $facts as $label => $value ) {
+			echo '<div><dt>' . esc_html( $label ) . '</dt><dd>' . $value . '</dd></div>'; // phpcs:ignore WordPress.Security.EscapeOutput -- built with escaping.
+		}
+		echo '</dl>';
+		if ( 'none' === $why['kind'] && ! is_array( $why['item'] ) ) {
+			echo '<div class="wpcs-change-item__actions"><p class="wpcs-muted">' . esc_html__( 'Nothing explains this change. If you do not recognise it, report the file: it then waits in Pending approvals, where you can allow it or move it to quarantine.', 'wp-cyber-security' ) . '</p>'
+				. $this->report_form( $file['rel'], 'button button-primary' ) . '</div>'; // phpcs:ignore WordPress.Security.EscapeOutput -- built with escaping.
+		}
+		echo '</section>';
+
+		$this->render_change_hits( $item, $result );
+		$this->render_file_diff( $result );
+		echo '</div>';
+	}
+
+	/**
+	 * Code card of the read-only file view (no layout links: they belong to items).
+	 *
+	 * @param array $result Diff::for_item() result.
+	 */
+	private function render_file_diff( array $result ) {
+		$mode = (string) $result['mode'];
+		echo '<section class="wpcs-card wpcs-diff-card" id="wpcs-diff"><div class="wpcs-diff-head"><div class="wpcs-diff-head__text">';
+		if ( 'diff' === $mode ) {
+			echo '<h2 class="wpcs-card__title"><span class="dashicons dashicons-editor-code" aria-hidden="true"></span>' . esc_html__( 'Line by line', 'wp-cyber-security' )
+				. ' <span class="wpcs-diffstat"><span class="wpcs-diffstat__add">+' . esc_html( number_format_i18n( (int) $result['added'] ) ) . '</span>'
+				. '<span class="wpcs-diffstat__del">-' . esc_html( number_format_i18n( (int) $result['removed'] ) ) . '</span></span></h2>';
+			echo '<p class="wpcs-diff-head__compare"><span class="wpcs-diff-head__base">' . esc_html( (string) $result['base_label'] ) . '</span>'
+				. '<span class="dashicons dashicons-arrow-right-alt" aria-hidden="true"></span><span class="wpcs-diff-head__current">' . esc_html( (string) $result['current_label'] ) . '</span></p>';
+		} else {
+			echo '<h2 class="wpcs-card__title"><span class="dashicons dashicons-media-code" aria-hidden="true"></span>' . esc_html( 'content' === $mode ? __( 'Full content', 'wp-cyber-security' ) : __( 'Nothing to show', 'wp-cyber-security' ) ) . '</h2>';
+		}
+		echo '</div></div>';
+		if ( 'content' === $mode ) {
+			// The item reasons speak of reports; for a file without one, say it plainly.
+			$this->notice(
+				'info',
+				'info-outline',
+				isset( $result['reason'] ) && 'too_large_to_diff' === $result['reason']
+					? (string) $result['reason_text']
+					: __( 'No earlier version of this file is stored and it is not an official WordPress.org file that could be compared, so its full content is shown.', 'wp-cyber-security' )
+			);
+		}
+		foreach ( isset( $result['notes'] ) ? (array) $result['notes'] : array() as $note ) {
+			$tone = isset( $note[0] ) ? (string) $note[0] : 'info';
+			$icon = 'warn' === $tone ? 'warning' : ( 'ok' === $tone ? 'yes-alt' : 'info-outline' );
+			$this->notice( $tone, $icon, isset( $note[1] ) ? (string) $note[1] : '' );
+		}
+		if ( 'unavailable' === $mode ) {
+			echo '<div class="wpcs-empty wpcs-empty--compact"><span class="dashicons dashicons-media-code" aria-hidden="true"></span><p>' . esc_html( (string) $result['reason_text'] ) . '</p></div>';
+		} elseif ( '' !== (string) $result['html'] ) {
+			// Built by Diff with every line passed through esc_html() after redaction.
+			echo '<div class="wpcs-diff-body">' . $result['html'] . '</div>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+		}
+		echo '</section>';
 	}
 
 	/* ------------------------------------------------------------------ */

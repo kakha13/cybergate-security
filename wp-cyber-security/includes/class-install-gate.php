@@ -306,8 +306,15 @@ class Install_Gate {
 		if ( ! is_array( $hook_extra ) ) {
 			return;
 		}
+		$dirs_before  = count( $this->rebaseline_dirs );
+		$files_before = count( $this->rebaseline_files );
 		try {
 			$this->collect_rebaseline_targets( $upgrader, $hook_extra );
+			// Remembered for Reports > Recent changes ("<Plugin> update" explains these files).
+			$touched = array_merge( array_slice( $this->rebaseline_dirs, $dirs_before ), array_slice( $this->rebaseline_files, $files_before ) );
+			if ( $touched ) {
+				Recent_Changes::remember_update( $touched, isset( $hook_extra['action'] ) && 'install' === $hook_extra['action'] ? 'install' : 'update' );
+			}
 		} catch ( \Throwable $e ) {
 			$this->log(
 				'rebaseline_error',

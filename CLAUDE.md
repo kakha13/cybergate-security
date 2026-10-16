@@ -7,7 +7,8 @@ WordPress security plugin: full-site malware scan, holds every new upload/instal
 - `scripts/build.sh --wporg` - same plus WordPress.org checks (needs real `Contributors:` in readme.txt)
 - `scripts/build.sh --svn PATH` - sync trunk/tags/assets into a wp.org SVN checkout (prints svn commands, does not commit)
 - `php wp-cyber-security/bin/build-checksums.php` - regenerate `checksums.json`; run after ANY plugin file change, or the plugin flags its own edited files as tampered
-- `php wp-cyber-security/bin/cron.php [--full|--baseline]` - run a scan to completion from the CLI (inside a WP install)
+- `php wp-cyber-security/bin/cron.php [--full|--baseline] [--isolated]` - run a scan to completion from the CLI (inside a WP install); `--isolated` loads no other plugin and no theme (mu-plugins still load)
+- `wp wpcybersec report --file=report.html` - the downloadable security report (also Reports > Download report)
 - Lint: `for f in $(find wp-cyber-security -name '*.php'); do php -l $f; done` and `node --check` on `assets/js/*.js`
 
 ## Code rules

@@ -57,6 +57,7 @@ class Dashboard_Page {
 		$actions .= '<button type="button" class="button" data-wpcs-scan data-mode="full" data-malware="1">'
 			. esc_html__( 'Full malware scan', 'wp-cyber-security' ) . '</button>';
 		$actions .= '<a class="button" href="' . esc_url( Admin::page_url( Admin::PAGE_REPORTS ) ) . '">' . esc_html__( 'Reports', 'wp-cyber-security' ) . '</a>';
+		$actions .= Admin::report_button();
 
 		Admin::header(
 			__( 'WP Cyber Security', 'wp-cyber-security' ),
