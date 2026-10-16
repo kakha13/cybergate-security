@@ -1,6 +1,6 @@
-# WP Cyber Security - architecture and module contracts
+# CyberGate Security - architecture and module contracts
 
-Plugin folder: `wp-cyber-security/` (slug `wp-cyber-security`, text domain `wp-cyber-security`).
+Plugin folder: `cybergate-security/` (slug `cybergate-security`, text domain `cybergate-security`).
 Namespace `WPCyberSecurity\`, admin classes in `WPCyberSecurity\Admin\`. Prefix for options,
 hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0+. No build step.
 
@@ -29,12 +29,17 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
   core services yourself except `new Storage()` in code that may run before boot.
 - Escape all output (`esc_html`, `esc_attr`, `esc_url`, `wp_kses_post`), check capability
   `manage_options` and nonces on every form/AJAX/admin-post handler.
-- Translatable strings use text domain `wp-cyber-security`. **Never use em dashes or en dashes**
+- Translatable strings use text domain `cybergate-security`. **Never use em dashes or en dashes**
   in any string or comment; use a plain hyphen.
 - Icons: Dashicons only (`<span class="dashicons dashicons-shield"></span>`). No emojis.
 - Datetimes in the DB are UTC; display with `get_date_from_gmt( $utc, get_option('date_format') . ' ' . get_option('time_format') )`.
 - PHP 7.4 compatible syntax: no `match`, no nullsafe `?->`, no named arguments, no union types,
   no `str_contains` (use `false !== strpos`).
+- File operations go through `Fs` (WordPress filesystem API): `delete`, `rmdir`, `mkdir`, `chmod`,
+  `is_writable`, `touch`, `move` (never overwrites, never leaves two copies) and `replace`
+  (atomic temp file + rename). Raw PHP file functions stay only where WordPress is not loaded
+  (`guard/guard.php`, `bin/cron.php`) or for streams (`fopen`/`flock`), each with a
+  `phpcs:ignore ... -- reason` comment. The release must pass Plugin Check with no errors.
 
 ## Services (`wpcybersec()->...`)
 
@@ -61,7 +66,7 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
 | sysadmin | `Sysadmin_Tools` | setup |
 | admin | `Admin\Admin` | admin UI |
 
-Static helpers: `Paths` (core), `Guard_Config` (core), `Installer` (core), `Cli` (setup),
+Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` (core), `Cli` (setup),
 `Signatures` (engine), `Admin\Assets` (core), `Diff` (changes view). `Originals`,
 `Recent_Changes` and `Site_Report` are created on demand (`new Originals()`, ...).
 
@@ -250,7 +255,10 @@ Files: `includes/class-scanner.php`, `includes/class-signatures.php`,
 - `clamav_available()`: bool, `clamav_scan($path)`: null (not available) or hits.
 
 ### `Signatures`
-- static `all()`: list of `{ id, title, severity, pattern (PCRE), targets ('php'|'js'|'html'|'any'|'image'|'htaccess') }`.
+- static `all()`: list of `{ id, title, severity, pattern (PCRE), targets ('php'|'js'|'html'|'any'|'image'|'htaccess') }`
+  plus optional keys documented in the class header (`needle`, `requires`, `unless`, ...).
+  `unless` was called `exclude`; the old key is still read for signatures added through the
+  `wpcybersec_signatures` filter.
   Low false positives are critical (must stay quiet on WooCommerce, Elementor, Yoast, Polylang).
 
 ### `File_Monitor`
@@ -361,7 +369,8 @@ Files: `includes/class-upload-gate.php`, `includes/class-install-gate.php`,
 - `import_spool()`: int imported.
 
 ### `guard/guard.php`
-Standalone (no WordPress). Defines `WPCYBERSEC_GUARD_ACTIVE`. Reads `WPCYBERSEC_GUARD_CONFIG`
+Standalone (no WordPress). Exits when it is itself the requested script (direct access);
+included or prepended it runs normally. Defines `WPCYBERSEC_GUARD_ACTIVE`. Reads `WPCYBERSEC_GUARD_CONFIG`
 (set by the bootstrap). Returns immediately if disabled or `$_FILES` empty or the request path
 matches `exempt`. For each uploaded file (nested `$_FILES` arrays too) with no error:
 sha256 the tmp file; allowlisted -> pass; else copy into `quarantine_dir`, append a JSON line

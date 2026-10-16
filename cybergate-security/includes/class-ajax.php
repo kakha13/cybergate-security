@@ -1,0 +1,260 @@
+<?php
+/**
+ * AJAX endpoints used by the dashboard, reports page and wizard.
+ *
+ * @package WPCyberSecurity
+ */
+
+namespace WPCyberSecurity;
+
+defined( 'ABSPATH' ) || exit;
+
+/**
+ * Every endpoint: action "wpcybersec_<name>", nonce "wpcybersec_ajax"
+ * (field _ajax_nonce), capability Admin::cap() (manage_options, or
+ * manage_network_options on multisite). Responses use
+ * wp_send_json_success( data ) / wp_send_json_error( { message } ).
+ *
+ *   scan_start   mode=incremental|full|baseline, malware=0|1  -> scan status + { requested, attached, notice }
+ *                (attached = true when another scan was already running and is returned instead)
+ *   scan_tick                                                  -> scan status
+ *   scan_status                                                -> scan status
+ *   scan_cancel                                                -> scan status
+ *   item_action  do=<action>, id=<int>                         -> { item (match snippets redacted), counts, message }
+ *   bulk_action  do=<action>, ids[]=<int>                      -> { done, errors, counts }
+ *   counts                                                     -> counts
+ *   unlock       minutes=<int>                                 -> { unlocked_until }
+ *   lock                                                       -> { unlocked_until: 0 }
+ *   diff_summary id=<int>                                      -> Diff::summary() { mode, added, removed, base_label, text }
+ */
+class Ajax {
+
+	const NONCE = 'wpcybersec_ajax';
+
+	/** Job states in which the scan still needs ticks. */
+	const RUNNING = array( 'enumerating', 'processing', 'finishing' );
+
+	/**
+	 * Seconds after the last browser tick before cron takes over a scan that was
+	 * started here (for example when the tab is closed).
+	 */
+	const CRON_TAKEOVER = 90;
+
+	public function register() {
+		$endpoints = array( 'scan_start', 'scan_tick', 'scan_status', 'scan_cancel', 'item_action', 'bulk_action', 'counts', 'unlock', 'lock', 'diff_summary' );
+		foreach ( $endpoints as $endpoint ) {
+			add_action( 'wp_ajax_wpcybersec_' . $endpoint, array( $this, $endpoint ) );
+		}
+	}
+
+	/**
+	 * Nonce + capability gate.
+	 */
+	private function guard() {
+		if ( ! check_ajax_referer( self::NONCE, '_ajax_nonce', false ) ) {
+			wp_send_json_error( array( 'message' => __( 'Your session expired. Reload the page and try again.', 'cybergate-security' ) ), 403 );
+		}
+		if ( ! Admin\Admin::can() ) {
+			wp_send_json_error( array( 'message' => __( 'You are not allowed to do this.', 'cybergate-security' ) ), 403 );
+		}
+	}
+
+	/**
+	 * @param string $key     Request key.
+	 * @param string $default Default.
+	 * @return string
+	 */
+	private function param( $key, $default = '' ) {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified in guard().
+		return isset( $_POST[ $key ] ) ? sanitize_text_field( wp_unslash( $_POST[ $key ] ) ) : $default;
+	}
+
+	public function scan_start() {
+		$this->guard();
+		$mode = $this->param( 'mode', 'incremental' );
+		if ( ! in_array( $mode, array( 'incremental', 'full', 'baseline' ), true ) ) {
+			$mode = 'incremental';
+		}
+		$job    = wpcybersec()->scan_job;
+		$before = $job->status();
+		$opts   = array(
+			'mode'    => $mode,
+			'malware' => '1' === $this->param( 'malware', '1' ),
+			'trigger' => $this->param( 'trigger', 'manual' ),
+		);
+		$db     = $this->param( 'database', '' );
+		if ( '' !== $db ) {
+			// "Scan database" option; without it full and baseline scans include the database.
+			$opts['database'] = '1' === $db;
+		}
+		$id = $job->start( $opts );
+		if ( is_wp_error( $id ) ) {
+			wp_send_json_error( array( 'message' => $id->get_error_message() ) );
+		}
+		$status = $job->status();
+		$this->keep_alive( $status );
+
+		// Scan_Job::start() returns the id of a scan that is already running instead of starting a new one.
+		$attached            = isset( $before['state'], $before['id'] ) && in_array( (string) $before['state'], self::RUNNING, true ) && (string) $before['id'] === (string) $id;
+		$status['requested'] = $mode;
+		$status['attached']  = $attached;
+		$status['notice']    = '';
+		if ( $attached && (string) $status['mode'] !== $mode ) {
+			$status['notice'] = sprintf(
+				/* translators: 1: mode of the scan that is running, 2: mode of the scan that was asked for */
+				__( 'A %1$s scan is already running, so the %2$s scan could not start yet. Showing the running scan instead.', 'cybergate-security' ),
+				self::mode_label( (string) $status['mode'] ),
+				self::mode_label( $mode )
+			);
+		}
+		wp_send_json_success( $status );
+	}
+
+	public function scan_tick() {
+		$this->guard();
+		$budget = (float) wpcybersec()->settings->get( 'tick_seconds', 15 );
+		$status = wpcybersec()->scan_job->tick( min( 20.0, max( 3.0, $budget ) ) );
+		$this->keep_alive( $status );
+		wp_send_json_success( $status );
+	}
+
+	/**
+	 * Keeps one cron tick queued about CRON_TAKEOVER seconds ahead while a scan
+	 * runs, so a scan driven from the browser carries on in the background
+	 * (File_Monitor handles the hook and chains further ticks) when the page is
+	 * closed. While the browser keeps ticking, the event keeps moving forward and
+	 * never fires, so the browser and cron do not tick at the same time.
+	 *
+	 * @param array $status Scan status.
+	 */
+	private function keep_alive( array $status ) {
+		if ( ! in_array( isset( $status['state'] ) ? (string) $status['state'] : '', self::RUNNING, true ) ) {
+			return;
+		}
+		$hook = File_Monitor::TICK_HOOK;
+		$next = wp_next_scheduled( $hook );
+		// Rewriting the cron option on every tick is wasteful: only move the event when it is getting close.
+		if ( $next && ( $next - time() ) > self::CRON_TAKEOVER / 2 ) {
+			return;
+		}
+		if ( $next ) {
+			wp_unschedule_event( $next, $hook );
+		}
+		wp_schedule_single_event( time() + self::CRON_TAKEOVER, $hook );
+	}
+
+	/**
+	 * @param string $mode incremental | full | baseline.
+	 * @return string Human name of a scan mode.
+	 */
+	private static function mode_label( $mode ) {
+		switch ( $mode ) {
+			case 'baseline':
+				return __( 'baseline', 'cybergate-security' );
+			case 'full':
+				return __( 'full malware', 'cybergate-security' );
+			default:
+				return __( 'quick', 'cybergate-security' );
+		}
+	}
+
+	public function scan_status() {
+		$this->guard();
+		wp_send_json_success( wpcybersec()->scan_job->status() );
+	}
+
+	public function scan_cancel() {
+		$this->guard();
+		wpcybersec()->scan_job->cancel();
+		// Nothing left to continue in the background.
+		wp_clear_scheduled_hook( File_Monitor::TICK_HOOK );
+		wp_send_json_success( wpcybersec()->scan_job->status() );
+	}
+
+	public function item_action() {
+		$this->guard();
+		$action = $this->param( 'do' );
+		$id     = (int) $this->param( 'id', '0' );
+		$result = wpcybersec()->decisions->apply( $action, $id );
+		if ( is_wp_error( $result ) ) {
+			wp_send_json_error( array( 'message' => $result->get_error_message() ) );
+		}
+		$item = wpcybersec()->store->item_get( $id );
+		// Extra instructions for the admin (for example "upload the plugin ZIP again"); empty when there are none.
+		$message = ( 'approve' === $action && $item && ! empty( $item['details']['approval_note'] ) ) ? (string) $item['details']['approval_note'] : '';
+		wp_send_json_success(
+			array(
+				'item'      => $item ? self::public_item( $item ) : $item,
+				'available' => $item ? Decisions::available( $item ) : array(),
+				'counts'    => wpcybersec()->store->counts(),
+				'message'   => $message,
+			)
+		);
+	}
+
+	/**
+	 * An item as sent to the browser: the malware match snippets (excerpts of
+	 * the file, which may hold a password) are redacted like on the page.
+	 *
+	 * @param array $item Item.
+	 * @return array
+	 */
+	private static function public_item( array $item ) {
+		if ( empty( $item['details']['hits'] ) || ! is_array( $item['details']['hits'] ) ) {
+			return $item;
+		}
+		$name = basename( (string) $item['path'] );
+		foreach ( $item['details']['hits'] as $k => $hit ) {
+			if ( is_array( $hit ) && isset( $hit['snippet'] ) ) {
+				$item['details']['hits'][ $k ]['snippet'] = Diff::redact_snippet( (string) $hit['snippet'], ! empty( $hit['file'] ) ? basename( (string) $hit['file'] ) : $name );
+			}
+		}
+		return $item;
+	}
+
+	public function bulk_action() {
+		$this->guard();
+		$action = $this->param( 'do' );
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified in guard().
+		$ids    = isset( $_POST['ids'] ) ? array_map( 'intval', (array) wp_unslash( $_POST['ids'] ) ) : array();
+		$result = wpcybersec()->decisions->bulk( $action, $ids );
+		$result['counts'] = wpcybersec()->store->counts();
+		wp_send_json_success( $result );
+	}
+
+	public function counts() {
+		$this->guard();
+		wp_send_json_success( wpcybersec()->store->counts() );
+	}
+
+	/**
+	 * "+N -M lines vs ..." for the expandable details of one report (computed
+	 * only when the details are opened; never downloads anything).
+	 */
+	public function diff_summary() {
+		$this->guard();
+		$id   = (int) $this->param( 'id', '0' );
+		$item = $id > 0 ? wpcybersec()->store->item_get( $id ) : null;
+		if ( ! $item ) {
+			wp_send_json_error( array( 'message' => __( 'Item not found.', 'cybergate-security' ) ) );
+		}
+		try {
+			wp_send_json_success( Diff::summary( $item ) );
+		} catch ( \Throwable $e ) {
+			wp_send_json_error( array( 'message' => __( 'The changes could not be compared.', 'cybergate-security' ) ) );
+		}
+	}
+
+	public function unlock() {
+		$this->guard();
+		$minutes = (int) $this->param( 'minutes', (string) wpcybersec()->settings->get( 'unlock_minutes', 15 ) );
+		wpcybersec()->install_gate->unlock( $minutes );
+		wp_send_json_success( array( 'unlocked_until' => wpcybersec()->install_gate->unlocked_until() ) );
+	}
+
+	public function lock() {
+		$this->guard();
+		wpcybersec()->install_gate->lock();
+		wp_send_json_success( array( 'unlocked_until' => 0 ) );
+	}
+}

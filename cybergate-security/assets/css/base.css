@@ -1,0 +1,873 @@
+/*
+ * CyberGate Security - shared admin styles.
+ * Every plugin page wraps its markup in .wpcs-wrap. Components:
+ * header, cards, stats, badges, buttons, tabs, tables, progress, steps,
+ * check lists, code snippets, option cards, toggles, empty states, notices.
+ * Icons come from Dashicons (<span class="dashicons dashicons-shield"></span>).
+ */
+
+.wpcs-wrap {
+	--wpcs-ink: #0f172a;
+	--wpcs-ink-2: #334155;
+	--wpcs-muted: #64748b;
+	--wpcs-line: #e2e8f0;
+	--wpcs-line-2: #cbd5e1;
+	--wpcs-bg: #f8fafc;
+	--wpcs-surface: #ffffff;
+	--wpcs-brand: #0b3b5c;
+	--wpcs-brand-2: #0e7490;
+	--wpcs-accent: #14b8a6;
+	--wpcs-accent-soft: #ccfbf1;
+	--wpcs-ok: #15803d;
+	--wpcs-ok-soft: #dcfce7;
+	--wpcs-warn: #b45309;
+	--wpcs-warn-soft: #fef3c7;
+	--wpcs-bad: #b91c1c;
+	--wpcs-bad-soft: #fee2e2;
+	--wpcs-info: #1d4ed8;
+	--wpcs-info-soft: #dbeafe;
+	--wpcs-radius: 10px;
+	--wpcs-radius-sm: 6px;
+	--wpcs-shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.08);
+	--wpcs-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+	margin: 0 20px 0 2px;
+	color: var(--wpcs-ink);
+	max-width: 1280px;
+}
+
+.wpcs-wrap *,
+.wpcs-wrap *::before,
+.wpcs-wrap *::after {
+	box-sizing: border-box;
+}
+
+/* ---------- Header ---------- */
+.wpcs-header {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	margin: 20px 0 18px;
+	padding: 18px 22px;
+	background: linear-gradient(120deg, var(--wpcs-brand) 0%, var(--wpcs-brand-2) 100%);
+	color: #fff;
+	border-radius: var(--wpcs-radius);
+	box-shadow: var(--wpcs-shadow);
+}
+.wpcs-header__icon {
+	display: grid;
+	place-items: center;
+	width: 44px;
+	height: 44px;
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.14);
+}
+.wpcs-header__icon .dashicons {
+	font-size: 26px;
+	width: 26px;
+	height: 26px;
+	color: #fff;
+}
+.wpcs-header__text h1 {
+	margin: 0;
+	padding: 0;
+	font-size: 20px;
+	line-height: 1.3;
+	font-weight: 600;
+	color: #fff;
+}
+.wpcs-header__text p {
+	margin: 2px 0 0;
+	color: rgba(255, 255, 255, 0.82);
+	font-size: 13px;
+}
+.wpcs-header__actions {
+	margin-left: auto;
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+.wpcs-header .button {
+	background: rgba(255, 255, 255, 0.12);
+	border-color: rgba(255, 255, 255, 0.35);
+	color: #fff;
+}
+.wpcs-header .button:hover,
+.wpcs-header .button:focus {
+	background: rgba(255, 255, 255, 0.22);
+	border-color: #fff;
+	color: #fff;
+}
+.wpcs-header .button-primary {
+	background: var(--wpcs-accent);
+	border-color: var(--wpcs-accent);
+	color: #042f2e;
+}
+.wpcs-header .button-primary:hover,
+.wpcs-header .button-primary:focus {
+	background: #2dd4bf;
+	border-color: #2dd4bf;
+	color: #042f2e;
+}
+
+/* ---------- Layout ---------- */
+.wpcs-grid {
+	display: grid;
+	gap: 16px;
+	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+	margin-bottom: 16px;
+}
+.wpcs-grid--2 {
+	grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+}
+.wpcs-stack > * + * {
+	margin-top: 16px;
+}
+.wpcs-row {
+	display: flex;
+	gap: 10px;
+	align-items: center;
+	flex-wrap: wrap;
+}
+.wpcs-spacer {
+	flex: 1;
+}
+
+/* ---------- Cards ---------- */
+.wpcs-card {
+	background: var(--wpcs-surface);
+	border: 1px solid var(--wpcs-line);
+	border-radius: var(--wpcs-radius);
+	box-shadow: var(--wpcs-shadow);
+	padding: 18px 20px;
+}
+.wpcs-card__title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 0 0 12px;
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--wpcs-ink);
+}
+.wpcs-card__title .dashicons {
+	color: var(--wpcs-brand-2);
+}
+.wpcs-card__desc {
+	margin: -6px 0 14px;
+	color: var(--wpcs-muted);
+}
+.wpcs-card--flush {
+	padding: 0;
+	overflow: hidden;
+}
+.wpcs-card--accent {
+	border-left: 4px solid var(--wpcs-accent);
+}
+.wpcs-card--warn {
+	border-left: 4px solid var(--wpcs-warn);
+}
+.wpcs-card--bad {
+	border-left: 4px solid var(--wpcs-bad);
+}
+
+/* ---------- Stats ---------- */
+.wpcs-stat {
+	display: flex;
+	gap: 14px;
+	align-items: flex-start;
+}
+.wpcs-stat__icon {
+	flex: none;
+	display: grid;
+	place-items: center;
+	width: 40px;
+	height: 40px;
+	border-radius: 10px;
+	background: var(--wpcs-info-soft);
+	color: var(--wpcs-info);
+}
+.wpcs-stat__icon .dashicons {
+	font-size: 22px;
+	width: 22px;
+	height: 22px;
+}
+.wpcs-stat--ok .wpcs-stat__icon {
+	background: var(--wpcs-ok-soft);
+	color: var(--wpcs-ok);
+}
+.wpcs-stat--warn .wpcs-stat__icon {
+	background: var(--wpcs-warn-soft);
+	color: var(--wpcs-warn);
+}
+.wpcs-stat--bad .wpcs-stat__icon {
+	background: var(--wpcs-bad-soft);
+	color: var(--wpcs-bad);
+}
+.wpcs-stat__value {
+	font-size: 26px;
+	line-height: 1.1;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+}
+.wpcs-stat__label {
+	color: var(--wpcs-muted);
+	font-size: 12px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	margin-top: 4px;
+}
+.wpcs-stat__meta {
+	color: var(--wpcs-ink-2);
+	font-size: 12px;
+	margin-top: 6px;
+}
+
+/* ---------- Badges ---------- */
+.wpcs-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 8px;
+	border-radius: 999px;
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 18px;
+	white-space: nowrap;
+	background: #f1f5f9;
+	color: var(--wpcs-ink-2);
+	border: 1px solid transparent;
+}
+.wpcs-badge .dashicons {
+	font-size: 14px;
+	width: 14px;
+	height: 14px;
+}
+.wpcs-badge--critical {
+	background: var(--wpcs-bad);
+	color: #fff;
+}
+.wpcs-badge--high {
+	background: var(--wpcs-bad-soft);
+	color: var(--wpcs-bad);
+}
+.wpcs-badge--medium {
+	background: var(--wpcs-warn-soft);
+	color: var(--wpcs-warn);
+}
+.wpcs-badge--info {
+	background: var(--wpcs-info-soft);
+	color: var(--wpcs-info);
+}
+.wpcs-badge--ok {
+	background: var(--wpcs-ok-soft);
+	color: var(--wpcs-ok);
+}
+.wpcs-badge--pending {
+	background: #ede9fe;
+	color: #6d28d9;
+}
+.wpcs-badge--muted {
+	background: #f1f5f9;
+	color: var(--wpcs-muted);
+}
+
+/* ---------- Tabs (use with WP .nav-tab-wrapper) ---------- */
+.wpcs-wrap .nav-tab-wrapper {
+	margin-bottom: 16px;
+	border-bottom-color: var(--wpcs-line-2);
+}
+.wpcs-wrap .nav-tab {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	border-radius: 6px 6px 0 0;
+	background: transparent;
+	border-color: transparent;
+	color: var(--wpcs-ink-2);
+	font-weight: 500;
+}
+.wpcs-wrap .nav-tab:hover {
+	background: #fff;
+	color: var(--wpcs-ink);
+}
+.wpcs-wrap .nav-tab-active,
+.wpcs-wrap .nav-tab-active:hover {
+	background: var(--wpcs-surface);
+	border-color: var(--wpcs-line-2);
+	border-bottom-color: var(--wpcs-surface);
+	color: var(--wpcs-brand);
+}
+.wpcs-count {
+	display: inline-block;
+	min-width: 18px;
+	padding: 0 6px;
+	border-radius: 9px;
+	background: var(--wpcs-bad);
+	color: #fff;
+	font-size: 11px;
+	line-height: 18px;
+	text-align: center;
+	font-weight: 600;
+}
+.wpcs-count--zero {
+	background: var(--wpcs-line-2);
+	color: var(--wpcs-ink-2);
+}
+
+/* ---------- Tables (add to WP .widefat tables) ---------- */
+.wpcs-table {
+	border: 0;
+	box-shadow: none;
+}
+.wpcs-table thead th {
+	font-size: 12px;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--wpcs-muted);
+	border-bottom: 1px solid var(--wpcs-line);
+}
+.wpcs-table td {
+	vertical-align: middle;
+}
+.wpcs-table tr.is-busy {
+	opacity: 0.5;
+	pointer-events: none;
+}
+.wpcs-table tr.is-done td {
+	background: #f8fafc;
+}
+.wpcs-path {
+	font-family: var(--wpcs-mono);
+	font-size: 12px;
+	word-break: break-all;
+	color: var(--wpcs-ink);
+}
+.wpcs-hash {
+	font-family: var(--wpcs-mono);
+	font-size: 11px;
+	color: var(--wpcs-muted);
+}
+.wpcs-sub {
+	display: block;
+	color: var(--wpcs-muted);
+	font-size: 12px;
+	margin-top: 2px;
+}
+.wpcs-actions {
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+.wpcs-actions .button {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+.wpcs-actions .button .dashicons {
+	font-size: 16px;
+	width: 16px;
+	height: 16px;
+}
+.button.wpcs-btn-approve {
+	background: var(--wpcs-ok);
+	border-color: var(--wpcs-ok);
+	color: #fff;
+}
+.button.wpcs-btn-approve:hover,
+.button.wpcs-btn-approve:focus {
+	background: #166534;
+	border-color: #166534;
+	color: #fff;
+}
+.button.wpcs-btn-danger {
+	color: var(--wpcs-bad);
+	border-color: #fca5a5;
+}
+.button.wpcs-btn-danger:hover,
+.button.wpcs-btn-danger:focus {
+	background: var(--wpcs-bad-soft);
+	border-color: var(--wpcs-bad);
+	color: var(--wpcs-bad);
+}
+
+/* ---------- Progress ---------- */
+.wpcs-progress {
+	margin: 10px 0;
+}
+.wpcs-progress__track {
+	height: 10px;
+	border-radius: 999px;
+	background: var(--wpcs-line);
+	overflow: hidden;
+}
+.wpcs-progress__bar {
+	height: 100%;
+	width: 0;
+	border-radius: 999px;
+	background: linear-gradient(90deg, var(--wpcs-brand-2), var(--wpcs-accent));
+	transition: width 0.3s ease;
+}
+.wpcs-progress.is-indeterminate .wpcs-progress__bar {
+	width: 35%;
+	animation: wpcs-slide 1.2s ease-in-out infinite;
+}
+@keyframes wpcs-slide {
+	0% { transform: translateX(-100%); }
+	100% { transform: translateX(300%); }
+}
+.wpcs-progress__label {
+	display: flex;
+	justify-content: space-between;
+	gap: 10px;
+	margin-top: 6px;
+	font-size: 12px;
+	color: var(--wpcs-muted);
+}
+.wpcs-progress__current {
+	font-family: var(--wpcs-mono);
+	font-size: 11px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 60%;
+}
+
+/* ---------- Wizard steps ---------- */
+.wpcs-steps {
+	display: flex;
+	gap: 0;
+	margin: 0 0 20px;
+	padding: 0;
+	list-style: none;
+	counter-reset: wpcs-step;
+}
+.wpcs-steps li {
+	flex: 1;
+	position: relative;
+	margin: 0;
+	padding-top: 34px;
+	text-align: center;
+	font-size: 12px;
+	color: var(--wpcs-muted);
+}
+.wpcs-steps li::before {
+	counter-increment: wpcs-step;
+	content: counter(wpcs-step);
+	position: absolute;
+	top: 0;
+	left: 50%;
+	transform: translateX(-50%);
+	width: 26px;
+	height: 26px;
+	border-radius: 50%;
+	background: #fff;
+	border: 2px solid var(--wpcs-line-2);
+	color: var(--wpcs-muted);
+	font-weight: 700;
+	line-height: 22px;
+	z-index: 1;
+}
+.wpcs-steps li::after {
+	content: "";
+	position: absolute;
+	top: 12px;
+	left: -50%;
+	width: 100%;
+	height: 2px;
+	background: var(--wpcs-line-2);
+}
+.wpcs-steps li:first-child::after {
+	display: none;
+}
+.wpcs-steps li.is-done::before {
+	background: var(--wpcs-accent);
+	border-color: var(--wpcs-accent);
+	color: #042f2e;
+}
+.wpcs-steps li.is-done::after,
+.wpcs-steps li.is-current::after {
+	background: var(--wpcs-accent);
+}
+.wpcs-steps li.is-current {
+	color: var(--wpcs-ink);
+	font-weight: 600;
+}
+.wpcs-steps li.is-current::before {
+	border-color: var(--wpcs-brand-2);
+	color: var(--wpcs-brand-2);
+}
+
+/* ---------- Check list (environment checks) ---------- */
+.wpcs-checks {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+.wpcs-checks li {
+	display: grid;
+	grid-template-columns: 24px 1fr;
+	gap: 10px;
+	padding: 10px 0;
+	border-bottom: 1px solid var(--wpcs-line);
+	margin: 0;
+}
+.wpcs-checks li:last-child {
+	border-bottom: 0;
+}
+.wpcs-checks .dashicons {
+	font-size: 20px;
+	width: 20px;
+	height: 20px;
+}
+.wpcs-checks .is-pass .dashicons {
+	color: var(--wpcs-ok);
+}
+.wpcs-checks .is-warn .dashicons {
+	color: var(--wpcs-warn);
+}
+.wpcs-checks .is-fail .dashicons {
+	color: var(--wpcs-bad);
+}
+.wpcs-checks .is-info .dashicons {
+	color: var(--wpcs-info);
+}
+.wpcs-checks strong {
+	display: block;
+}
+.wpcs-checks .wpcs-sub code {
+	font-size: 11px;
+}
+
+/* ---------- Code snippets ---------- */
+.wpcs-code {
+	position: relative;
+	margin: 8px 0 14px;
+}
+.wpcs-code pre {
+	margin: 0;
+	padding: 14px 16px;
+	padding-right: 84px;
+	background: #0b1220;
+	color: #e2e8f0;
+	border-radius: var(--wpcs-radius-sm);
+	font-family: var(--wpcs-mono);
+	font-size: 12px;
+	line-height: 1.55;
+	overflow-x: auto;
+	white-space: pre;
+}
+.wpcs-code__label {
+	display: block;
+	margin-bottom: 4px;
+	font-weight: 600;
+	font-size: 12px;
+	color: var(--wpcs-ink-2);
+}
+.wpcs-code .wpcs-copy {
+	position: absolute;
+	top: 8px;
+	right: 8px;
+	min-height: 26px;
+	line-height: 24px;
+	padding: 0 10px;
+	font-size: 12px;
+	background: rgba(255, 255, 255, 0.1);
+	border: 1px solid rgba(255, 255, 255, 0.25);
+	color: #e2e8f0;
+}
+.wpcs-code .wpcs-code__label + pre + .wpcs-copy,
+.wpcs-code .wpcs-code__label ~ .wpcs-copy {
+	top: 28px;
+}
+
+/* ---------- Option cards (radio cards for protection levels) ---------- */
+.wpcs-options {
+	display: grid;
+	gap: 14px;
+	grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+}
+.wpcs-option {
+	position: relative;
+	display: block;
+	padding: 16px 16px 14px;
+	border: 2px solid var(--wpcs-line);
+	border-radius: var(--wpcs-radius);
+	background: var(--wpcs-surface);
+	cursor: pointer;
+	transition: border-color 0.15s, box-shadow 0.15s;
+}
+.wpcs-option:hover {
+	border-color: var(--wpcs-line-2);
+}
+.wpcs-option input[type="radio"] {
+	position: absolute;
+	opacity: 0;
+}
+.wpcs-option.is-selected,
+.wpcs-option:has(input:checked) {
+	border-color: var(--wpcs-brand-2);
+	box-shadow: 0 0 0 3px rgba(14, 116, 144, 0.15);
+}
+.wpcs-option__title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 14px;
+	font-weight: 600;
+	margin-bottom: 6px;
+}
+.wpcs-option__title .dashicons {
+	color: var(--wpcs-brand-2);
+}
+.wpcs-option__desc {
+	color: var(--wpcs-muted);
+	font-size: 12px;
+	margin: 0 0 8px;
+}
+.wpcs-option ul {
+	margin: 0;
+	padding-left: 16px;
+	list-style: disc;
+	font-size: 12px;
+	color: var(--wpcs-ink-2);
+}
+.wpcs-option ul li {
+	margin: 2px 0;
+}
+.wpcs-option__tag {
+	position: absolute;
+	top: 10px;
+	right: 10px;
+}
+
+/* ---------- Toggle switch ---------- */
+.wpcs-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	cursor: pointer;
+}
+.wpcs-toggle input {
+	position: absolute;
+	opacity: 0;
+	width: 1px;
+	height: 1px;
+}
+.wpcs-toggle__track {
+	position: relative;
+	flex: none;
+	width: 38px;
+	height: 22px;
+	border-radius: 999px;
+	background: var(--wpcs-line-2);
+	transition: background 0.15s;
+}
+.wpcs-toggle__track::after {
+	content: "";
+	position: absolute;
+	top: 3px;
+	left: 3px;
+	width: 16px;
+	height: 16px;
+	border-radius: 50%;
+	background: #fff;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+	transition: transform 0.15s;
+}
+.wpcs-toggle input:checked + .wpcs-toggle__track {
+	background: var(--wpcs-brand-2);
+}
+.wpcs-toggle input:checked + .wpcs-toggle__track::after {
+	transform: translateX(16px);
+}
+.wpcs-toggle input:focus-visible + .wpcs-toggle__track {
+	outline: 2px solid var(--wpcs-brand-2);
+	outline-offset: 2px;
+}
+
+/* ---------- Forms ---------- */
+.wpcs-field {
+	display: grid;
+	grid-template-columns: minmax(180px, 260px) 1fr;
+	gap: 16px;
+	padding: 14px 0;
+	border-bottom: 1px solid var(--wpcs-line);
+}
+.wpcs-field:last-child {
+	border-bottom: 0;
+}
+.wpcs-field__label {
+	font-weight: 600;
+	padding-top: 4px;
+}
+.wpcs-field__help {
+	display: block;
+	margin-top: 6px;
+	color: var(--wpcs-muted);
+	font-size: 12px;
+}
+.wpcs-field textarea {
+	width: 100%;
+	min-height: 110px;
+	font-family: var(--wpcs-mono);
+	font-size: 12px;
+}
+.wpcs-field input[type="text"],
+.wpcs-field input[type="url"],
+.wpcs-field input[type="email"] {
+	width: 100%;
+	max-width: 520px;
+}
+.wpcs-radio-list label {
+	display: block;
+	margin: 0 0 8px;
+}
+.wpcs-radio-list label .wpcs-sub {
+	margin-left: 24px;
+}
+@media (max-width: 782px) {
+	.wpcs-field {
+		grid-template-columns: 1fr;
+		gap: 6px;
+	}
+}
+
+/* ---------- Empty state ---------- */
+.wpcs-empty {
+	padding: 40px 20px;
+	text-align: center;
+	color: var(--wpcs-muted);
+}
+.wpcs-empty .dashicons {
+	font-size: 40px;
+	width: 40px;
+	height: 40px;
+	color: var(--wpcs-accent);
+	margin-bottom: 8px;
+}
+.wpcs-empty h3 {
+	margin: 0 0 4px;
+	color: var(--wpcs-ink);
+}
+
+/* ---------- Inline notices ---------- */
+.wpcs-notice {
+	display: flex;
+	gap: 10px;
+	align-items: flex-start;
+	padding: 12px 14px;
+	border-radius: var(--wpcs-radius-sm);
+	background: var(--wpcs-info-soft);
+	color: #1e3a8a;
+	margin: 0 0 14px;
+}
+.wpcs-notice .dashicons {
+	flex: none;
+}
+.wpcs-notice--ok {
+	background: var(--wpcs-ok-soft);
+	color: #14532d;
+}
+.wpcs-notice--warn {
+	background: var(--wpcs-warn-soft);
+	color: #78350f;
+}
+.wpcs-notice--bad {
+	background: var(--wpcs-bad-soft);
+	color: #7f1d1d;
+}
+.wpcs-notice p {
+	margin: 0;
+}
+.wpcs-notice p + p {
+	margin-top: 4px;
+}
+
+/* ---------- Toast ---------- */
+.wpcs-toast {
+	position: fixed;
+	right: 24px;
+	bottom: 24px;
+	z-index: 100000;
+	max-width: 420px;
+	padding: 12px 16px;
+	border-radius: var(--wpcs-radius-sm);
+	background: #0f172a;
+	color: #fff;
+	box-shadow: 0 10px 30px rgba(15, 23, 42, 0.25);
+	font-size: 13px;
+	opacity: 0;
+	transform: translateY(10px);
+	transition: opacity 0.2s, transform 0.2s;
+}
+.wpcs-toast.is-visible {
+	opacity: 1;
+	transform: translateY(0);
+}
+.wpcs-toast--error {
+	background: var(--wpcs-bad);
+}
+
+/* ---------- Detail rows (expandable details under a table row) ---------- */
+.wpcs-details {
+	margin: 8px 0 0;
+	padding: 10px 12px;
+	background: var(--wpcs-bg);
+	border: 1px solid var(--wpcs-line);
+	border-radius: var(--wpcs-radius-sm);
+	font-size: 12px;
+}
+.wpcs-details dt {
+	font-weight: 600;
+	color: var(--wpcs-ink-2);
+}
+.wpcs-details dd {
+	margin: 0 0 6px;
+}
+.wpcs-details pre {
+	margin: 4px 0 0;
+	padding: 8px 10px;
+	background: #0b1220;
+	color: #fca5a5;
+	border-radius: 4px;
+	font-family: var(--wpcs-mono);
+	font-size: 11px;
+	white-space: pre-wrap;
+	word-break: break-all;
+}
+
+.wpcs-muted {
+	color: var(--wpcs-muted);
+}
+.wpcs-mono {
+	font-family: var(--wpcs-mono);
+}
+.wpcs-hidden {
+	display: none !important;
+}
+
+/* Buttons with an icon (before or after the label): centered, evenly spaced,
+   icon in the button's own text color in every state. */
+.wpcs-wrap .button:has(> .dashicons) {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+}
+.wpcs-wrap .button .dashicons,
+.wpcs-wrap .button:hover .dashicons,
+.wpcs-wrap .button:focus .dashicons {
+	color: inherit;
+	line-height: 1;
+	margin: 0;
+	vertical-align: middle;
+	transition: transform 0.15s ease;
+}
+.wpcs-wrap .button-hero:has(> .dashicons) {
+	gap: 8px;
+}
+/* Trailing arrows nudge forward on hover. */
+.wpcs-wrap .button:hover .dashicons-arrow-right-alt2,
+.wpcs-wrap .button:hover .dashicons-arrow-right-alt {
+	transform: translateX(2px);
+}

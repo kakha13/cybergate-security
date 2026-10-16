@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Builds the WP Cyber Security release.
+# Builds the CyberGate Security release.
 #
 #   scripts/build.sh               upload-ready zip in dist/ (Plugins > Add New > Upload)
 #   scripts/build.sh --wporg       same, plus the WordPress.org submission checks
@@ -8,13 +8,13 @@
 #                                  checkout (trunk/, tags/<version>/, assets/) and
 #                                  prints the svn commands to review and commit
 #
-# Output: dist/wp-cyber-security-<version>.zip and a .sha256 file next to it.
-# The zip holds one top folder, wp-cyber-security/, as WordPress expects.
+# Output: dist/cybergate-security-<version>.zip and a .sha256 file next to it.
+# The zip holds one top folder, cybergate-security/, as WordPress expects.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SLUG="wp-cyber-security"
+SLUG="cybergate-security"
 SRC="$ROOT/$SLUG"
 DIST="$ROOT/dist"
 STAGE="$DIST/build/$SLUG"

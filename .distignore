@@ -1,4 +1,4 @@
-# Files left out of the release zip (rsync patterns, relative to wp-cyber-security/).
+# Files left out of the release zip (rsync patterns, relative to cybergate-security/).
 .DS_Store
 .git
 .gitignore

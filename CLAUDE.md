@@ -1,15 +1,15 @@
-# WP Cyber Security
+# CyberGate Security
 
-WordPress security plugin: full-site malware scan, holds every new upload/install/unknown file until an admin approves it, approvals remembered by SHA-256. Plugin lives in `wp-cyber-security/`; module contracts in `docs/ARCHITECTURE.md` (read it before changing cross-module APIs).
+WordPress security plugin: full-site malware scan, holds every new upload/install/unknown file until an admin approves it, approvals remembered by SHA-256. Plugin lives in `cybergate-security/`; module contracts in `docs/ARCHITECTURE.md` (read it before changing cross-module APIs).
 
 ## Commands
 - `scripts/build.sh` - lint, stage without dev files, rebuild checksums, zip to `dist/` and verify
 - `scripts/build.sh --wporg` - same plus WordPress.org checks (needs real `Contributors:` in readme.txt)
 - `scripts/build.sh --svn PATH` - sync trunk/tags/assets into a wp.org SVN checkout (prints svn commands, does not commit)
-- `php wp-cyber-security/bin/build-checksums.php` - regenerate `checksums.json`; run after ANY plugin file change, or the plugin flags its own edited files as tampered
-- `php wp-cyber-security/bin/cron.php [--full|--baseline] [--isolated]` - run a scan to completion from the CLI (inside a WP install); `--isolated` loads no other plugin and no theme (mu-plugins still load)
+- `php cybergate-security/bin/build-checksums.php` - regenerate `checksums.json`; run after ANY plugin file change, or the plugin flags its own edited files as tampered
+- `php cybergate-security/bin/cron.php [--full|--baseline] [--isolated]` - run a scan to completion from the CLI (inside a WP install); `--isolated` loads no other plugin and no theme (mu-plugins still load)
 - `wp wpcybersec report --file=report.html` - the downloadable security report (also Reports > Download report)
-- Lint: `for f in $(find wp-cyber-security -name '*.php'); do php -l $f; done` and `node --check` on `assets/js/*.js`
+- Lint: `for f in $(find cybergate-security -name '*.php'); do php -l $f; done` and `node --check` on `assets/js/*.js`
 
 ## Code rules
 - PHP 7.4 compatible syntax (no match, `?->`, named args, union types, `str_contains`); WordPress 6.0+
@@ -29,3 +29,4 @@ WordPress security plugin: full-site malware scan, holds every new upload/instal
 - Real-site false positives to keep quiet: server `error_log` files (no extension) inside core folders, `wordfence-waf.php` in the root, bundled `wp-content/plugins/hello.php` (verify against core checksums, not the hello-dolly listing), thousands of changed files right after plugin updates
 - Script injection hides in header/footer plugins (`{prefix}hfcm_scripts`, `ihaf_insert_*`, Code Snippets): the database scan must cover them
 - ClamAV/maldet find more known infections but do not block attacks; say it that way in UI text
+- Never build test sandboxes with `wp core download`: its tar.gz extraction truncates long wp-includes/php-ai-client paths and the plugin (correctly) reports them; use the .zip from wordpress.org
