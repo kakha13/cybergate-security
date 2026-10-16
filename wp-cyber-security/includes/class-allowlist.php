@@ -18,6 +18,9 @@ defined( 'ABSPATH' ) || exit;
  *             Only this kind lets the same bytes through as an executable file, so
  *             an approved image can never come back as an approved PHP file.
  *   install   value = "plugin:<folder>" or "theme:<folder>".
+ *   db        value = Db_Scanner fingerprint of a database value marked safe
+ *             (bound to where it is stored). Never a file hash: it can not let
+ *             any file through, and it is not exported to the early guard.
  *
  * Every change re-exports <data>/guard/allow.php for the early guard and
  * refreshes the tamper checksum (see verify_integrity()).
@@ -27,6 +30,7 @@ class Allowlist {
 	const KIND_HASH      = 'hash';
 	const KIND_HASH_EXEC = 'hash_exec';
 	const KIND_INSTALL   = 'install';
+	const KIND_DB        = 'db';
 
 	const CHECKSUM_OPTION = 'wpcybersec_allowlist_checksum';
 
@@ -86,6 +90,37 @@ class Allowlist {
 		}
 		$this->hash_cache = null;
 		return $this->insert( $executable ? self::KIND_HASH_EXEC : self::KIND_HASH, $sha256, $label, $note );
+	}
+
+	/**
+	 * Whether a database value (Db_Scanner fingerprint) was marked safe.
+	 *
+	 * @param string $fingerprint 64 hex chars.
+	 * @return bool
+	 */
+	public function is_allowed_db( $fingerprint ) {
+		global $wpdb;
+		$fingerprint = strtolower( (string) $fingerprint );
+		if ( ! preg_match( '/^[a-f0-9]{64}$/', $fingerprint ) ) {
+			return false;
+		}
+		return (bool) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . Store::table( 'allowlist' ) . ' WHERE kind = %s AND value = %s', self::KIND_DB, $fingerprint ) ); // phpcs:ignore
+	}
+
+	/**
+	 * Marks a database value safe.
+	 *
+	 * @param string $fingerprint Db_Scanner fingerprint.
+	 * @param string $label       Where it is stored (for example "Option widget_text").
+	 * @param string $note        Why it was allowed.
+	 * @return int Entry id.
+	 */
+	public function allow_db( $fingerprint, $label = '', $note = '' ) {
+		$fingerprint = strtolower( (string) $fingerprint );
+		if ( ! preg_match( '/^[a-f0-9]{64}$/', $fingerprint ) ) {
+			return 0;
+		}
+		return $this->insert( self::KIND_DB, $fingerprint, $label, $note );
 	}
 
 	/**

@@ -77,13 +77,17 @@ class Ajax {
 		}
 		$job    = wpcybersec()->scan_job;
 		$before = $job->status();
-		$id     = $job->start(
-			array(
-				'mode'    => $mode,
-				'malware' => '1' === $this->param( 'malware', '1' ),
-				'trigger' => $this->param( 'trigger', 'manual' ),
-			)
+		$opts   = array(
+			'mode'    => $mode,
+			'malware' => '1' === $this->param( 'malware', '1' ),
+			'trigger' => $this->param( 'trigger', 'manual' ),
 		);
+		$db     = $this->param( 'database', '' );
+		if ( '' !== $db ) {
+			// "Scan database" option; without it full and baseline scans include the database.
+			$opts['database'] = '1' === $db;
+		}
+		$id = $job->start( $opts );
 		if ( is_wp_error( $id ) ) {
 			wp_send_json_error( array( 'message' => $id->get_error_message() ) );
 		}

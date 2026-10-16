@@ -22,9 +22,12 @@ defined( 'ABSPATH' ) || exit;
  *                hash and malware-scan only when needed, upsert the manifest.
  *                The state is saved after every batch and the deadline is
  *                checked after every file.
- *   finishing    Deleted-file detection (manifest rows this run never touched
- *                and nobody wrote since it started), list cleanup, save
- *                last_result, log, notify.
+ *   finishing    The database scan when the run includes it (Db_Scanner, in
+ *                chunks over as many ticks as it needs), then for whole-site
+ *                runs the missing core file count and the administrator
+ *                check (User_Watch), then deleted-file detection (manifest
+ *                rows this run never touched and nobody wrote since it
+ *                started), list cleanup, save last_result, log, notify.
  *
  * Concurrency: AJAX, WP-Cron and bin/cron.php can all drive the same job. Only
  * one of them works at a time: tick(), start() and cancel() take the row lock
@@ -111,7 +114,10 @@ class Scan_Job {
 	 * Starts a job. Returns the job id, or a running job's id when one is
 	 * active and $opts['force'] is not set.
 	 *
-	 * @param array $opts mode, malware, paths, trigger, force, wait (seconds to wait for the lock, default 10).
+	 * @param array $opts mode, malware, paths, trigger, force, wait (seconds to wait for the lock, default 10),
+	 *                    database (bool; default: on for full and baseline scans of the whole site,
+	 *                    on for scheduled scans when the database was last scanned a day or more
+	 *                    ago, off otherwise; never for scans limited to folders).
 	 * @return string|\WP_Error
 	 */
 	public function start( array $opts = array() ) {
@@ -190,12 +196,32 @@ class Scan_Job {
 		$id   = gmdate( 'YmdHis' ) . substr( md5( uniqid( 'wpcs', true ) ), 0, 8 );
 		$list = wpcybersec()->storage->jobs_dir() . '/' . $id . '.list';
 
+		$trigger  = isset( $opts['trigger'] ) ? sanitize_key( $opts['trigger'] ) : 'manual';
+		$database = false;
+		if ( ! $paths['abs'] && wpcybersec()->db_scanner ) {
+			if ( isset( $opts['database'] ) && null !== $opts['database'] ) {
+				$database = (bool) $opts['database'];
+			} elseif ( in_array( $mode, array( 'full', 'baseline' ), true ) ) {
+				$database = true;
+			} elseif ( 'cron' === $trigger ) {
+				$database = $this->db_scan_due();
+			}
+		}
+
 		$this->state = array(
 			'id'           => $id,
 			'state'        => 'enumerating',
 			'mode'         => $mode,
 			'malware'      => isset( $opts['malware'] ) ? (bool) $opts['malware'] : (bool) wpcybersec()->settings->get( 'scan_malware', true ),
-			'trigger'      => isset( $opts['trigger'] ) ? sanitize_key( $opts['trigger'] ) : 'manual',
+			'trigger'      => $trigger,
+			// Database scan at the end of this run (Db_Scanner); its cursor while it runs.
+			'database'     => $database,
+			'db'           => null,
+			'db_done'      => false,
+			'db_findings'  => 0,
+			// Whole-site runs: core files missing (-1 = not known) and new administrators found.
+			'missing_core' => -1,
+			'new_admins'   => 0,
 			'paths'        => $paths['abs'],
 			'prefixes'     => $paths['rel'],
 			'root'         => $root,
@@ -351,7 +377,7 @@ class Scan_Job {
 					$this->process( $deadline );
 				}
 				if ( 'finishing' === $this->state['state'] && ! $this->lost_lock ) {
-					$this->finish();
+					$this->finish( $deadline );
 				}
 			}
 		} catch ( \Throwable $e ) {
@@ -480,25 +506,40 @@ class Scan_Job {
 			return $this->idle_status();
 		}
 		return array(
-			'id'          => (string) $state['id'],
-			'state'       => (string) $state['state'],
-			'mode'        => (string) $state['mode'],
-			'malware'     => (bool) $state['malware'],
-			'trigger'     => (string) $state['trigger'],
-			'files_total' => (int) $state['files_total'],
-			'files_done'  => (int) $state['files_done'],
-			'new'         => (int) $state['new'],
-			'modified'    => (int) $state['modified'],
-			'deleted'     => (int) $state['deleted'],
-			'threats'     => (int) $state['threats'],
-			'quarantined' => (int) $state['quarantined'],
-			'skipped'     => (int) $state['skipped'],
-			'started_at'  => (int) $state['started_at'],
-			'finished_at' => (int) $state['finished_at'],
-			'current'     => (string) $state['current'],
-			'message'     => (string) $state['message'],
-			'percent'     => $this->percent( $state ),
+			'id'           => (string) $state['id'],
+			'state'        => (string) $state['state'],
+			'mode'         => (string) $state['mode'],
+			'malware'      => (bool) $state['malware'],
+			'trigger'      => (string) $state['trigger'],
+			'files_total'  => (int) $state['files_total'],
+			'files_done'   => (int) $state['files_done'],
+			'new'          => (int) $state['new'],
+			'modified'     => (int) $state['modified'],
+			'deleted'      => (int) $state['deleted'],
+			'threats'      => (int) $state['threats'],
+			'quarantined'  => (int) $state['quarantined'],
+			'skipped'      => (int) $state['skipped'],
+			'started_at'   => (int) $state['started_at'],
+			'finished_at'  => (int) $state['finished_at'],
+			'current'      => (string) $state['current'],
+			'message'      => (string) $state['message'],
+			'percent'      => $this->percent( $state ),
+			'database'     => ! empty( $state['database'] ),
+			'db_findings'  => isset( $state['db_findings'] ) ? (int) $state['db_findings'] : 0,
+			'missing_core' => isset( $state['missing_core'] ) ? (int) $state['missing_core'] : -1,
+			'new_admins'   => isset( $state['new_admins'] ) ? (int) $state['new_admins'] : 0,
 		);
+	}
+
+	/**
+	 * Whether a scheduled scan should include the database (at most once a day).
+	 *
+	 * @return bool
+	 */
+	private function db_scan_due() {
+		$last = wpcybersec()->db_scanner->last_run();
+		$at   = isset( $last['finished_at'] ) ? (int) $last['finished_at'] : 0;
+		return $at <= time() - DAY_IN_SECONDS + 10 * MINUTE_IN_SECONDS;
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -891,9 +932,18 @@ class Scan_Job {
 		$known     = is_array( $row );
 		$unchanged = $known && (int) $row['size'] === $stat['size'] && (int) $row['mtime'] === $stat['mtime'] && '' !== (string) $row['sha256'];
 
+		// Where a file is can be wrong by itself (a file among the core files that
+		// WordPress does not ship, a stray PHP file in the WordPress root). This
+		// only looks at the path and the core file list, so it runs for unchanged
+		// trusted files too: a baseline from before this check cannot hide them.
+		$integrity = $scanner->integrity_issue( $rel );
+		if ( '' !== $integrity && $unchanged && wpcybersec()->allowlist->is_allowed_hash( (string) $row['sha256'], Paths::is_executable( $abs ) ) ) {
+			$integrity = ''; // Approved before ("Mark safe" or "Allow").
+		}
+
 		// Fast path: unchanged + already trusted. Incremental and baseline skip it;
 		// full re-scans trusted files for malware using the stored hash.
-		if ( $unchanged && Store::STATE_TRUSTED === (string) $row['state'] && 'full' !== $mode ) {
+		if ( $unchanged && Store::STATE_TRUSTED === (string) $row['state'] && 'full' !== $mode && '' === $integrity ) {
 			++$this->state['skipped'];
 			return array(
 				'state'  => Store::STATE_TRUSTED,
@@ -923,12 +973,13 @@ class Scan_Job {
 
 		/* -------- Baseline (or a folder re-baselined after an update). -------- */
 		if ( 'baseline' === $mode || ( ! $unchanged && $this->in_rebaseline_queue( $rel ) ) ) {
-			return $this->evaluate_baseline( $abs, $rel, $sha, $stat, $row, $change, $executable, $allowed, $too_big );
+			return $this->evaluate_baseline( $abs, $rel, $sha, $stat, $row, $change, $executable, $allowed, $too_big, $integrity, $changed );
 		}
 
 		/* -------- Nothing to decide: known, unchanged, not trusted, no full re-scan.
-		   This only happens for files already pending/threat that have not changed. */
-		if ( $unchanged && 'full' !== $mode ) {
+		   This only happens for files already pending/threat that have not changed
+		   (and trusted files with a path problem, which are judged below). */
+		if ( $unchanged && 'full' !== $mode && ( '' === $integrity || Store::STATE_TRUSTED !== (string) $row['state'] ) ) {
 			++$this->state['skipped'];
 			return array(
 				'state'  => (string) $row['state'],
@@ -950,6 +1001,20 @@ class Scan_Job {
 				'state'  => Store::STATE_TRUSTED,
 				'sha256' => $sha,
 			);
+		}
+
+		// An empty or comments-only PHP file (the classic "Silence is golden"
+		// index.php that blocks folder listings) cannot run any code.
+		if ( $executable && $scanner->is_inert_php( $abs, $stat['size'] ) ) {
+			return array(
+				'state'  => Store::STATE_TRUSTED,
+				'sha256' => $sha,
+			);
+		}
+
+		if ( '' !== $integrity ) {
+			$hits = $malware && ! $too_big ? $scanner->scan_file( $abs, $rel ) : array();
+			return $this->handle_integrity( $integrity, $abs, $rel, $sha, $stat, $row, $hits, $verify, $is_new, $changed, $executable, false );
 		}
 
 		// What a report is compared with: the last version that was approved,
@@ -979,8 +1044,9 @@ class Scan_Job {
 
 		// A checksum mismatch on a core, wordpress.org plugin or own file is
 		// suspicious even with no signature hit: record a medium threat so the
-		// admin can review it.
-		if ( 'mismatch' === $verify['reason'] && $executable ) {
+		// admin can review it (scripts, server config and JavaScript; not
+		// images, styles or translations).
+		if ( 'mismatch' === $verify['reason'] && self::reports_mismatch( $abs, $executable ) ) {
 			$this->record_threat( $abs, $rel, $sha, $stat, $hits, $change, $base, $verify, Store::SEV_MEDIUM );
 			return array(
 				'state'  => Store::STATE_THREAT,
@@ -1047,9 +1113,11 @@ class Scan_Job {
 	 * @param bool       $executable Executable name.
 	 * @param bool       $allowed    Allowlisted for this kind of name.
 	 * @param bool       $too_big    Larger than max_file_mb.
+	 * @param string     $integrity  Scanner::integrity_issue() result.
+	 * @param bool       $changed    Content differs from the manifest row.
 	 * @return array { state, sha256 }
 	 */
-	private function evaluate_baseline( $abs, $rel, $sha, array $stat, $row, $change, $executable, $allowed, $too_big ) {
+	private function evaluate_baseline( $abs, $rel, $sha, array $stat, $row, $change, $executable, $allowed, $too_big, $integrity = '', $changed = false ) {
 		$trusted = array(
 			'state'  => Store::STATE_TRUSTED,
 			'sha256' => $sha,
@@ -1065,10 +1133,20 @@ class Scan_Job {
 		if ( 'match' === $verify['verdict'] ) {
 			return $trusted;
 		}
+		if ( $executable && $scanner->is_inert_php( $abs, $stat['size'] ) ) {
+			return $trusted;
+		}
 
 		$hits = array();
 		if ( $this->state['malware'] && ! $too_big ) {
 			$hits = $scanner->scan_file( $abs, $rel );
+		}
+		// A baseline trusts what is there, except files that are wrong by where
+		// they are (unknown file in wp-admin or wp-includes, stray root PHP file).
+		if ( '' !== $integrity ) {
+			return $this->handle_integrity( $integrity, $abs, $rel, $sha, $stat, $row, $hits, $verify, ! is_array( $row ), $changed, $executable, true );
+		}
+		if ( $hits ) {
 			if ( $scanner->max_severity( $hits ) >= Store::SEV_HIGH ) {
 				$this->record_threat( $abs, $rel, $sha, $stat, $hits, $change, self::approved_base( $rel, $row, $executable ), $verify );
 				return array(
@@ -1078,9 +1156,11 @@ class Scan_Job {
 			}
 		}
 
-		// A listed file of this plugin that differs from checksums.json: the
-		// security plugin itself was changed.
-		if ( 'self' === $verify['source'] && 'mismatch' === $verify['reason'] && $executable ) {
+		// A core, wordpress.org plugin or own file that differs from its official
+		// checksum is never trusted silently, not even by a baseline: the
+		// Changes view compares it with the official original (Originals).
+		// Checksums unavailable (offline) means no verdict, so nothing is said.
+		if ( 'mismatch' === $verify['reason'] && in_array( $verify['source'], array( 'core', 'plugin', 'self' ), true ) && self::reports_mismatch( $abs, $executable ) ) {
 			$this->record_threat( $abs, $rel, $sha, $stat, $hits, $change, self::approved_base( $rel, $row, $executable ), $verify, Store::SEV_MEDIUM );
 			return array(
 				'state'  => Store::STATE_THREAT,
@@ -1088,6 +1168,19 @@ class Scan_Job {
 			);
 		}
 		return $trusted;
+	}
+
+	/**
+	 * Which files a checksum mismatch is reported for: executable names
+	 * (PHP, .htaccess, .user.ini...) and JavaScript, a common injection target.
+	 * Images, styles, fonts and translations that differ are not reported.
+	 *
+	 * @param string $abs        Path.
+	 * @param bool   $executable Executable name.
+	 * @return bool
+	 */
+	public static function reports_mismatch( $abs, $executable ) {
+		return (bool) $executable || in_array( Paths::ext( (string) $abs ), array( 'js', 'mjs' ), true );
 	}
 
 	/**
@@ -1225,14 +1318,15 @@ class Scan_Job {
 	 * @param array  $stat     Stat.
 	 * @param string $change   new | modified.
 	 * @param array  $base     approved_base().
+	 * @param array  $hits     Hits that explain the report.
 	 * @return array
 	 */
-	private function quarantine_file( $abs, $rel, $sha, array $stat, $change, array $base ) {
+	private function quarantine_file( $abs, $rel, $sha, array $stat, $change, array $base, array $hits = array() ) {
 		$this->snapshot_current( $abs, $sha );
 		$held = wpcybersec()->quarantine->hold( $abs, true );
 		if ( is_wp_error( $held ) ) {
 			// Could not move it; fall back to reporting it in place.
-			$this->record_file( $abs, $rel, $sha, $stat, $change, $base, array() );
+			$this->record_file( $abs, $rel, $sha, $stat, $change, $base, $hits );
 			return array(
 				'state'  => Store::STATE_PENDING,
 				'sha256' => $sha,
@@ -1241,7 +1335,7 @@ class Scan_Job {
 		++$this->state['quarantined'];
 		// Status stays pending: the item still needs a decision and must show in
 		// Pending approvals, counts, and the scan email.
-		$this->record_file( $abs, $rel, $sha, $stat, $change, $base, array(), $held['quarantine_path'], Store::STATUS_PENDING );
+		$this->record_file( $abs, $rel, $sha, $stat, $change, $base, $hits, $held['quarantine_path'], Store::STATUS_PENDING );
 		wpcybersec()->logger->log(
 			'file_quarantined',
 			/* translators: %s: relative path */
@@ -1251,6 +1345,96 @@ class Scan_Job {
 		return array(
 			'state'  => Store::STATE_PENDING,
 			'sha256' => $sha,
+		);
+	}
+
+	/**
+	 * A file that is wrong by where it is (Scanner::integrity_issue()), in
+	 * every scan mode including baseline:
+	 *   core_unknown_file  -> high threat (more when signatures say so);
+	 *   root_php,
+	 *   core_unknown_config -> medium pending file item, or a threat when a
+	 *                          signature found high severity code. A new or
+	 *                          changed file outside a baseline follows the
+	 *                          quarantine policy for new and modified files.
+	 * Deduplicated like every other item (open item for the same path + hash).
+	 *
+	 * @param string     $integrity  Issue code.
+	 * @param string     $abs        Path.
+	 * @param string     $rel        Relative path.
+	 * @param string     $sha        Hash.
+	 * @param array      $stat       Stat.
+	 * @param array|null $row        Manifest row before this run.
+	 * @param array      $hits       Signature hits.
+	 * @param array      $verify     Checksum result.
+	 * @param bool       $is_new     Not in the manifest before.
+	 * @param bool       $changed    Content changed since the manifest row.
+	 * @param bool       $executable Executable name.
+	 * @param bool       $baseline   Judged as part of a baseline.
+	 * @return array { state, sha256 }
+	 */
+	private function handle_integrity( $integrity, $abs, $rel, $sha, array $stat, $row, array $hits, $verify, $is_new, $changed, $executable, $baseline ) {
+		$scanner  = wpcybersec()->scanner;
+		$change   = $changed ? 'modified' : 'new';
+		$base     = $changed ? self::approved_base( $rel, $row, $executable ) : self::no_base();
+		$severity = $scanner->max_severity( $hits );
+		$hits     = array_merge( array( self::integrity_hit( $integrity, $rel ) ), $hits );
+		if ( ! $baseline && $is_new ) {
+			++$this->state['new'];
+		} elseif ( ! $baseline && $changed ) {
+			++$this->state['modified'];
+		}
+
+		if ( 'core_unknown_file' === $integrity || $severity >= Store::SEV_HIGH ) {
+			$this->record_threat( $abs, $rel, $sha, $stat, $hits, $change, $base, $verify, max( Store::SEV_HIGH, $severity ) );
+			return array(
+				'state'  => Store::STATE_THREAT,
+				'sha256' => $sha,
+			);
+		}
+
+		if ( ! $baseline && ( $is_new || $changed ) && ! $this->is_own_code( $verify ) ) {
+			$quarantine = $is_new
+				? 'quarantine_exec' === (string) wpcybersec()->settings->get( 'file_mode', 'report' )
+				: 'quarantine' === (string) wpcybersec()->settings->get( 'modified_action', 'report' );
+			if ( $quarantine ) {
+				return $this->quarantine_file( $abs, $rel, $sha, $stat, $change, $base, $hits );
+			}
+		}
+		$this->record_file( $abs, $rel, $sha, $stat, $change, $base, $hits );
+		return array(
+			'state'  => Store::STATE_PENDING,
+			'sha256' => $sha,
+		);
+	}
+
+	/**
+	 * Hit that explains an integrity report (shown like a signature match).
+	 *
+	 * @param string $integrity Issue code.
+	 * @param string $rel       Relative path.
+	 * @return array
+	 */
+	private static function integrity_hit( $integrity, $rel ) {
+		switch ( $integrity ) {
+			case 'core_unknown_file':
+				$title    = __( 'File in wp-admin or wp-includes that is not part of WordPress', 'wp-cyber-security' );
+				$severity = Store::SEV_HIGH;
+				break;
+			case 'core_unknown_config':
+				$title    = __( 'Server configuration file added to a WordPress core folder', 'wp-cyber-security' );
+				$severity = Store::SEV_MEDIUM;
+				break;
+			default:
+				$title    = __( 'PHP file in the WordPress root folder that is not part of WordPress', 'wp-cyber-security' );
+				$severity = Store::SEV_MEDIUM;
+		}
+		return array(
+			'sig'      => 'root_php' === $integrity ? 'root_unknown_php' : $integrity,
+			'title'    => $title,
+			'severity' => $severity,
+			'line'     => 0,
+			'snippet'  => Signatures::clean_snippet( $rel ),
 		);
 	}
 
@@ -1498,9 +1682,89 @@ class Scan_Job {
 	/* ------------------------------------------------------------------ */
 
 	/**
-	 * Deleted-file detection, cleanup and notifications.
+	 * Database scan step (when the run includes it), then for whole-site runs
+	 * the missing core file count and the administrator check.
+	 *
+	 * @param float $deadline Microtime deadline of this tick.
+	 * @return bool True when this part is complete; false to continue next tick.
 	 */
-	private function finish() {
+	private function finish_extras( $deadline ) {
+		if ( ! empty( $this->state['database'] ) && empty( $this->state['db_done'] ) ) {
+			$db = wpcybersec()->db_scanner;
+			if ( $db ) {
+				$cursor = isset( $this->state['db'] ) && is_array( $this->state['db'] ) ? $this->state['db'] : $db->begin( (string) $this->state['id'] );
+				$done   = true;
+				try {
+					$done = $db->step(
+						$cursor,
+						$deadline,
+						function () {
+							return $this->cancel_requested();
+						}
+					);
+					if ( $done ) {
+						$db->finish( $cursor );
+					}
+				} catch ( \Throwable $e ) {
+					wpcybersec()->logger->log(
+						'db_scan_failed',
+						/* translators: %s: error message */
+						sprintf( __( 'The database scan stopped: %s', 'wp-cyber-security' ), Signatures::clean_snippet( $e->getMessage() ) ),
+						array( 'id' => $this->state['id'] )
+					);
+					$done = true;
+				}
+				$this->state['db_findings'] = isset( $cursor['findings'] ) ? (int) $cursor['findings'] : 0;
+				if ( ! $done ) {
+					$this->state['db']      = $cursor;
+					$this->state['current'] = 'options' === $cursor['stage'] ? __( 'Database: options', 'wp-cyber-security' ) : __( 'Database: posts', 'wp-cyber-security' );
+					return false;
+				}
+			}
+			$this->state['db']      = null;
+			$this->state['db_done'] = true;
+		}
+
+		if ( empty( $this->state['paths'] ) && empty( $this->state['extras_done'] ) ) {
+			$this->state['extras_done']  = true;
+			$this->state['missing_core'] = (int) wpcybersec()->scanner->missing_core_count();
+			if ( $this->state['missing_core'] > 0 ) {
+				wpcybersec()->logger->log(
+					'core_files_missing',
+					sprintf(
+						/* translators: %s: number of files */
+						_n( '%s WordPress core file is missing. Reinstall WordPress from Dashboard > Updates to restore it.', '%s WordPress core files are missing. Reinstall WordPress from Dashboard > Updates to restore them.', $this->state['missing_core'], 'wp-cyber-security' ),
+						number_format_i18n( $this->state['missing_core'] )
+					),
+					array( 'id' => $this->state['id'], 'missing_core' => $this->state['missing_core'] )
+				);
+			}
+			$watch = wpcybersec()->user_watch;
+			if ( $watch ) {
+				try {
+					$this->state['new_admins'] = (int) $watch->check_all();
+				} catch ( \Throwable $e ) {
+					wpcybersec()->logger->log( 'admin_check_failed', Signatures::clean_snippet( $e->getMessage() ), array( 'id' => $this->state['id'] ) );
+				}
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Deleted-file detection, cleanup and notifications.
+	 *
+	 * @param float $deadline Microtime deadline of this tick (the database scan
+	 *                        may need several ticks).
+	 */
+	private function finish( $deadline = 0.0 ) {
+		if ( ! $this->finish_extras( $deadline > 0 ? $deadline : microtime( true ) + self::DEFAULT_BUDGET ) ) {
+			return; // The database scan continues next tick.
+		}
+		if ( $this->cancel_requested( true ) ) {
+			$this->cancel_now();
+			return;
+		}
 		$prefixes = ! empty( $this->state['prefixes'] ) ? (array) $this->state['prefixes'] : array( '' );
 		// Rows written after this run started (trusted after a decision, an
 		// update, an approved upload...) describe files that exist: keep them.
@@ -1548,14 +1812,18 @@ class Scan_Job {
 			'scan_finished',
 			$this->state['message'],
 			array(
-				'id'          => $this->state['id'],
-				'files'       => $this->state['files_done'],
-				'new'         => $this->state['new'],
-				'modified'    => $this->state['modified'],
-				'deleted'     => $this->state['deleted'],
-				'threats'     => $this->state['threats'],
-				'quarantined' => $this->state['quarantined'],
-				'skipped'     => $this->state['skipped'],
+				'id'           => $this->state['id'],
+				'files'        => $this->state['files_done'],
+				'new'          => $this->state['new'],
+				'modified'     => $this->state['modified'],
+				'deleted'      => $this->state['deleted'],
+				'threats'      => $this->state['threats'],
+				'quarantined'  => $this->state['quarantined'],
+				'skipped'      => $this->state['skipped'],
+				'database'     => ! empty( $this->state['database'] ),
+				'db_findings'  => isset( $this->state['db_findings'] ) ? (int) $this->state['db_findings'] : 0,
+				'missing_core' => isset( $this->state['missing_core'] ) ? (int) $this->state['missing_core'] : -1,
+				'new_admins'   => isset( $this->state['new_admins'] ) ? (int) $this->state['new_admins'] : 0,
 			)
 		);
 
@@ -2040,7 +2308,7 @@ class Scan_Job {
 	 * @return string
 	 */
 	private function summary( array $state ) {
-		return sprintf(
+		$text = sprintf(
 			/* translators: 1: files checked, 2: new, 3: modified, 4: deleted, 5: threats */
 			__( 'Checked %1$s files. New: %2$s, modified: %3$s, deleted: %4$s, threats: %5$s.', 'wp-cyber-security' ),
 			number_format_i18n( $state['files_done'] ),
@@ -2049,6 +2317,19 @@ class Scan_Job {
 			number_format_i18n( $state['deleted'] ),
 			number_format_i18n( $state['threats'] )
 		);
+		if ( isset( $state['missing_core'] ) && (int) $state['missing_core'] >= 0 ) {
+			/* translators: %s: number of files */
+			$text .= ' ' . sprintf( __( 'Missing core files: %s.', 'wp-cyber-security' ), number_format_i18n( (int) $state['missing_core'] ) );
+		}
+		if ( ! empty( $state['database'] ) ) {
+			/* translators: %s: number of findings */
+			$text .= ' ' . sprintf( __( 'Database findings: %s.', 'wp-cyber-security' ), number_format_i18n( isset( $state['db_findings'] ) ? (int) $state['db_findings'] : 0 ) );
+		}
+		if ( ! empty( $state['new_admins'] ) ) {
+			/* translators: %s: number of accounts */
+			$text .= ' ' . sprintf( __( 'New administrators: %s.', 'wp-cyber-security' ), number_format_i18n( (int) $state['new_admins'] ) );
+		}
+		return $text;
 	}
 
 	/**
@@ -2056,24 +2337,28 @@ class Scan_Job {
 	 */
 	private function idle_status() {
 		return array(
-			'id'          => '',
-			'state'       => 'idle',
-			'mode'        => '',
-			'malware'     => false,
-			'trigger'     => '',
-			'files_total' => 0,
-			'files_done'  => 0,
-			'new'         => 0,
-			'modified'    => 0,
-			'deleted'     => 0,
-			'threats'     => 0,
-			'quarantined' => 0,
-			'skipped'     => 0,
-			'started_at'  => 0,
-			'finished_at' => 0,
-			'current'     => '',
-			'message'     => '',
-			'percent'     => 0.0,
+			'id'           => '',
+			'state'        => 'idle',
+			'mode'         => '',
+			'malware'      => false,
+			'trigger'      => '',
+			'files_total'  => 0,
+			'files_done'   => 0,
+			'new'          => 0,
+			'modified'     => 0,
+			'deleted'      => 0,
+			'threats'      => 0,
+			'quarantined'  => 0,
+			'skipped'      => 0,
+			'started_at'   => 0,
+			'finished_at'  => 0,
+			'current'      => '',
+			'message'      => '',
+			'percent'      => 0.0,
+			'database'     => false,
+			'db_findings'  => 0,
+			'missing_core' => -1,
+			'new_admins'   => 0,
 		);
 	}
 }

@@ -43,6 +43,10 @@ final class Plugin {
 	public $file_monitor;
 	/** @var Scan_Job */
 	public $scan_job;
+	/** @var Db_Scanner */
+	public $db_scanner;
+	/** @var User_Watch */
+	public $user_watch;
 	/** @var Notifier */
 	public $notifier;
 	/** @var Upload_Gate */
@@ -102,6 +106,8 @@ final class Plugin {
 		$this->scanner       = new Scanner();
 		$this->file_monitor  = new File_Monitor();
 		$this->scan_job      = new Scan_Job();
+		$this->db_scanner    = new Db_Scanner();
+		$this->user_watch    = new User_Watch();
 		$this->notifier      = new Notifier();
 		$this->upload_gate   = new Upload_Gate();
 		$this->install_gate  = new Install_Gate();
@@ -115,6 +121,8 @@ final class Plugin {
 			$this->scanner,
 			$this->file_monitor,
 			$this->scan_job,
+			$this->db_scanner,
+			$this->user_watch,
 			$this->notifier,
 			$this->upload_gate,
 			$this->install_gate,

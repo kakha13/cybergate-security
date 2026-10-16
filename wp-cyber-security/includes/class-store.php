@@ -13,7 +13,8 @@ defined( 'ABSPATH' ) || exit;
  * Tables (prefix = $wpdb->prefix . 'wpcybersec_'):
  *
  * items     Everything that needs or had an admin decision: held uploads,
- *           held installs, unknown files, malware threats.
+ *           held installs, unknown files, malware threats (files and database
+ *           content), new administrator accounts.
  * manifest  Known files: relative path -> sha256, size, mtime, state.
  * allowlist Approved hashes and installs (managed by Allowlist).
  * log       Activity log.
@@ -27,6 +28,10 @@ class Store {
 	const TYPE_INSTALL = 'install';
 	const TYPE_FILE    = 'file';
 	const TYPE_THREAT  = 'threat';
+	const TYPE_USER    = 'user';    // An account that gained administrator rights (User_Watch).
+
+	/* Item sources that are not files. */
+	const SOURCE_DATABASE = 'database'; // Threat found in the database (Db_Scanner); path "db:option:<name>" or "db:post:<id>".
 
 	/* Item statuses. */
 	const STATUS_PENDING     = 'pending';     // Waiting for an admin decision.
@@ -262,13 +267,13 @@ class Store {
 	/**
 	 * Counts used for menu badges and dashboard cards.
 	 *
-	 * @return array { pending: int (uploads+installs+files), threats: int, quarantined: int }
+	 * @return array { pending: int (uploads+installs+files+new administrators), threats: int (files and database), quarantined: int }
 	 */
 	public function counts() {
 		return array(
 			'pending'     => $this->items_count(
 				array(
-					'type'   => array( self::TYPE_UPLOAD, self::TYPE_INSTALL, self::TYPE_FILE ),
+					'type'   => array( self::TYPE_UPLOAD, self::TYPE_INSTALL, self::TYPE_FILE, self::TYPE_USER ),
 					'status' => self::STATUS_PENDING,
 				)
 			),
@@ -321,7 +326,7 @@ class Store {
 	public function items_resolve_open( $rel, $reason ) {
 		global $wpdb;
 		$table = self::table( 'items' );
-		$ids   = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$table} WHERE type IN (%s, %s) AND status = %s AND path = %s AND quarantine_path = ''", self::TYPE_FILE, self::TYPE_THREAT, self::STATUS_PENDING, self::db_text( $rel ) ) ); // phpcs:ignore
+		$ids   = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$table} WHERE type IN (%s, %s) AND status = %s AND path = %s AND quarantine_path = '' AND source <> %s", self::TYPE_FILE, self::TYPE_THREAT, self::STATUS_PENDING, self::db_text( $rel ), self::SOURCE_DATABASE ) ); // phpcs:ignore
 		foreach ( (array) $ids as $id ) {
 			$this->item_update(
 				(int) $id,

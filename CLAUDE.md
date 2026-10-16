@@ -25,3 +25,6 @@ WordPress security plugin: full-site malware scan, holds every new upload/instal
 - A whole-site scan without a baseline (`wpcybersec_baseline_at`) is converted to a baseline; never run an incremental scan on an empty manifest
 - Files written by the plugin itself (`.htaccess`, `.user.ini`, `wp-config.php` edits) must be passed to `file_monitor->trust_file()` or the next scan reports them
 - Guard (`guard/guard.php`) runs before WordPress via `auto_prepend_file`: no WP functions, PHP 5.6 syntax, must never fatal
+- Real-site false positives to keep quiet: server `error_log` files (no extension) inside core folders, `wordfence-waf.php` in the root, bundled `wp-content/plugins/hello.php` (verify against core checksums, not the hello-dolly listing), thousands of changed files right after plugin updates
+- Script injection hides in header/footer plugins (`{prefix}hfcm_scripts`, `ihaf_insert_*`, Code Snippets): the database scan must cover them
+- ClamAV/maldet find more known infections but do not block attacks; say it that way in UI text

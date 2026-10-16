@@ -174,6 +174,9 @@ class Diff {
 		if ( Store::TYPE_INSTALL === $item['type'] ) {
 			return self::unavailable( $out, 'install' );
 		}
+		if ( Store::TYPE_USER === $item['type'] || Db_Scanner::is_db_item( $item ) ) {
+			return self::unavailable( $out, 'not_a_file' );
+		}
 
 		$current = self::current_text( $item );
 		if ( null === $current['text'] ) {
@@ -361,6 +364,9 @@ class Diff {
 	 */
 	public static function view_button( array $item, $held ) {
 		$details = isset( $item['details'] ) && is_array( $item['details'] ) ? $item['details'] : array();
+		if ( Db_Scanner::is_db_item( $item ) ) {
+			return null; // A database value: the matches with their snippets are the whole story.
+		}
 		if ( in_array( $item['type'], array( Store::TYPE_FILE, Store::TYPE_THREAT ), true ) ) {
 			$modified = ( isset( $details['change'] ) && 'modified' === $details['change'] ) || ( isset( $details['checksum'] ) && 'mismatch' === $details['checksum'] );
 			if ( $modified ) {
@@ -624,6 +630,8 @@ class Diff {
 	 */
 	public static function reason_text( $reason ) {
 		switch ( $reason ) {
+			case 'not_a_file':
+				return __( 'This report is not about a file (a database value or a user account), so there is no file to show.', 'wp-cyber-security' );
 			case 'new_file':
 				return __( 'No earlier version was stored. This file was not part of the baseline, so the full content is shown instead.', 'wp-cyber-security' );
 			case 'upload':

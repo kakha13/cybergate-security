@@ -7,9 +7,11 @@
 
 namespace WPCyberSecurity\Admin;
 
+use WPCyberSecurity\Db_Scanner;
 use WPCyberSecurity\Decisions;
 use WPCyberSecurity\Diff;
 use WPCyberSecurity\Store;
+use WPCyberSecurity\User_Watch;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -137,8 +139,8 @@ class Reports_Page {
 
 		$this->filters = array(
 			'severity' => in_array( $severity, array( 2, 3 ), true ) ? $severity : 0,
-			'type'     => in_array( $type, array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE, Store::TYPE_THREAT ), true ) ? $type : '',
-			'kind'     => in_array( $kind, array( 'hash', 'install' ), true ) ? $kind : '',
+			'type'     => in_array( $type, array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE, Store::TYPE_THREAT, Store::TYPE_USER ), true ) ? $type : '',
+			'kind'     => in_array( $kind, array( 'hash', 'install', 'db' ), true ) ? $kind : '',
 			'event'    => substr( $event, 0, 50 ),
 		);
 	}
@@ -304,7 +306,7 @@ class Reports_Page {
 				}
 				break;
 			default:
-				$types          = array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE );
+				$types          = array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE, Store::TYPE_USER );
 				$args['type']   = in_array( $this->filters['type'], $types, true ) ? $this->filters['type'] : $types;
 				$args['status'] = Store::STATUS_PENDING;
 		}
@@ -407,7 +409,8 @@ class Reports_Page {
 				break;
 			case 'threats':
 				echo '<div class="wpcs-notice wpcs-notice--warn"><span class="dashicons dashicons-warning" aria-hidden="true"></span><div><p>'
-					. esc_html__( 'Quarantine moves a file to a locked folder where it cannot run, and you can restore it later. Use "Mark safe" only for files you recognize: the exact file is then trusted and not flagged again.', 'wp-cyber-security' )
+					. esc_html__( 'Quarantine moves a file to a locked folder where it cannot run, and you can restore it later. Use "Mark safe" only for files you recognize: the exact file is then trusted and not flagged again.', 'wp-cyber-security' ) . ' '
+					. esc_html__( 'Database findings (options, widgets, posts) are cleaned where they are stored, for example by editing the post; the report closes by itself after the next scan that no longer finds them.', 'wp-cyber-security' )
 					. '</p></div></div>';
 				break;
 			case 'quarantine':
@@ -468,6 +471,9 @@ class Reports_Page {
 				Store::TYPE_INSTALL => __( 'Installs', 'wp-cyber-security' ),
 				Store::TYPE_FILE    => __( 'Files', 'wp-cyber-security' ),
 			);
+			if ( 'quarantine' !== $this->tab ) {
+				$types[ Store::TYPE_USER ] = __( 'Administrators', 'wp-cyber-security' );
+			}
 			if ( 'pending' !== $this->tab ) {
 				$types[ Store::TYPE_THREAT ] = __( 'Threats', 'wp-cyber-security' );
 			}
@@ -568,7 +574,7 @@ class Reports_Page {
 			. ' aria-label="' . esc_attr( sprintf( __( 'Select %s', 'wp-cyber-security' ), $this->item_title( $item ) ) ) . '"></th>';
 
 		// Type.
-		echo '<td class="column-type">' . $this->type_badge( $type ) . '</td>'; // phpcs:ignore WordPress.Security.EscapeOutput -- built with escaping.
+		echo '<td class="column-type">' . $this->type_badge( $type, $item ) . '</td>'; // phpcs:ignore WordPress.Security.EscapeOutput -- built with escaping.
 
 		// Item.
 		echo '<td class="column-item">' . $this->item_cell( $item, $details ) . '</td>'; // phpcs:ignore WordPress.Security.EscapeOutput -- built with escaping.
@@ -624,22 +630,97 @@ class Reports_Page {
 		if ( Store::TYPE_INSTALL === $item['type'] && ! empty( $details['name'] ) ) {
 			return (string) $details['name'];
 		}
+		if ( Store::TYPE_USER === $item['type'] ) {
+			return User_Watch::item_login( $item );
+		}
+		if ( Db_Scanner::is_db_item( $item ) ) {
+			return Db_Scanner::location_label( $item );
+		}
 		return basename( (string) $item['path'] );
 	}
 
 	/**
-	 * @param string $type Item type.
+	 * @param string     $type Item type.
+	 * @param array|null $item Item (database findings get their own badge).
 	 * @return string HTML.
 	 */
-	private function type_badge( $type ) {
+	private function type_badge( $type, $item = null ) {
 		$map = array(
 			Store::TYPE_UPLOAD  => array( __( 'Upload', 'wp-cyber-security' ), 'upload' ),
 			Store::TYPE_INSTALL => array( __( 'Install', 'wp-cyber-security' ), 'admin-plugins' ),
 			Store::TYPE_FILE    => array( __( 'File', 'wp-cyber-security' ), 'media-code' ),
 			Store::TYPE_THREAT  => array( __( 'Threat', 'wp-cyber-security' ), 'warning' ),
+			Store::TYPE_USER    => array( __( 'New administrator', 'wp-cyber-security' ), 'admin-users' ),
 		);
 		$entry = isset( $map[ $type ] ) ? $map[ $type ] : array( ucfirst( $type ), 'marker' );
-		return '<span class="wpcs-badge wpcs-type wpcs-type--' . esc_attr( sanitize_html_class( $type ) ) . '"><span class="dashicons dashicons-' . esc_attr( $entry[1] ) . '" aria-hidden="true"></span>' . esc_html( $entry[0] ) . '</span>';
+		$class = $type;
+		if ( is_array( $item ) && Db_Scanner::is_db_item( $item ) ) {
+			$entry = array( __( 'Database', 'wp-cyber-security' ), 'database' );
+			$class = 'database';
+		}
+		return '<span class="wpcs-badge wpcs-type wpcs-type--' . esc_attr( sanitize_html_class( $class ) ) . '"><span class="dashicons dashicons-' . esc_attr( $entry[1] ) . '" aria-hidden="true"></span>' . esc_html( $entry[0] ) . '</span>';
+	}
+
+	/**
+	 * Place of a database finding, with an edit link for posts.
+	 *
+	 * @param array $item Item.
+	 * @return string HTML.
+	 */
+	private function db_location_html( array $item ) {
+		$label   = Db_Scanner::location_label( $item );
+		$post_id = Db_Scanner::post_id( $item );
+		$link    = $post_id ? get_edit_post_link( $post_id, 'raw' ) : '';
+		if ( $link ) {
+			return '<a class="wpcs-item-name" href="' . esc_url( $link ) . '">' . esc_html( $label ) . '</a>';
+		}
+		return '<strong class="wpcs-item-name">' . esc_html( $label ) . '</strong>';
+	}
+
+	/**
+	 * How an account became an administrator.
+	 *
+	 * @param array $details Item details.
+	 * @return string
+	 */
+	private function admin_how( array $details ) {
+		$how = isset( $details['how'] ) ? (string) $details['how'] : '';
+		switch ( $how ) {
+			case 'registered':
+				return __( 'New account created as administrator', 'wp-cyber-security' );
+			case 'super_admin':
+				return __( 'Made a network super admin', 'wp-cyber-security' );
+			case 'scan':
+				return __( 'Found by the administrator check of a scan', 'wp-cyber-security' );
+			default:
+				return __( 'Existing account given the administrator role', 'wp-cyber-security' );
+		}
+	}
+
+	/**
+	 * Who gave an account administrator rights.
+	 *
+	 * @param array $item    Item.
+	 * @param array $details Details.
+	 * @return string
+	 */
+	private function admin_granted_by( array $item, array $details ) {
+		if ( 'scan' === (string) $item['source'] ) {
+			return __( 'Unknown (possibly added straight to the database)', 'wp-cyber-security' );
+		}
+		$name = Admin::user_name( $item['user_id'] );
+		if ( '' !== $name ) {
+			return ! empty( $details['granted_by_login'] ) ? $name . ' (' . (string) $details['granted_by_login'] . ')' : $name;
+		}
+		if ( ! empty( $details['granted_by_login'] ) ) {
+			return (string) $details['granted_by_login'];
+		}
+		$contexts = array(
+			'cli'  => __( 'No logged-in user (WP-CLI)', 'wp-cyber-security' ),
+			'cron' => __( 'No logged-in user (scheduled task)', 'wp-cyber-security' ),
+		);
+		$context  = isset( $details['context'] ) ? (string) $details['context'] : '';
+		return isset( $contexts[ $context ] ) ? $contexts[ $context ] : __( 'No logged-in user', 'wp-cyber-security' );
 	}
 
 	/**
@@ -679,6 +760,35 @@ class Reports_Page {
 	 */
 	private function item_cell( array $item, array $details ) {
 		$html = '';
+		if ( Store::TYPE_USER === $item['type'] ) {
+			$html  = '<strong class="wpcs-item-name">' . esc_html( User_Watch::item_login( $item ) ) . '</strong>';
+			$html .= ' <span class="wpcs-muted">' . esc_html( '#' . User_Watch::item_user_id( $item ) ) . '</span>';
+			if ( ! empty( $details['user_email'] ) ) {
+				$html .= '<span class="wpcs-sub">' . esc_html( (string) $details['user_email'] ) . '</span>';
+			}
+			$html .= '<span class="wpcs-sub">' . esc_html( $this->admin_how( $details ) ) . '</span>';
+			list( $who, $context ) = $this->source_parts( $item, $details );
+			$html .= '<span class="wpcs-sub wpcs-narrow-when">' . esc_html( Admin::ago( Admin::utc_ts( $item['created_at'] ) ) ) . '</span>';
+			$html .= '<span class="wpcs-sub wpcs-narrow-source">' . esc_html( $who . ', ' . $context ) . '</span>';
+			return $html;
+		}
+		if ( Db_Scanner::is_db_item( $item ) ) {
+			$html = $this->db_location_html( $item );
+			$meta = array();
+			if ( ! empty( $details['post_type'] ) ) {
+				$meta[] = esc_html( (string) $details['post_type'] . ( ! empty( $details['post_status'] ) ? ', ' . (string) $details['post_status'] : '' ) );
+			}
+			if ( (int) $item['size'] > 0 ) {
+				$meta[] = esc_html( size_format( (int) $item['size'], (int) $item['size'] >= KB_IN_BYTES ? 1 : 0 ) );
+			}
+			if ( $meta ) {
+				$html .= '<span class="wpcs-sub wpcs-meta">' . implode( '<span class="wpcs-sep" aria-hidden="true"></span>', $meta ) . '</span>';
+			}
+			list( $who, $context ) = $this->source_parts( $item, $details );
+			$html .= '<span class="wpcs-sub wpcs-narrow-when">' . esc_html( Admin::ago( Admin::utc_ts( $item['created_at'] ) ) ) . '</span>';
+			$html .= '<span class="wpcs-sub wpcs-narrow-source">' . esc_html( $who . ', ' . $context ) . '</span>';
+			return $html;
+		}
 		if ( Store::TYPE_INSTALL === $item['type'] ) {
 			$name = ! empty( $details['name'] ) ? (string) $details['name'] : ( ! empty( $details['slug'] ) ? (string) $details['slug'] : (string) $item['path'] );
 			$html = '<strong class="wpcs-item-name">' . esc_html( $name ) . '</strong>';
@@ -749,6 +859,27 @@ class Reports_Page {
 		}
 		$user = Admin::user_name( $item['user_id'] );
 
+		if ( Store::TYPE_USER === $item['type'] ) {
+			$who      = $this->admin_granted_by( $item, $details );
+			$contexts = array(
+				'admin'  => __( 'Admin screens', 'wp-cyber-security' ),
+				'ajax'   => __( 'Admin AJAX request', 'wp-cyber-security' ),
+				'rest'   => __( 'REST API', 'wp-cyber-security' ),
+				'xmlrpc' => __( 'XML-RPC', 'wp-cyber-security' ),
+				'cli'    => __( 'WP-CLI', 'wp-cyber-security' ),
+				'cron'   => __( 'Scheduled task', 'wp-cyber-security' ),
+				'front'  => __( 'Front end request', 'wp-cyber-security' ),
+				'scan'   => __( 'Administrator check', 'wp-cyber-security' ),
+			);
+			$context  = isset( $details['context'], $contexts[ (string) $details['context'] ] ) ? $contexts[ (string) $details['context'] ] : __( 'Administrator watch', 'wp-cyber-security' );
+			return array( $who, $context );
+		}
+		if ( Store::SOURCE_DATABASE === $source ) {
+			/* translators: %s: user display name */
+			$who = '' !== $user ? sprintf( __( 'Scan by %s', 'wp-cyber-security' ), $user ) : __( 'Scheduled scan', 'wp-cyber-security' );
+			return array( $who, __( 'Database scan', 'wp-cyber-security' ) );
+		}
+
 		if ( 'scan' === $source || ( '' === $source && in_array( $item['type'], array( Store::TYPE_FILE, Store::TYPE_THREAT ), true ) ) ) {
 			/* translators: %s: user display name */
 			$who     = '' !== $user ? sprintf( __( 'Scan by %s', 'wp-cyber-security' ), $user ) : __( 'Scheduled scan', 'wp-cyber-security' );
@@ -805,6 +936,9 @@ class Reports_Page {
 	 * @return string HTML.
 	 */
 	private function verdict_cell( array $item, array $details ) {
+		if ( Store::TYPE_USER === $item['type'] ) {
+			return Admin::severity_badge( (int) $item['severity'] ) . '<span class="wpcs-verdict__title">' . esc_html__( 'New administrator account', 'wp-cyber-security' ) . '</span><span class="wpcs-sub">' . esc_html__( 'Not on your trusted administrator list', 'wp-cyber-security' ) . '</span>';
+		}
 		$hits = $this->hits( $details );
 		if ( $hits ) {
 			$top   = $hits[0];
@@ -877,6 +1011,10 @@ class Reports_Page {
 		if ( Store::STATUS_PENDING === $item['status'] ) {
 			if ( $held ) {
 				$html .= '<span class="wpcs-sub">' . esc_html__( 'Held in quarantine', 'wp-cyber-security' ) . '</span>';
+			} elseif ( Store::TYPE_USER === $item['type'] ) {
+				$html .= '<span class="wpcs-sub">' . esc_html__( 'Has administrator rights', 'wp-cyber-security' ) . '</span>';
+			} elseif ( Db_Scanner::is_db_item( $item ) ) {
+				$html .= '<span class="wpcs-sub">' . esc_html__( 'Still in the database', 'wp-cyber-security' ) . '</span>';
 			} elseif ( in_array( $item['type'], array( Store::TYPE_FILE, Store::TYPE_THREAT ), true ) ) {
 				$html .= '<span class="wpcs-sub">' . esc_html__( 'Still in place', 'wp-cyber-security' ) . '</span>';
 			}
@@ -921,7 +1059,14 @@ class Reports_Page {
 		$labels = $this->action_labels();
 		$name   = $this->item_title( $item );
 
-		if ( in_array( $type, array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL ), true ) ) {
+		$not_file = Store::TYPE_USER === $type || Db_Scanner::is_db_item( $item );
+		if ( Store::TYPE_USER === $type ) {
+			$set                = array( 'approve', 'deny' );
+			$labels['approve']  = array( __( 'Allow', 'wp-cyber-security' ), 'yes', 'wpcs-btn-approve' );
+			$labels['deny']     = array( __( 'Remove admin role', 'wp-cyber-security' ), 'admin-users', 'wpcs-btn-danger' );
+		} elseif ( Db_Scanner::is_db_item( $item ) ) {
+			$set = array( 'ignore' );
+		} elseif ( in_array( $type, array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL ), true ) ) {
 			$set = array( 'approve', 'deny', 'restore', 'delete' );
 		} elseif ( Store::TYPE_THREAT === $type ) {
 			$set = array( 'approve', 'ignore', 'quarantine', 'restore', 'delete' );
@@ -939,6 +1084,12 @@ class Reports_Page {
 			'deny'       => __( 'Reject it and delete the held copy', 'wp-cyber-security' ),
 			'delete'     => __( 'Delete permanently', 'wp-cyber-security' ),
 		);
+		if ( Store::TYPE_USER === $type ) {
+			$titles['approve'] = __( 'This administrator is expected: trust the account from now on', 'wp-cyber-security' );
+			$titles['deny']    = __( 'Make the account a subscriber, revoke super admin and sign it out everywhere', 'wp-cyber-security' );
+		} elseif ( Db_Scanner::is_db_item( $item ) ) {
+			$titles['ignore'] = __( 'False positive: trust this exact content at this place from now on', 'wp-cyber-security' );
+		}
 		$confirm_delete = $held
 			/* translators: %s: file name */
 			? sprintf( __( 'Delete the held copy of %s permanently? This cannot be undone.', 'wp-cyber-security' ), $name )
@@ -953,6 +1104,10 @@ class Reports_Page {
 				. ' class="' . esc_attr( $classes ) . '" data-wpcs-action="' . esc_attr( $action ) . '" data-id="' . esc_attr( (string) $id ) . '"'
 				. ' title="' . esc_attr( $titles[ $action ] ) . '"'
 				. ( 'delete' === $action ? ' data-confirm="' . esc_attr( $confirm_delete ) . '"' : '' )
+				. ( Store::TYPE_USER === $type && 'deny' === $action
+					/* translators: %s: user login */
+					? ' data-confirm="' . esc_attr( sprintf( __( 'Remove the administrator role from %s? The account becomes a subscriber and is signed out everywhere.', 'wp-cyber-security' ), $name ) ) . '"'
+					: '' )
 				. '><span class="dashicons dashicons-' . esc_attr( $label[1] ) . '" aria-hidden="true"></span>' . esc_html( $label[0] ) . '</button>';
 		}
 		$html .= '</div>';
@@ -972,7 +1127,9 @@ class Reports_Page {
 			),
 			'wpcybersec_download_' . $id
 		);
-		$html    .= '<a class="wpcs-download' . ( $held ? '' : ' wpcs-hidden' ) . '" href="' . esc_url( $download ) . '" title="' . esc_attr__( 'Download the held copy to inspect it (saved with a .quarantined extension)', 'wp-cyber-security' ) . '"><span class="dashicons dashicons-download" aria-hidden="true"></span>' . esc_html__( 'Download', 'wp-cyber-security' ) . '</a>';
+		if ( ! $not_file ) {
+			$html .= '<a class="wpcs-download' . ( $held ? '' : ' wpcs-hidden' ) . '" href="' . esc_url( $download ) . '" title="' . esc_attr__( 'Download the held copy to inspect it (saved with a .quarantined extension)', 'wp-cyber-security' ) . '"><span class="dashicons dashicons-download" aria-hidden="true"></span>' . esc_html__( 'Download', 'wp-cyber-security' ) . '</a>';
+		}
 		if ( $opts['details'] ) {
 			$html .= '<button type="button" class="button-link wpcs-details-toggle" aria-expanded="false" aria-controls="wpcs-details-' . esc_attr( (string) $id ) . '"><span class="dashicons dashicons-arrow-down-alt2" aria-hidden="true"></span><span class="wpcs-details-toggle__text">' . esc_html__( 'Details', 'wp-cyber-security' ) . '</span></button>';
 		}
@@ -1063,7 +1220,40 @@ class Reports_Page {
 		}
 
 		$rows = array();
-		if ( '' !== (string) $item['sha256'] ) {
+		if ( Store::TYPE_USER === $item['type'] ) {
+			$user_id = User_Watch::item_user_id( $item );
+			$edit    = $user_id ? get_edit_user_link( $user_id ) : '';
+			$account = esc_html( User_Watch::item_login( $item ) . ' (#' . $user_id . ')' );
+			$rows[ __( 'Account', 'wp-cyber-security' ) ] = $edit ? '<a href="' . esc_url( $edit ) . '">' . $account . '</a>' : $account;
+			foreach (
+				array(
+					'user_email'   => __( 'Email', 'wp-cyber-security' ),
+					'display_name' => __( 'Display name', 'wp-cyber-security' ),
+				) as $key => $label
+			) {
+				if ( ! empty( $details[ $key ] ) ) {
+					$rows[ $label ] = esc_html( (string) $details[ $key ] );
+				}
+			}
+			if ( ! empty( $details['user_registered'] ) ) {
+				$rows[ __( 'Registered', 'wp-cyber-security' ) ] = esc_html( Admin::datetime( Admin::utc_ts( (string) $details['user_registered'] ) ) );
+			}
+			$rows[ __( 'How', 'wp-cyber-security' ) ]        = esc_html( $this->admin_how( $details ) );
+			$rows[ __( 'Granted by', 'wp-cyber-security' ) ] = esc_html( $this->admin_granted_by( $item, $details ) );
+			if ( '' !== (string) $item['ip'] ) {
+				$rows[ __( 'IP address', 'wp-cyber-security' ) ] = '<code>' . esc_html( (string) $item['ip'] ) . '</code>';
+			}
+			if ( ! empty( $details['roles'] ) && is_array( $details['roles'] ) ) {
+				$rows[ __( 'Roles when reported', 'wp-cyber-security' ) ] = esc_html( implode( ', ', array_map( 'strval', $details['roles'] ) ) );
+			}
+		}
+		if ( Db_Scanner::is_db_item( $item ) ) {
+			$rows[ __( 'Location', 'wp-cyber-security' ) ] = $this->db_location_html( $item );
+			if ( ! empty( $details['table'] ) ) {
+				$rows[ __( 'Table and key', 'wp-cyber-security' ) ] = '<code>' . esc_html( (string) $details['table'] . ' / ' . ( isset( $details['key'] ) ? (string) $details['key'] : '' ) ) . '</code>';
+			}
+			$rows[ __( 'Fingerprint', 'wp-cyber-security' ) ] = '<code class="wpcs-hash-full">' . esc_html( (string) $item['sha256'] ) . '</code>';
+		} elseif ( '' !== (string) $item['sha256'] ) {
 			$rows[ __( 'SHA-256', 'wp-cyber-security' ) ] = '<code id="wpcs-sha-' . esc_attr( (string) $id ) . '" class="wpcs-hash-full">' . esc_html( (string) $item['sha256'] ) . '</code>'
 				. ' <button type="button" class="button-link wpcs-copy-link" data-wpcs-copy="#wpcs-sha-' . esc_attr( (string) $id ) . '">' . esc_html__( 'Copy', 'wp-cyber-security' ) . '</button>';
 		}
@@ -1266,7 +1456,7 @@ class Reports_Page {
 		$ts        = Admin::utc_ts( $item['created_at'] );
 
 		echo '<section class="wpcs-card wpcs-change-item wpcs-sev-' . esc_attr( (string) $severity ) . '" data-item-id="' . esc_attr( (string) $item['id'] ) . '" data-held="' . ( $held ? '1' : '0' ) . '">';
-		echo '<div class="wpcs-change-item__badges">' . $this->type_badge( (string) $item['type'] ); // phpcs:ignore WordPress.Security.EscapeOutput -- built with escaping.
+		echo '<div class="wpcs-change-item__badges">' . $this->type_badge( (string) $item['type'], $item ); // phpcs:ignore WordPress.Security.EscapeOutput -- built with escaping.
 		if ( Store::TYPE_THREAT === $item['type'] || $hits ) {
 			echo Admin::severity_badge( $severity ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped in severity_badge().
 		}
@@ -1478,6 +1668,7 @@ class Reports_Page {
 			'a'      => array( 'href' => true, 'class' => true ),
 			'code'   => array( 'id' => true, 'class' => true ),
 			'span'   => array( 'class' => true, 'title' => true ),
+			'strong' => array( 'class' => true ),
 			'button' => array( 'type' => true, 'class' => true, 'data-wpcs-copy' => true ),
 		);
 	}
@@ -1571,7 +1762,7 @@ class Reports_Page {
 	private function render_allowlist_tab() {
 		echo '<div class="wpcs-notice"><span class="dashicons dashicons-yes-alt" aria-hidden="true"></span><div><p><strong>'
 			. esc_html__( 'Everything you allowed, remembered permanently.', 'wp-cyber-security' ) . '</strong> '
-			. esc_html__( 'File fingerprints (SHA-256) pass wherever the same file shows up again; plugin and theme entries let that install through. Removing an entry does not delete any file: it only means the file or install is held for approval again the next time it appears.', 'wp-cyber-security' )
+			. esc_html__( 'File fingerprints (SHA-256) pass wherever the same file shows up again; plugin and theme entries let that install through; database entries stop one exact value at one place (an option or a post) from being reported. Removing an entry does not delete anything: it only means the file, install or value is reported again the next time it is found.', 'wp-cyber-security' )
 			. '</p></div></div>';
 
 		$per_page = 50;
@@ -1605,6 +1796,7 @@ class Reports_Page {
 				''        => __( 'All entries', 'wp-cyber-security' ),
 				'hash'    => __( 'File fingerprints', 'wp-cyber-security' ),
 				'install' => __( 'Plugins and themes', 'wp-cyber-security' ),
+				'db'      => __( 'Database values', 'wp-cyber-security' ),
 			),
 			__( 'Filter by kind', 'wp-cyber-security' )
 		);
@@ -1646,7 +1838,10 @@ class Reports_Page {
 			$ts       = Admin::utc_ts( isset( $row['created_at'] ) ? $row['created_at'] : '' );
 			$by       = Admin::user_name( isset( $row['created_by'] ) ? $row['created_by'] : 0 );
 
-			if ( 'install' === $kind ) {
+			if ( 'db' === $kind ) {
+				$badge   = '<span class="wpcs-badge wpcs-type wpcs-type--database"><span class="dashicons dashicons-database" aria-hidden="true"></span>' . esc_html__( 'Database', 'wp-cyber-security' ) . '</span>';
+				$value_h = $this->short_hash( $value );
+			} elseif ( 'install' === $kind ) {
 				$is_theme = 0 === strpos( $value, 'theme:' );
 				$badge    = '<span class="wpcs-badge wpcs-type wpcs-type--install"><span class="dashicons dashicons-' . ( $is_theme ? 'admin-appearance' : 'admin-plugins' ) . '" aria-hidden="true"></span>' . esc_html( $is_theme ? __( 'Theme', 'wp-cyber-security' ) : __( 'Plugin', 'wp-cyber-security' ) ) . '</span>';
 				$value_h  = '<code class="wpcs-mono">' . esc_html( $value ) . '</code>';

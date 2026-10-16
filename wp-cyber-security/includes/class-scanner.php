@@ -52,6 +52,9 @@ class Scanner {
 	/** @var string[]|null Plugin folder roots (as given and resolved), with trailing slash. */
 	private $self_roots = null;
 
+	/** Lowercase names in wp-admin/ and wp-includes/ that hosts and tools leave behind (never code). */
+	const CORE_JUNK = array( 'error_log', 'php_errorlog', 'php_error.log', '.ds_store', 'thumbs.db', 'desktop.ini' );
+
 	/**
 	 * Hooks.
 	 */
@@ -346,7 +349,7 @@ class Scanner {
 					if ( '' === $md5 ) {
 						$md5 = (string) @md5_file( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 					}
-					if ( '' !== $md5 && hash_equals( strtolower( (string) $map[ $core_rel ] ), strtolower( $md5 ) ) ) {
+					if ( '' !== $md5 && ( hash_equals( strtolower( (string) $map[ $core_rel ] ), strtolower( $md5 ) ) || in_array( strtolower( (string) $map[ $core_rel ] ), $this->line_ending_hashes( $abs, 'md5' ), true ) ) ) {
 						return array(
 							'verdict' => 'match',
 							'source'  => 'core',
@@ -391,11 +394,76 @@ class Scanner {
 					$sha256 = (string) @hash_file( 'sha256', $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 				}
 				$ok = '' !== $sha256 && in_array( strtolower( $sha256 ), (array) $map[ $inner ], true );
+				if ( ! $ok && '' !== $sha256 ) {
+					// Same file with other line endings (git autocrlf, FTP text mode) is the original.
+					$ok = (bool) array_intersect( $this->line_ending_hashes( $abs, 'sha256' ), (array) $map[ $inner ] );
+				}
 				return array(
 					'verdict' => $ok ? 'match' : 'mismatch',
 					'source'  => 'plugin',
 					'reason'  => $ok ? '' : 'mismatch',
 				);
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether a PHP file can run nothing: empty, or only an open tag plus
+	 * comments and whitespace (placeholder index.php files).
+	 *
+	 * @param string $abs  File.
+	 * @param int    $size Size in bytes.
+	 * @return bool
+	 */
+	public function is_inert_php( $abs, $size ) {
+		if ( ! in_array( Paths::ext( $abs ), Signatures::php_extensions(), true ) ) {
+			return false;
+		}
+		if ( 0 === (int) $size ) {
+			return true;
+		}
+		if ( (int) $size > 2048 || ! function_exists( 'token_get_all' ) ) {
+			return false;
+		}
+		$code = (string) @file_get_contents( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		if ( '' === trim( $code ) ) {
+			return true;
+		}
+		$inert = array( T_OPEN_TAG, T_CLOSE_TAG, T_COMMENT, T_DOC_COMMENT, T_WHITESPACE );
+		foreach ( token_get_all( $code ) as $token ) {
+			if ( ! is_array( $token ) || ! in_array( $token[0], $inert, true ) ) {
+				return false; // Any statement, string, ; or inline HTML counts as content.
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Hashes of a text file with its line endings converted to LF and to CRLF.
+	 * Only used after a checksum mismatch, so the normal path pays nothing.
+	 * Deployments through git (autocrlf) or FTP in text mode change line
+	 * endings without changing a single line of code.
+	 *
+	 * @param string $abs  File.
+	 * @param string $algo md5 | sha256.
+	 * @return string[]
+	 */
+	private function line_ending_hashes( $abs, $algo ) {
+		$size = (int) @filesize( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( $size <= 0 || $size > 4 * MB_IN_BYTES ) {
+			return array();
+		}
+		$content = (string) @file_get_contents( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		if ( '' === $content || false !== strpos( substr( $content, 0, 8192 ), "\0" ) ) {
+			return array(); // Binary: line endings do not apply.
+		}
+		$lf   = str_replace( "\r\n", "\n", $content );
+		$crlf = str_replace( "\n", "\r\n", $lf );
+		$out  = array();
+		foreach ( array( $lf, $crlf ) as $variant ) {
+			if ( $variant !== $content ) {
+				$out[] = hash( $algo, $variant );
 			}
 		}
 		return $out;
@@ -546,6 +614,204 @@ class Scanner {
 			return 1 === preg_match( '~^(?:index\.php|xmlrpc\.php|license\.txt|readme\.html|wp-(?:activate|blog-header|comments-post|config-sample|cron|links-opml|load|login|mail|settings|signup|trackback)\.php)$~', $core_rel );
 		}
 		return false;
+	}
+
+	/**
+	 * Structural problem of a path, judged from where the file is and the
+	 * official core file list only (no content needed, so it is cheap enough to
+	 * run for unchanged files too):
+	 *
+	 *   core_unknown_file    an executable file (or one whose content is PHP)
+	 *                        inside wp-admin/ or wp-includes/ that is not part
+	 *                        of the installed WordPress release (only when the
+	 *                        core checksums could be loaded); other unknown
+	 *                        files there (logs, images...) are not reported;
+	 *   core_unknown_config  the same for .htaccess / .user.ini style files
+	 *                        (often added on purpose to protect wp-admin);
+	 *   root_php             a PHP file at the top of the WordPress folder that
+	 *                        is not a core file, not wp-config.php, not this
+	 *                        plugin's own guard bootstrap (exact content) and
+	 *                        not a plain Wordfence firewall loader.
+	 *
+	 * Log and OS leftovers (error_log, *.log, .DS_Store...) are never reported.
+	 *
+	 * @param string $rel Relative path (scan root).
+	 * @return string '' when nothing is wrong.
+	 */
+	public function integrity_issue( $rel ) {
+		$abs      = Paths::abs( $rel );
+		$core_rel = $this->core_relative( $abs );
+		if ( '' === $core_rel ) {
+			return '';
+		}
+		if ( 0 === strpos( $core_rel, 'wp-admin/' ) || 0 === strpos( $core_rel, 'wp-includes/' ) ) {
+			if ( ! $this->settings()->get( 'use_checksums', true ) ) {
+				return '';
+			}
+			$map = $this->core_map();
+			if ( ! is_array( $map ) || isset( $map[ $core_rel ] ) ) {
+				return ''; // Checksums unavailable (offline): nothing can be said.
+			}
+			$base = strtolower( basename( $core_rel ) );
+			if ( in_array( $base, self::CORE_JUNK, true ) || 'log' === Paths::ext( $base ) ) {
+				return '';
+			}
+			if ( in_array( $base, array( '.htaccess', '.htpasswd', '.user.ini', 'php.ini', 'web.config' ), true ) ) {
+				return 'core_unknown_config';
+			}
+			if ( Paths::is_executable( $abs ) || $this->content_is_php( $abs ) ) {
+				return 'core_unknown_file';
+			}
+			return '';
+		}
+		if ( false !== strpos( $core_rel, '/' ) ) {
+			return '';
+		}
+		if ( ! in_array( Paths::ext( $core_rel ), Signatures::php_extensions(), true ) ) {
+			return '';
+		}
+		if ( 'wp-config.php' === strtolower( $core_rel ) || $this->is_core_path( $rel ) || $this->is_own_bootstrap( $abs ) || $this->is_wordfence_loader( $abs ) ) {
+			return '';
+		}
+		return 'root_php';
+	}
+
+	/**
+	 * Whether a file with a name that does not run code holds PHP anyway
+	 * (a loader hidden as .ico, .txt or without an extension).
+	 *
+	 * @param string $abs Path.
+	 * @return bool
+	 */
+	private function content_is_php( $abs ) {
+		$head = (string) @file_get_contents( $abs, false, null, 0, 8192 ); // phpcs:ignore
+		return '' !== $head && ( Signatures::looks_like_php( $head ) || false !== stripos( $head, '<?php' ) );
+	}
+
+	/**
+	 * Whether ABSPATH/wordfence-waf.php is only Wordfence's firewall loader:
+	 * comments, if / file_exists / defined / define and an include of
+	 * wp-content/plugins/wordfence/waf/bootstrap.php, nothing else. Any other
+	 * code (a variable, another function call, another include) and it is
+	 * reported like any unknown root PHP file.
+	 *
+	 * @param string $abs Absolute path.
+	 * @return bool
+	 */
+	public function is_wordfence_loader( $abs ) {
+		$abs = wp_normalize_path( (string) $abs );
+		if ( 'wordfence-waf.php' !== $this->core_relative( $abs ) || ! function_exists( 'token_get_all' ) ) {
+			return false;
+		}
+		$size = @filesize( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( false === $size || $size > 16384 ) {
+			return false;
+		}
+		try {
+			$tokens = @token_get_all( (string) @file_get_contents( $abs ) ); // phpcs:ignore
+		} catch ( \Throwable $e ) {
+			return false;
+		}
+		$allowed_tokens = array( T_OPEN_TAG, T_CLOSE_TAG, T_COMMENT, T_DOC_COMMENT, T_WHITESPACE, T_IF, T_STRING, T_CONSTANT_ENCAPSED_STRING, T_INCLUDE, T_INCLUDE_ONCE, T_REQUIRE, T_REQUIRE_ONCE, T_DIR, T_BOOLEAN_AND, T_ENDIF );
+		$allowed_calls  = array( 'file_exists', 'is_file', 'is_readable', 'define', 'defined', 'true', 'false' );
+		$allowed_chars  = array( '(', ')', '{', '}', ';', ',', '.', '!', ':' );
+		$includes       = 0;
+		$in_include     = false;
+		$target         = '';
+		foreach ( $tokens as $token ) {
+			if ( is_string( $token ) ) {
+				if ( ! in_array( $token, $allowed_chars, true ) ) {
+					return false;
+				}
+				if ( $in_include && ';' === $token ) {
+					if ( ! preg_match( '~/wp-content/plugins/wordfence/waf/bootstrap\.php$~', $target ) ) {
+						return false;
+					}
+					$in_include = false;
+				}
+				continue;
+			}
+			list( $id, $text ) = $token;
+			if ( ! in_array( $id, $allowed_tokens, true ) ) {
+				return false;
+			}
+			if ( T_STRING === $id && ! in_array( strtolower( $text ), $allowed_calls, true ) ) {
+				return false;
+			}
+			if ( in_array( $id, array( T_INCLUDE, T_INCLUDE_ONCE, T_REQUIRE, T_REQUIRE_ONCE ), true ) ) {
+				if ( $in_include ) {
+					return false;
+				}
+				$in_include = true;
+				$target     = '';
+				++$includes;
+			} elseif ( $in_include && T_CONSTANT_ENCAPSED_STRING === $id ) {
+				$target .= wp_normalize_path( substr( $text, 1, -1 ) );
+			} elseif ( $in_include && T_STRING === $id ) {
+				return false; // Only literal paths (and __DIR__) are included.
+			}
+		}
+		return $includes > 0 && ! $in_include;
+	}
+
+	/**
+	 * Whether a file is exactly the early guard bootstrap this plugin writes
+	 * (ABSPATH/wpcybersec-guard.php). A file with that name but other content
+	 * is not trusted.
+	 *
+	 * @param string $abs Absolute path.
+	 * @return bool
+	 */
+	public function is_own_bootstrap( $abs ) {
+		$abs = wp_normalize_path( (string) $abs );
+		if ( 'wpcybersec-guard.php' !== basename( $abs ) ) {
+			return false;
+		}
+		$guard = function_exists( 'wpcybersec' ) && isset( wpcybersec()->guard_manager ) ? wpcybersec()->guard_manager : null;
+		// Only the copy at the top of the WordPress folder is the bootstrap.
+		if ( ! $guard || ! method_exists( $guard, 'bootstrap_code' ) || 'wpcybersec-guard.php' !== $this->core_relative( $abs ) ) {
+			return false;
+		}
+		$size = @filesize( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( false === $size || $size > 65536 ) {
+			return false;
+		}
+		try {
+			return (string) @file_get_contents( $abs ) === (string) $guard->bootstrap_code(); // phpcs:ignore
+		} catch ( \Throwable $e ) {
+			return false;
+		}
+	}
+
+	/**
+	 * Core files that are missing from the WordPress folder (listed in the
+	 * official checksums but not on disk). Bundled themes and plugins
+	 * (wp-content/) and the files hardening guides tell people to delete
+	 * (readme.html, license.txt, wp-config-sample.php) are not counted.
+	 *
+	 * @return int Count, -1 when the core checksums are not available.
+	 */
+	public function missing_core_count() {
+		if ( ! $this->settings()->get( 'use_checksums', true ) ) {
+			return -1;
+		}
+		$map = $this->core_map();
+		if ( ! is_array( $map ) ) {
+			return -1;
+		}
+		$root    = trailingslashit( wp_normalize_path( ABSPATH ) );
+		$skip    = array( 'readme.html', 'license.txt', 'wp-config-sample.php' );
+		$missing = 0;
+		foreach ( array_keys( $map ) as $core_rel ) {
+			$core_rel = (string) $core_rel;
+			if ( 0 === strpos( $core_rel, 'wp-content/' ) || in_array( $core_rel, $skip, true ) ) {
+				continue;
+			}
+			if ( ! @file_exists( $root . $core_rel ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				++$missing;
+			}
+		}
+		return $missing;
 	}
 
 	/**

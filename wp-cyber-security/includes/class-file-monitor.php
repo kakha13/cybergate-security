@@ -302,7 +302,7 @@ class File_Monitor {
 				}
 				$severity = $scanner->max_severity( $hits );
 
-				if ( $severity >= Store::SEV_HIGH || ( $mismatch && $executable ) ) {
+				if ( $severity >= Store::SEV_HIGH || ( $mismatch && Scan_Job::reports_mismatch( $abs, $executable ) ) ) {
 					if ( $snapshots ) {
 						$snapshots->store( $abs, $sha );
 					}

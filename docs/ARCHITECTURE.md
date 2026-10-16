@@ -52,6 +52,8 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
 | scanner | `Scanner` | engine |
 | file_monitor | `File_Monitor` | engine |
 | scan_job | `Scan_Job` | engine |
+| db_scanner | `Db_Scanner` | engine (database scan) |
+| user_watch | `User_Watch` | engine (administrator watch) |
 | notifier | `Notifier` | gates |
 | upload_gate | `Upload_Gate` | gates |
 | install_gate | `Install_Gate` | gates |
@@ -99,8 +101,10 @@ demand (`new Originals()`).
 ### Item row shape
 
 ```
-id, type (upload|install|file|threat), status, severity (0-3),
-path            relative path (file/threat), original file name (upload), "plugin:<slug>" (install)
+id, type (upload|install|file|threat|user), status, severity (0-3),
+path            relative path (file/threat), original file name (upload), "plugin:<slug>" (install),
+                "db:option:<name>" / "db:post:<ID>" / "db:hfcm:<id>" / "db:snippets:<id>" (threat with source database),
+                "user:<ID>" (user)
 original_path   absolute path where the file lives / must be restored to ('' for uploads)
 quarantine_path absolute path of the held copy ('' when nothing is held)
 sha256, size, mime, source, user_id, ip,
@@ -117,7 +121,34 @@ created_at, updated_at, decided_by, decided_at
 - `install_type` (`plugin`|`theme`), `slug`, `name`, `version`, `install_source` (`wporg`|`upload`|`url`)
 
 Sources (`source` column): `media`, `sideload`, `rest`, `plugin_zip`, `theme_zip`, `guard`,
-`scan`, `install`.
+`scan`, `install`, `database` (Db_Scanner finding; `sha256` is the place-bound fingerprint, only
+"ignore" applies, which stores it in the allowlist as kind `db`), `user` (User_Watch real time).
+
+Database findings (`Db_Scanner`): options (decoder + eval payloads, document.write(unescape,
+fromCharCode + eval; scripts from other sites and hidden iframes only in widget_*, theme_mods_*,
+*custom_html*), posts of every type except revisions/oembed_cache/customize_changeset (publish,
+draft, private, pending, future), and code plugin storage reported as medium "review" findings
+(ihaf_insert_* options, hefo, wpcode posts, {prefix}hfcm_scripts, {prefix}snippets). Chunked by
+primary key range; `Scan_Job` runs it in the finishing phase of full and baseline scans, with
+opts `database => true`, and once a day for cron scans. Details: table, key, label, hits
+(redacted snippets), fingerprint, seen_run. A complete run resolves open findings it no longer
+sees. Last run summary: option `wpcybersec_db_scan`.
+
+Administrator watch (`User_Watch`): option `wpcybersec_trusted_admins` (user ids, seeded from the
+current administrators on install/upgrade or first use). Untrusted administrators (role or
+super admin) become `user` items in real time (user_register, set_user_role, add_user_role,
+grant_super_admin) and during whole-site scans. approve = trust; deny = role subscriber,
+super admin revoked, sessions destroyed (refused for the current user and the last
+administrator). Deleted or demoted accounts resolve their item.
+
+Core integrity (`Scanner::integrity_issue()`, every scan mode including baseline): executable
+or PHP-content files in wp-admin/ or wp-includes/ that core does not ship are high threats
+(only when core checksums loaded; logs ignored); .htaccess-like files there and non-core PHP
+files in the WordPress root (except wp-config.php, the exact guard bootstrap and a plain
+Wordfence loader) are medium file items. Checksum mismatches of core, wordpress.org plugin and
+own files are threats in every mode, for executable names and .js/.mjs. Whole-site runs count
+missing core files (`missing_core` in status/last_result, "Missing core files: N" in the
+summary).
 
 ## Changes view (what changed in a file)
 

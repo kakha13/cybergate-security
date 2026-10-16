@@ -16,6 +16,10 @@ defined( 'ABSPATH' ) || exit;
  *   install -> Install_Gate::on_approve( $item ) / on_deny( $item )
  *   file    -> handled here + File_Monitor::trust_file() / forget_file()
  *   threat  -> handled here + File_Monitor::trust_file() / forget_file()
+ *   threat with source "database" (Db_Scanner) -> only "ignore" (Mark safe:
+ *              the fingerprint goes on the allowlist as kind db); never touches files
+ *   user    -> User_Watch::approve_item() (trust the administrator) /
+ *              deny_item() (remove the administrator role, sign the account out)
  */
 class Decisions {
 
@@ -29,6 +33,13 @@ class Decisions {
 	 */
 	public static function available( array $item ) {
 		$held = '' !== (string) $item['quarantine_path'];
+		// Not files: no quarantine, restore or delete, and nothing after the decision.
+		if ( Store::TYPE_USER === $item['type'] ) {
+			return Store::STATUS_PENDING === $item['status'] ? array( 'approve', 'deny' ) : array();
+		}
+		if ( Db_Scanner::is_db_item( $item ) ) {
+			return Store::STATUS_PENDING === $item['status'] ? array( 'ignore' ) : array();
+		}
 		switch ( $item['status'] ) {
 			case Store::STATUS_PENDING:
 				if ( Store::TYPE_THREAT === $item['type'] ) {
@@ -61,6 +72,12 @@ class Decisions {
 			return new \WP_Error( 'wpcybersec_item', __( 'Item not found.', 'wp-cyber-security' ) );
 		}
 		if ( ! in_array( $action, self::available( $item ), true ) ) {
+			if ( Store::STATUS_PENDING === $item['status'] && Db_Scanner::is_db_item( $item ) ) {
+				return new \WP_Error( 'wpcybersec_action', __( 'This finding is stored in the database, not in a file. Clean it where it is stored (the post or widget), or use Mark safe.', 'wp-cyber-security' ) );
+			}
+			if ( Store::STATUS_PENDING === $item['status'] && Store::TYPE_USER === $item['type'] ) {
+				return new \WP_Error( 'wpcybersec_action', __( 'For an administrator account, use Allow or Remove admin role.', 'wp-cyber-security' ) );
+			}
 			/* translators: 1: action, 2: status */
 			return new \WP_Error( 'wpcybersec_action', sprintf( __( 'Cannot %1$s an item that is %2$s.', 'wp-cyber-security' ), $action, $item['status'] ) );
 		}
@@ -92,7 +109,7 @@ class Decisions {
 			wpcybersec()->logger->log(
 				'decision_failed',
 				/* translators: 1: action, 2: path, 3: error */
-				sprintf( __( 'Could not %1$s %2$s: %3$s', 'wp-cyber-security' ), $action, $item['path'], $result->get_error_message() ),
+				sprintf( __( 'Could not %1$s %2$s: %3$s', 'wp-cyber-security' ), $action, self::label_for( $item ), $result->get_error_message() ),
 				array( 'item_id' => $item['id'] )
 			);
 			return $result;
@@ -139,6 +156,17 @@ class Decisions {
 	private function approve( array $item ) {
 		$plugin = wpcybersec();
 
+		if ( Store::TYPE_USER === $item['type'] ) {
+			$result = $plugin->user_watch ? $plugin->user_watch->approve_item( $item ) : new \WP_Error( 'wpcybersec_module', __( 'The administrator watch is not available.', 'wp-cyber-security' ) );
+			if ( is_wp_error( $result ) ) {
+				if ( 'wpcybersec_user_gone' === $result->get_error_code() ) {
+					return $this->finish( $item, Store::STATUS_RESOLVED, 'admin_gone', __( 'Closed the report for %s: the account no longer exists.', 'wp-cyber-security' ) );
+				}
+				return $result;
+			}
+			return $this->finish( $item, Store::STATUS_APPROVED, 'admin_approved', __( 'Allowed administrator %s. The account is trusted from now on.', 'wp-cyber-security' ) );
+		}
+
 		if ( Store::TYPE_UPLOAD === $item['type'] ) {
 			$result = $plugin->upload_gate->on_approve( $item );
 			if ( is_wp_error( $result ) ) {
@@ -172,6 +200,16 @@ class Decisions {
 	 */
 	private function deny( array $item ) {
 		$plugin = wpcybersec();
+		if ( Store::TYPE_USER === $item['type'] ) {
+			$result = $plugin->user_watch ? $plugin->user_watch->deny_item( $item ) : new \WP_Error( 'wpcybersec_module', __( 'The administrator watch is not available.', 'wp-cyber-security' ) );
+			if ( is_wp_error( $result ) ) {
+				if ( 'wpcybersec_user_gone' === $result->get_error_code() ) {
+					return $this->finish( $item, Store::STATUS_RESOLVED, 'admin_gone', __( 'Closed the report for %s: the account no longer exists.', 'wp-cyber-security' ) );
+				}
+				return $result;
+			}
+			return $this->finish( $item, Store::STATUS_DENIED, 'admin_denied', __( 'Removed the administrator role from %s (now a subscriber) and signed the account out everywhere.', 'wp-cyber-security' ) );
+		}
 		if ( Store::TYPE_UPLOAD === $item['type'] && method_exists( $plugin->upload_gate, 'on_deny' ) ) {
 			$plugin->upload_gate->on_deny( $item );
 		}
@@ -191,6 +229,14 @@ class Decisions {
 	 * @return true|\WP_Error
 	 */
 	private function ignore( array $item ) {
+		if ( Db_Scanner::is_db_item( $item ) ) {
+			// Database value: remember its fingerprint. No file is involved.
+			$label = Db_Scanner::location_label( $item );
+			if ( ! wpcybersec()->allowlist->allow_db( (string) $item['sha256'], $label, sprintf( 'item #%d (database)', $item['id'] ) ) ) {
+				return new \WP_Error( 'wpcybersec_db_allow', __( 'This finding has no fingerprint, so it cannot be marked safe.', 'wp-cyber-security' ) );
+			}
+			return $this->finish( $item, Store::STATUS_IGNORED, 'db_threat_ignored', __( 'Marked %s as safe. The same content there will not be reported again.', 'wp-cyber-security' ) );
+		}
 		if ( '' !== (string) $item['quarantine_path'] ) {
 			$restored = wpcybersec()->quarantine->restore( $item );
 			if ( is_wp_error( $restored ) ) {
@@ -357,6 +403,23 @@ class Decisions {
 	}
 
 	/**
+	 * What an item is about, for messages: the path of a file, the login of
+	 * an administrator account, the place of a database finding.
+	 *
+	 * @param array $item Item.
+	 * @return string
+	 */
+	public static function label_for( array $item ) {
+		if ( Store::TYPE_USER === $item['type'] ) {
+			return User_Watch::item_login( $item );
+		}
+		if ( Db_Scanner::is_db_item( $item ) ) {
+			return Db_Scanner::location_label( $item );
+		}
+		return (string) $item['path'];
+	}
+
+	/**
 	 * Saves the new status and logs it.
 	 *
 	 * @param array  $item    Item.
@@ -380,7 +443,7 @@ class Decisions {
 		);
 		wpcybersec()->logger->log(
 			$event,
-			sprintf( $message, $item['path'] ),
+			sprintf( $message, self::label_for( $item ) ),
 			array(
 				'item_id' => $item['id'],
 				'type'    => $item['type'],

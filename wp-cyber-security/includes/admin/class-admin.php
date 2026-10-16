@@ -834,7 +834,7 @@ class Admin {
 			'items_query',
 			array(
 				array(
-					'type'     => array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE, Store::TYPE_THREAT ),
+					'type'     => array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE, Store::TYPE_THREAT, Store::TYPE_USER ),
 					'status'   => Store::STATUS_PENDING,
 					'orderby'  => 'id',
 					'order'    => 'DESC',

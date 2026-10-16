@@ -220,6 +220,9 @@ class Cli {
 	 * [--malware]
 	 * : Check files for malware signatures. On by default; use --no-malware to only detect new and changed files.
 	 *
+	 * [--database]
+	 * : Also scan the database (options and posts) for injected code. On by default for --full and --baseline; use --no-database to skip it, or --database to add it to a quick scan.
+	 *
 	 * ## EXAMPLES
 	 *
 	 *     $ wp wpcybersec scan
@@ -240,13 +243,15 @@ class Cli {
 		}
 		$mode = $baseline ? 'baseline' : ( $full ? 'full' : 'incremental' );
 
-		$id = $job->start(
-			array(
-				'mode'    => $mode,
-				'malware' => $malware,
-				'trigger' => 'cli',
-			)
+		$opts = array(
+			'mode'    => $mode,
+			'malware' => $malware,
+			'trigger' => 'cli',
 		);
+		if ( isset( $assoc_args['database'] ) ) {
+			$opts['database'] = (bool) $this->flag( $assoc_args, 'database', false );
+		}
+		$id = $job->start( $opts );
 		if ( is_wp_error( $id ) ) {
 			\WP_CLI::error( $id->get_error_message() );
 		}
@@ -345,6 +350,7 @@ class Cli {
 	 *   - install
 	 *   - file
 	 *   - threat
+	 *   - user
 	 * ---
 	 *
 	 * [--format=<format>]
@@ -372,7 +378,7 @@ class Cli {
 		unset( $args );
 		$store = $this->service( 'store' );
 		$type  = (string) $this->flag( $assoc_args, 'type', 'all' );
-		$types = 'all' === $type ? array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE, Store::TYPE_THREAT ) : array( $type );
+		$types = 'all' === $type ? array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE, Store::TYPE_THREAT, Store::TYPE_USER ) : array( $type );
 
 		$rows = array();
 		$page = 1;

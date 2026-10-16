@@ -512,6 +512,12 @@ class Dashboard_Page {
 		$row   = isset( $file_modes[ $fmode ] ) ? $file_modes[ $fmode ] : $file_modes['report'];
 		$this->prow( 'media-code', __( 'File monitor', 'wp-cyber-security' ), $row[2], $row[0], $row[1] );
 
+		// Administrator watch.
+		$this->admin_watch_row();
+
+		// Database scan.
+		$this->database_row();
+
 		// Scheduled scans.
 		$this->schedule_row();
 
@@ -591,6 +597,85 @@ class Dashboard_Page {
 			);
 		}
 		echo '</div></li>';
+	}
+
+	/**
+	 * Administrator watch row: trusted administrators and accounts waiting.
+	 */
+	private function admin_watch_row() {
+		$title = __( 'Administrator watch', 'wp-cyber-security' );
+		if ( ! Admin::service( 'user_watch' ) ) {
+			$this->prow( 'admin-users', $title, __( 'The administrator watch module is not available.', 'wp-cyber-security' ), __( 'Unavailable', 'wp-cyber-security' ), 'muted' );
+			return;
+		}
+		$trusted = Admin::call( 'user_watch', 'trusted_ids', array(), array() );
+		$trusted = is_array( $trusted ) ? count( $trusted ) : 0;
+		$waiting = (int) Admin::call(
+			'store',
+			'items_count',
+			array(
+				array(
+					'type'   => Store::TYPE_USER,
+					'status' => Store::STATUS_PENDING,
+				),
+			),
+			0
+		);
+		$badge = sprintf(
+			/* translators: %s: number of administrators */
+			_n( '%s trusted admin', '%s trusted admins', $trusted, 'wp-cyber-security' ),
+			number_format_i18n( $trusted )
+		);
+		if ( $waiting > 0 ) {
+			$link = '<a href="' . esc_url( Admin::page_url( Admin::PAGE_REPORTS, array( 'tab' => 'pending', 'type' => Store::TYPE_USER ) ) ) . '">' . esc_html__( 'Review', 'wp-cyber-security' ) . '</a>';
+			$desc = sprintf(
+				/* translators: %s: number of accounts */
+				_n( '%s new administrator account is waiting for your review.', '%s new administrator accounts are waiting for your review.', $waiting, 'wp-cyber-security' ),
+				number_format_i18n( $waiting )
+			);
+			$this->prow( 'admin-users', $title, $desc, $badge, 'high', $link );
+			return;
+		}
+		$this->prow( 'admin-users', $title, __( 'New administrator accounts are reported at once and checked again by every scan.', 'wp-cyber-security' ), $badge, 'ok' );
+	}
+
+	/**
+	 * Database scan row: when options and posts were last checked.
+	 */
+	private function database_row() {
+		$title = __( 'Database scan', 'wp-cyber-security' );
+		$last  = Admin::call( 'db_scanner', 'last_run', array(), array() );
+		$last  = is_array( $last ) ? $last : array();
+		$at    = isset( $last['finished_at'] ) ? (int) $last['finished_at'] : 0;
+		if ( ! $at ) {
+			$this->prow( 'database', $title, __( 'Options, widgets and posts are checked for injected code by full and baseline scans, and once a day by scheduled scans.', 'wp-cyber-security' ), __( 'Not run yet', 'wp-cyber-security' ), 'medium' );
+			return;
+		}
+		$found = isset( $last['findings'] ) ? (int) $last['findings'] : 0;
+		$desc  = sprintf(
+			/* translators: 1: date and time, 2: options checked, 3: posts checked */
+			__( 'Last run %1$s: %2$s options and %3$s posts checked.', 'wp-cyber-security' ),
+			Admin::datetime( $at ),
+			number_format_i18n( isset( $last['options_total'] ) ? (int) $last['options_total'] : 0 ),
+			number_format_i18n( isset( $last['posts_total'] ) ? (int) $last['posts_total'] : 0 )
+		);
+		if ( $found > 0 ) {
+			$link = '<a href="' . esc_url( Admin::page_url( Admin::PAGE_REPORTS, array( 'tab' => 'threats' ) ) ) . '">' . esc_html__( 'Review', 'wp-cyber-security' ) . '</a>';
+			$this->prow(
+				'database',
+				$title,
+				$desc,
+				sprintf(
+					/* translators: %s: number of findings */
+					_n( '%s finding', '%s findings', $found, 'wp-cyber-security' ),
+					number_format_i18n( $found )
+				),
+				'high',
+				$link
+			);
+			return;
+		}
+		$this->prow( 'database', $title, $desc, Admin::ago( $at ), 'ok' );
 	}
 
 	/**

@@ -87,8 +87,9 @@ class Notifier {
 			return;
 		}
 
-		// Items found by a scan are reported together when the scan finishes.
-		if ( 'scan' === $item['source'] ) {
+		// Items found by a scan (files, database values, administrators found by
+		// the scan) are reported together when the scan finishes.
+		if ( 'scan' === $item['source'] || Store::SOURCE_DATABASE === $item['source'] ) {
 			$this->enqueue( (int) $item['id'] );
 			$this->schedule_flush( time() + self::THROTTLE ); // Fallback if the scan never finishes.
 			return;
@@ -115,7 +116,7 @@ class Notifier {
 			return;
 		}
 		$summary = array();
-		foreach ( array( 'mode', 'trigger', 'files_total', 'files_done', 'new', 'modified', 'deleted', 'threats', 'quarantined', 'skipped', 'started_at', 'finished_at' ) as $key ) {
+		foreach ( array( 'mode', 'trigger', 'files_total', 'files_done', 'new', 'modified', 'deleted', 'threats', 'quarantined', 'skipped', 'started_at', 'finished_at', 'database', 'db_findings', 'missing_core', 'new_admins' ) as $key ) {
 			$summary[ $key ] = isset( $status[ $key ] ) ? $status[ $key ] : '';
 		}
 		update_option( self::SCAN_OPTION, $summary, false );
@@ -175,7 +176,7 @@ class Notifier {
 		$store   = wpcybersec()->store;
 		$pending = $store->items_query(
 			array(
-				'type'     => array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE ),
+				'type'     => array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE, Store::TYPE_USER ),
 				'status'   => Store::STATUS_PENDING,
 				'per_page' => self::MAX_DETAILED,
 			)
@@ -489,6 +490,16 @@ class Notifier {
 			$slug    = ! empty( $details['slug'] ) ? ' (' . $details['slug'] . ')' : '';
 			$rows[]  = array( __( 'Package', 'wp-cyber-security' ), $name . $version . $slug );
 			$rows[]  = array( __( 'Source', 'wp-cyber-security' ), $this->install_source_label( isset( $details['install_source'] ) ? (string) $details['install_source'] : '' ) );
+		} elseif ( Store::TYPE_USER === $item['type'] ) {
+			$rows[] = array( __( 'Account', 'wp-cyber-security' ), User_Watch::item_login( $item ) . ' (#' . User_Watch::item_user_id( $item ) . ')' );
+			if ( ! empty( $details['user_email'] ) ) {
+				$rows[] = array( __( 'Email', 'wp-cyber-security' ), (string) $details['user_email'] );
+			}
+			if ( ! empty( $details['user_registered'] ) ) {
+				$rows[] = array( __( 'Registered', 'wp-cyber-security' ), $this->format_date( (string) $details['user_registered'] ) );
+			}
+		} elseif ( Db_Scanner::is_db_item( $item ) ) {
+			$rows[] = array( __( 'Location', 'wp-cyber-security' ), Db_Scanner::location_label( $item ) );
 		} else {
 			$rows[] = array( __( 'File', 'wp-cyber-security' ), (string) $item['path'] );
 			if ( (int) $item['size'] > 0 ) {
@@ -549,6 +560,18 @@ class Notifier {
 				isset( $scan['quarantined'] ) ? (int) $scan['quarantined'] : 0
 			),
 		);
+		if ( ! empty( $scan['database'] ) ) {
+			/* translators: %d: number of findings */
+			$lines[] = sprintf( __( 'Database scan: %d suspicious values in options and posts.', 'wp-cyber-security' ), isset( $scan['db_findings'] ) ? (int) $scan['db_findings'] : 0 );
+		}
+		if ( ! empty( $scan['new_admins'] ) ) {
+			/* translators: %d: number of accounts */
+			$lines[] = sprintf( __( 'Administrators not on the trusted list: %d.', 'wp-cyber-security' ), (int) $scan['new_admins'] );
+		}
+		if ( isset( $scan['missing_core'] ) && (int) $scan['missing_core'] > 0 ) {
+			/* translators: %d: number of files */
+			$lines[] = sprintf( __( 'Missing WordPress core files: %d.', 'wp-cyber-security' ), (int) $scan['missing_core'] );
+		}
 		return $lines;
 	}
 
@@ -621,7 +644,11 @@ class Notifier {
 				}
 				return $theme ? __( 'Theme install waiting for approval', 'wp-cyber-security' ) : __( 'Plugin install waiting for approval', 'wp-cyber-security' );
 			case Store::TYPE_THREAT:
-				return __( 'Possible malware found', 'wp-cyber-security' );
+				return Store::SOURCE_DATABASE === $item['source']
+					? __( 'Suspicious code in the database', 'wp-cyber-security' )
+					: __( 'Possible malware found', 'wp-cyber-security' );
+			case Store::TYPE_USER:
+				return __( 'New administrator account', 'wp-cyber-security' );
 			default:
 				if ( Store::STATUS_QUARANTINED === $item['status'] || '' !== (string) $item['quarantine_path'] ) {
 					return __( 'Unknown file moved to quarantine', 'wp-cyber-security' );
@@ -644,6 +671,12 @@ class Notifier {
 		if ( Store::TYPE_UPLOAD === $item['type'] ) {
 			return $this->plain( (string) $item['path'] );
 		}
+		if ( Store::TYPE_USER === $item['type'] ) {
+			return $this->plain( User_Watch::item_login( $item ) );
+		}
+		if ( Db_Scanner::is_db_item( $item ) ) {
+			return $this->plain( Db_Scanner::location_label( $item ) );
+		}
 		return $this->plain( (string) $item['path'] );
 	}
 
@@ -654,6 +687,15 @@ class Notifier {
 	 * @return string
 	 */
 	private function who( array $item ) {
+		if ( Store::TYPE_USER === $item['type'] && 'scan' === $item['source'] ) {
+			return __( 'Found by a scan (possibly added straight to the database)', 'wp-cyber-security' );
+		}
+		if ( Store::TYPE_USER === $item['type'] && empty( $item['user_id'] ) ) {
+			return __( 'No logged-in user (WP-CLI, cron, a plugin or code running without a login)', 'wp-cyber-security' );
+		}
+		if ( Store::SOURCE_DATABASE === $item['source'] ) {
+			return __( 'Found by the database scan', 'wp-cyber-security' );
+		}
 		if ( 'scan' === $item['source'] ) {
 			return __( 'Found by a scan (the file was already on the server)', 'wp-cyber-security' );
 		}
@@ -701,6 +743,9 @@ class Notifier {
 	private function verdict( array $item ) {
 		$details = is_array( $item['details'] ) ? $item['details'] : array();
 		$hits    = isset( $details['hits'] ) && is_array( $details['hits'] ) ? $details['hits'] : array();
+		if ( Store::TYPE_USER === $item['type'] ) {
+			return __( 'This account gained administrator rights and is not on your trusted list. Allow it if you expect it, otherwise remove the administrator role.', 'wp-cyber-security' );
+		}
 		if ( ! $hits ) {
 			if ( isset( $details['checksum'] ) && 'mismatch' === $details['checksum'] ) {
 				return __( 'Differs from the official WordPress.org checksum', 'wp-cyber-security' );

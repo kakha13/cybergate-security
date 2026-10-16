@@ -37,6 +37,8 @@ defined( 'ABSPATH' ) || exit;
  *   decode    escapes | chr | concat. The match is decoded and kept only when the
  *             decoded text matches "decoded".
  *   decoded   PCRE tested against the decoded text.
+ *   skip_path PCRE tested against "/" + the file's relative path; the signature
+ *             does not run for a path that matches (bundled libraries).
  *
  * Rules of thumb used to keep false positives near zero on mainstream code
  * (WordPress core, WooCommerce, Elementor, Yoast, Polylang, Revolution Slider):
@@ -49,7 +51,7 @@ defined( 'ABSPATH' ) || exit;
 class Signatures {
 
 	/** Bump when signatures change (shown in the UI and logs). */
-	const VERSION = '2026.10.2';
+	const VERSION = '2026.10.3';
 
 	const KIND_PHP      = 'php';
 	const KIND_JS       = 'js';
@@ -467,9 +469,41 @@ class Signatures {
 				'title'    => __( 'Known web shell marker', 'wp-cyber-security' ),
 				'severity' => 3,
 				'targets'  => 'php',
-				'needle'   => array( 'c99', 'r57', 'b374k', 'indoxploit', 'anonymousfox', 'alfa', '0byt3m1n1', 'webshellorb', 'gel4y', 'leafmailer', 'leaf phpmailer' ),
-				'pattern'  => '~\b(?:c99shell|c99_sess_put|c99sh_\w+|r57shell|r57_pwd_hash|b374k|IndoXploit|AnonymousFox|ALFA_DATA|AlfaCgiShell|alfacgiapi|ALFA_TEAM_\d|0byt3m1n1|WebShellOrb|Gel4y|LeafMailer|Leaf\s+PHPMailer)\b~i',
+				'needle'   => array( 'c99', 'r57', 'b374k', 'indoxploit', 'anonymousfox', 'alfa', '0byt3m1n1', 'webshellorb', 'gel4y', 'leafmailer', 'leaf phpmailer', 'sec-shell', 'ani-shell', 'locus7', 'foxwso', 'priv8', 'mini shell', 'minishell', 'bypass sh' ),
+				'pattern'  => '~\b(?:c99shell|c99_sess_put|c99sh_\w+|r57shell|r57_pwd_hash|b374k|IndoXploit|AnonymousFox|ALFA_DATA|AlfaCgiShell|alfacgiapi|ALFA_TEAM_\d|0byt3m1n1|WebShellOrb|Gel4y|LeafMailer|Leaf\s+PHPMailer|Sec-Shell|Ani-Shell|Locus7(?:s|Shell)|FoxWSO|Priv8\s{0,3}+(?:Shell|Uploader)|Mini\s?Shell\s{1,3}+(?:By|v\d)|Bypass\s{1,3}+Sh[e3]ll)\b~i',
 				'exclude'  => '~wfWAFRuleComparison~',
+			),
+			array(
+				'id'       => 'php_globals_hex_key',
+				'title'    => __( 'Global variable name hidden with escape codes', 'wp-cyber-security' ),
+				'severity' => 2,
+				'targets'  => 'php',
+				'needle'   => array( 'globals' ),
+				// $GLOBALS['\x61\x62...'] or $GLOBALS["\141..."]: at least two escapes
+				// at the start of the key. Every piece is bounded, so it stays linear.
+				'pattern'  => '~\$GLOBALS\s{0,8}+\[\s{0,8}+["\x27]\x5c(?:x[0-9a-f]{2}|[0-7]{3})[^"\x27\x5c\n]{0,4}+\x5c(?:x[0-9a-f]{2}|[0-7]{3})~i',
+				'skip_comments' => true,
+			),
+			array(
+				'id'        => 'any_hex_escape_run',
+				'title'     => __( 'Long run of hex escape codes (heavy obfuscation)', 'wp-cyber-security' ),
+				'severity'  => 1,
+				'targets'   => array( 'php', 'js' ),
+				'needle'    => array( '\\x' ),
+				// 30 escapes in a row, no repetition of a variable piece: linear.
+				'pattern'   => '~(?:\x5cx[0-9a-f]{2}){30}~i',
+				// Bundled libraries (fonts, binary tables) legitimately hold such data.
+				'skip_path' => '~/(?:vendor|vendor-patched|vendor_prefixed|sodium_compat)/~i',
+			),
+			array(
+				'id'       => 'defacement_hacked_by',
+				'title'    => __( 'Defacement page marker ("Hacked By")', 'wp-cyber-security' ),
+				'severity' => 1,
+				'targets'  => array( 'php', 'html', 'js' ),
+				'needle'   => array( 'hacked by' ),
+				// Only as a page title or heading (how defacements look), or set as the
+				// document title by a script; never plain sentences in text.
+				'pattern'  => '~<(?:title|h[1-6]|center|marquee|font|b|strong|span|div|p)\b[^>\n]{0,200}+>\s{0,40}+(?:<[a-z][^>\n]{0,200}+>\s{0,40}+){0,3}hacked\s{1,5}+by\b|document\.title\s{0,8}+=\s{0,8}+["\x27]\s{0,8}+hacked\s{1,5}+by\b~i',
 			),
 			array(
 				'id'       => 'php_shell_banner',
@@ -725,9 +759,10 @@ class Signatures {
 	 * @param string $kind         KIND_*.
 	 * @param int    $min_severity Hits below are dropped.
 	 * @param int    $line_offset  Added to reported line numbers (0 for whole files).
+	 * @param string $path         Relative path of the file ('' when unknown), for skip_path.
 	 * @return array[] Hits { sig, title, severity, line, snippet }.
 	 */
-	public static function match( $content, $kind, $min_severity = 1, $line_offset = 0 ) {
+	public static function match( $content, $kind, $min_severity = 1, $line_offset = 0, $path = '' ) {
 		$content = (string) $content;
 		if ( '' === $content ) {
 			return array();
@@ -739,6 +774,7 @@ class Signatures {
 
 		$lower = strtolower( $content );
 		$hits  = array();
+		$path  = '' !== (string) $path ? '/' . ltrim( str_replace( '\\', '/', (string) $path ), '/' ) : '';
 
 		foreach ( self::all() as $sig ) {
 			if ( empty( $sig['pattern'] ) || empty( $sig['id'] ) ) {
@@ -753,6 +789,9 @@ class Signatures {
 				continue;
 			}
 			if ( ! empty( $sig['needle'] ) && ! self::has_needle( $lower, (array) $sig['needle'] ) ) {
+				continue;
+			}
+			if ( ! empty( $sig['skip_path'] ) && '' !== $path && 1 === @preg_match( $sig['skip_path'], $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 				continue;
 			}
 
@@ -815,6 +854,7 @@ class Signatures {
 	public static function inspect_file( $abs, $rel = '', $min_severity = 1, $max_bytes = 10485760, $name = '' ) {
 		$name = '' !== $name ? $name : basename( $abs );
 		$kind = self::kind_for( $name );
+		$path = '' !== (string) $rel ? (string) $rel : (string) $abs;
 		$hits = '' !== $rel ? self::match_path( $rel, $min_severity ) : array();
 		$size = @filesize( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		if ( false === $size || ! @is_readable( $abs ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
@@ -839,7 +879,7 @@ class Signatures {
 			$tail = $size > self::IMAGE_SLICE ? self::read_slice( $abs, max( self::IMAGE_SLICE, $size - self::IMAGE_SLICE ), self::IMAGE_SLICE ) : '';
 			$img  = array_merge( self::match( $head, self::KIND_IMAGE, $min_severity ), self::match( $tail, self::KIND_IMAGE, $min_severity ) );
 			if ( $img && $size <= $max_bytes && false !== stripos( $head . $tail, '<?' ) ) {
-				$php = self::match( (string) self::read_slice( $abs, 0, $max_bytes ), self::KIND_PHP, $min_severity );
+				$php = self::match( (string) self::read_slice( $abs, 0, $max_bytes ), self::KIND_PHP, $min_severity, 0, $path );
 				$img = array_merge( $img, $php );
 			}
 			foreach ( $img as &$hit ) {
@@ -859,7 +899,7 @@ class Signatures {
 		if ( self::KIND_TEXT === $kind && ( self::looks_like_php( $content ) || false !== stripos( $content, '<?php' ) ) ) {
 			$kind = self::KIND_PHP;
 		}
-		return self::unique( array_merge( $hits, self::match( $content, $kind, $min_severity ) ) );
+		return self::unique( array_merge( $hits, self::match( $content, $kind, $min_severity, 0, $path ) ) );
 	}
 
 	/**

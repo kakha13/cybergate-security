@@ -654,6 +654,14 @@
 	background: var(--wpcs-accent-soft);
 	color: #0f766e;
 }
+.wpcs-type--user {
+	background: var(--wpcs-warn-soft);
+	color: var(--wpcs-warn);
+}
+.wpcs-type--database {
+	background: var(--wpcs-bad-soft);
+	color: var(--wpcs-bad);
+}
 
 /* Item cell. */
 .wpcs-path__dir {

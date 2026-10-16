@@ -70,6 +70,7 @@ class Settings {
 				'wp-content/upgrade-temp-backup/',
 				'wp-content/wflogs/',
 				'*.log',
+				'error_log',
 			),
 			'max_file_mb'              => 10,
 			'exec_extensions'          => array( 'php', 'php3', 'php4', 'php5', 'php7', 'php8', 'phtml', 'pht', 'phar', 'phps', 'inc', 'shtml', 'cgi', 'pl', 'py', 'sh', 'asp', 'aspx', 'jsp' ),

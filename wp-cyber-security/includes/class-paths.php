@@ -152,6 +152,10 @@ class Paths {
 			if ( rtrim( $rel, '/' ) === rtrim( $pattern, '/' ) || 0 === strpos( $rel_dir, $pattern_dir ) ) {
 				return true;
 			}
+			// A bare name ("error_log") matches that name in every folder.
+			if ( false === strpos( $pattern, '/' ) && basename( rtrim( $rel, '/' ) ) === $pattern ) {
+				return true;
+			}
 		}
 		return false;
 	}

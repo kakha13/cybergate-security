@@ -130,6 +130,10 @@ class Installer {
 		}
 
 		( new Storage() )->ensure();
+
+		// Administrators present now are trusted; later ones wait for review.
+		User_Watch::seed();
+
 		update_option( self::DB_OPTION, WPCYBERSEC_DB_VERSION, true );
 	}
 
@@ -137,8 +141,29 @@ class Installer {
 	 * Runs install() again when the DB version changed (after plugin updates).
 	 */
 	public static function maybe_upgrade() {
-		if ( get_option( self::DB_OPTION ) !== WPCYBERSEC_DB_VERSION ) {
+		$old = get_option( self::DB_OPTION );
+		if ( $old !== WPCYBERSEC_DB_VERSION ) {
 			self::install();
+			if ( $old && version_compare( (string) $old, '3', '<' ) ) {
+				self::add_default_exclusion( 'error_log' );
+			}
+		}
+	}
+
+	/**
+	 * Adds a pattern that became a default to the saved exclusions of an
+	 * existing install (once, when upgrading past the version that added it).
+	 *
+	 * @param string $pattern Exclusion pattern.
+	 */
+	private static function add_default_exclusion( $pattern ) {
+		$settings = get_option( Settings::OPTION, array() );
+		if ( ! is_array( $settings ) || ! isset( $settings['exclusions'] ) || ! is_array( $settings['exclusions'] ) ) {
+			return; // Defaults apply.
+		}
+		if ( ! in_array( $pattern, $settings['exclusions'], true ) ) {
+			$settings['exclusions'][] = $pattern;
+			update_option( Settings::OPTION, $settings );
 		}
 	}
 

@@ -833,11 +833,34 @@ class Sysadmin_Tools {
 			'status' => 'info',
 			'detail' => $detail,
 		);
+		$maldet  = self::maldet_detect();
+		$detail .= ' ' . ( '' !== $maldet
+			/* translators: %s: binary path */
+			? sprintf( __( 'Linux Malware Detect found at %s.', 'wp-cyber-security' ), $maldet )
+			: __( 'Linux Malware Detect (maldet) not found.', 'wp-cyber-security' ) );
+		$check['detail'] = $detail;
+
 		$settings = self::service( 'settings' );
 		if ( $clam && self::function_available( 'exec' ) && $settings && ! $settings->get( 'clamav_enabled', false ) ) {
 			$check['fix'] = __( 'Turn on ClamAV in Settings > Advanced for a second opinion on uploads.', 'wp-cyber-security' );
+		} elseif ( ! $clam || '' === $maldet ) {
+			$check['fix'] = __( 'Optional. ClamAV and Linux Malware Detect know many more existing infections (web shells, phishing kits, infected uploads) and are a good second opinion, but they do not block attacks. With root access (VPS or dedicated server): install ClamAV and Linux Malware Detect (maldet). Without root (shared hosting): run the malware scanner of your hosting panel, for example cPanel Virus Scanner or Imunify360.', 'wp-cyber-security' );
 		}
 		return $check;
+	}
+
+	/**
+	 * Linux Malware Detect binary when installed in a standard place.
+	 *
+	 * @return string Path, '' when not found.
+	 */
+	private static function maldet_detect() {
+		foreach ( array( '/usr/local/sbin/maldet', '/usr/local/maldetect/maldet', '/usr/sbin/maldet', '/usr/bin/maldet' ) as $bin ) {
+			if ( @is_file( $bin ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				return $bin;
+			}
+		}
+		return '';
 	}
 
 	/**
