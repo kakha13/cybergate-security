@@ -32,7 +32,18 @@ if ( 'cli' !== PHP_SAPI ) {
 	exit( 1 );
 }
 
-$wpcybersec_dir    = str_replace( '\\', '/', dirname( __DIR__ ) );
+$wpcybersec_dir = str_replace( '\\', '/', dirname( __DIR__ ) );
+// --dir=PATH hashes another copy of the plugin (the release build stages one).
+foreach ( array_slice( (array) $argv, 1 ) as $wpcybersec_arg ) {
+	if ( 0 === strpos( $wpcybersec_arg, '--dir=' ) ) {
+		$wpcybersec_real = realpath( substr( $wpcybersec_arg, 6 ) );
+		if ( false === $wpcybersec_real || ! is_file( $wpcybersec_real . '/wp-cyber-security.php' ) ) {
+			fwrite( STDERR, "Not a plugin folder: " . substr( $wpcybersec_arg, 6 ) . "\n" );
+			exit( 1 );
+		}
+		$wpcybersec_dir = str_replace( '\\', '/', $wpcybersec_real );
+	}
+}
 $wpcybersec_output = $wpcybersec_dir . '/checksums.json';
 
 /**

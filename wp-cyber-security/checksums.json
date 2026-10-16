@@ -11,7 +11,7 @@
         "assets/js/fixes.js": "d12b94e226b582c0fe9fea2791d835474abb8344fecab203865e61459ae2beb6",
         "assets/js/index.php": "bd48c24ce4500e60d2524571756787283f0d3fbfa50b116331309c09773f0cd1",
         "assets/js/setup.js": "3c53376b58cf9364ce3e413ab7a862ec3f7051d76493989af114d2c7f97493c8",
-        "bin/build-checksums.php": "714175819f002b2e6b5a215f051deb92cf57d20ddba52372009e262366d3f114",
+        "bin/build-checksums.php": "d21c0128df196139348ef1aca3d9685c4763b08ff3b35544010674199ab0ac1d",
         "bin/cron.php": "98e25f4d04db823ce26fc450b2476b6f2257983c1cf284ddde9d1046ec857d74",
         "bin/index.php": "bd48c24ce4500e60d2524571756787283f0d3fbfa50b116331309c09773f0cd1",
         "guard/guard.php": "22bb102477221c53eafcaed89a43b4602acea7bdd5679976f2438f18217b27c8",
@@ -53,6 +53,7 @@
         "includes/index.php": "bd48c24ce4500e60d2524571756787283f0d3fbfa50b116331309c09773f0cd1",
         "index.php": "bd48c24ce4500e60d2524571756787283f0d3fbfa50b116331309c09773f0cd1",
         "languages/index.php": "bd48c24ce4500e60d2524571756787283f0d3fbfa50b116331309c09773f0cd1",
+        "readme.txt": "5f1c9bc017ecdfa45aa5fdea4ace7acb49f5d78a01b6b092938445a1b808386d",
         "uninstall.php": "71496aba5bc9907771ab1f92619b01730d862c0ab6c6415bf9ba284b2e7a2b14",
         "wp-cyber-security.php": "7b1f7966c53a82547957916239a98e990ef3d3b16d51c1b93254acddf00f3aaa"
     }

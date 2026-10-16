@@ -1,0 +1,11 @@
+# Files left out of the release zip (rsync patterns, relative to wp-cyber-security/).
+.DS_Store
+.git
+.gitignore
+.svn
+node_modules
+tests
+*.map
+*.log
+# Developer tool: the build runs it on the staged copy instead.
+bin/build-checksums.php
