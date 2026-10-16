@@ -1,5 +1,5 @@
 === WP Cyber Security ===
-Contributors: CHANGE_ME_WPORG_USERNAME
+Contributors: kakha13
 Tags: security, malware scanner, file integrity, upload, quarantine
 Requires at least: 6.0
 Tested up to: 7.1
