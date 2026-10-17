@@ -220,6 +220,58 @@ class Settings_Page {
 	}
 
 	/**
+	 * The optional "share statistics" choice (setup wizard Alerts step and
+	 * Settings > General): the toggle, every field that is sent, the privacy
+	 * page and the result of the last message. Off unless the administrator
+	 * turned it on.
+	 *
+	 * @param bool $checked Current setting.
+	 * @return string HTML.
+	 */
+	public static function share_stats_box( $checked ) {
+		$html  = '<div class="wpcs-stats-optin">';
+		$html .= self::toggle_row(
+			'share_stats',
+			$checked,
+			__( 'Help improve CyberGate Security: share your site address and setup details with the developer (Qartvelo Company).', 'cybergate-security' ),
+			__( 'Optional and off unless you turn it on. Sent when you turn it on, then once a week, and when the plugin is deactivated or deleted. Turn it off here at any time.', 'cybergate-security' )
+		);
+		if ( \WPCyberSecurity\Stats::disabled_by_constant() ) {
+			$html .= '<p class="wpcs-field__help">' . esc_html__( 'Statistics are switched off on this server (WPCYBERSEC_DISABLE_STATS), so nothing is sent whatever this setting says.', 'cybergate-security' ) . '</p>';
+		}
+		$html .= '<details class="wpcs-disclosure wpcs-stats-optin__fields"><summary>' . esc_html__( 'What is sent', 'cybergate-security' ) . '</summary><ul class="wpcs-stats-optin__list">';
+		foreach ( \WPCyberSecurity\Stats::fields() as $field ) {
+			$html .= '<li>' . esc_html( $field ) . '</li>';
+		}
+		$html .= '</ul><p class="wpcs-field__help">' . esc_html__( 'Never sent: email addresses, user names, file names or paths, visitor IP addresses, keys or passwords, or any content of your site.', 'cybergate-security' ) . '</p>';
+		$html .= '<p class="wpcs-field__help"><a href="' . esc_url( \WPCyberSecurity\Stats::PRIVACY_URL ) . '" target="_blank" rel="noopener noreferrer">' . esc_html__( 'Privacy and external services', 'cybergate-security' ) . '<span class="screen-reader-text"> ' . esc_html__( '(opens in a new tab)', 'cybergate-security' ) . '</span></a></p>';
+		$html .= '</details>';
+
+		$last = \WPCyberSecurity\Stats::last();
+		if ( $last ) {
+			$events = array(
+				'opt_in'     => __( 'turned on', 'cybergate-security' ),
+				'heartbeat'  => __( 'weekly check-in', 'cybergate-security' ),
+				'deactivate' => __( 'plugin deactivated', 'cybergate-security' ),
+				'opt_out'    => __( 'turned off', 'cybergate-security' ),
+			);
+			$what = isset( $events[ $last['event'] ] ) ? $events[ $last['event'] ] : $last['event'];
+			if ( null === $last['ok'] ) {
+				/* translators: 1: time ago, for example "5 minutes ago", 2: what was sent, for example "weekly check-in" */
+				$line = sprintf( __( 'Last sent: %1$s (%2$s, no reply awaited).', 'cybergate-security' ), Admin::ago( $last['at'] ), $what );
+			} elseif ( $last['ok'] ) {
+				/* translators: 1: time ago, for example "5 minutes ago", 2: what was sent, for example "weekly check-in" */
+				$line = sprintf( __( 'Last sent: %1$s (%2$s).', 'cybergate-security' ), Admin::ago( $last['at'] ), $what );
+			} else {
+				/* translators: 1: time ago, for example "5 minutes ago", 2: what was sent, 3: error message */
+				$line = sprintf( __( 'Last try: %1$s (%2$s), not delivered: %3$s', 'cybergate-security' ), Admin::ago( $last['at'] ), $what, '' !== $last['error'] ? $last['error'] : __( 'no answer.', 'cybergate-security' ) );
+			}
+			$html .= '<p class="wpcs-field__help wpcs-stats-optin__last">' . esc_html( $line ) . '</p>';
+		}
+		return $html . '</div>';
+	}
+
+	/**
 	 * Radio list with a label and a description per choice.
 	 *
 	 * @param string $name    Field name.
@@ -1006,6 +1058,11 @@ class Settings_Page {
 			__( 'Optional. Posts a short message to Slack, Discord, Microsoft Teams or any service that accepts incoming webhooks. Must start with https://.', 'cybergate-security' ),
 			'wpcs-webhook-url'
 		);
+		$this->card_close();
+
+		// Optional statistics for the developer (off by default).
+		$this->card_open( 'wpcs-stats', 'chart-bar', __( 'Usage statistics', 'cybergate-security' ) );
+		echo self::share_stats_box( ! empty( $s['share_stats'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside.
 		$this->card_close();
 
 		$this->form_close( __( 'Changes apply as soon as you save.', 'cybergate-security' ) );

@@ -629,6 +629,8 @@ class Wizard {
 			</div>
 		</div>
 		<?php
+		// Optional, unchecked unless already chosen; "Skip" saves nothing, so it stays off.
+		echo Settings_Page::share_stats_box( ! empty( $s['share_stats'] ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside.
 	}
 
 	/**

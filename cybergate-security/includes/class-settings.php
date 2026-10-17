@@ -99,6 +99,9 @@ class Settings {
 			// Housekeeping.
 			'log_retention_days'       => 90,
 			'delete_data_on_uninstall' => false,
+
+			// Opt-in install statistics for the developer (Stats). Off until an administrator turns it on.
+			'share_stats'              => false,
 		);
 	}
 

@@ -60,6 +60,22 @@ $wpcybersec_settings = wpcybersec_uninstall_option( 'wpcybersec_settings', array
 $wpcybersec_delete   = is_array( $wpcybersec_settings ) && ! empty( $wpcybersec_settings['delete_data_on_uninstall'] );
 
 /*
+ * Opt-in statistics only (setting "share_stats", off by default): one last
+ * "uninstall" message to the developer, sent before the options that hold the
+ * install id are deleted, without waiting for the reply.
+ */
+if ( is_array( $wpcybersec_settings ) && ! empty( $wpcybersec_settings['share_stats'] ) && ! ( defined( 'WPCYBERSEC_DISABLE_STATS' ) && WPCYBERSEC_DISABLE_STATS ) ) {
+	require_once __DIR__ . '/cybergate-security.php';
+	if ( class_exists( '\WPCyberSecurity\Stats' ) ) {
+		try {
+			\WPCyberSecurity\Stats::on_uninstall();
+		} catch ( \Throwable $wpcybersec_e ) {
+			unset( $wpcybersec_e ); // Never break the uninstall over a statistics message.
+		}
+	}
+}
+
+/*
  * "Delete all data": first undo what the plugin wrote into the site's own
  * files, while its classes can still be loaded (wp-config.php edits keep a
  * backup in the data folder, which is removed below).
@@ -183,7 +199,7 @@ if ( ! $wpcybersec_delete ) {
 	return;
 }
 
-$wpcybersec_hooks  = array( 'wpcybersec_scheduled_scan', 'wpcybersec_scan_tick', 'wpcybersec_digest', 'wpcybersec_maintenance', 'wpcybersec_guard_import', 'wpcybersec_notify_flush' );
+$wpcybersec_hooks  = array( 'wpcybersec_scheduled_scan', 'wpcybersec_scan_tick', 'wpcybersec_digest', 'wpcybersec_maintenance', 'wpcybersec_guard_import', 'wpcybersec_notify_flush', 'wpcybersec_stats_heartbeat' );
 $wpcybersec_tables = array( 'items', 'manifest', 'allowlist', 'log' );
 
 /**

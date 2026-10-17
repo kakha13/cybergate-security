@@ -75,6 +75,7 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
 | developer | `Developer_Instructions` | setup (steps that need server access) |
 | hosting | `Hosting` | setup (hosting panel detection and panel steps) |
 | core_repair | `Core_Repair` | engine (core damage check, clean core reinstall) |
+| stats | `Stats` | core (opt-in install statistics, off by default) |
 | admin | `Admin\Admin` | admin UI |
 
 Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` (core), `Network`
@@ -831,6 +832,34 @@ Files: `includes/class-core-repair.php` (`Core_Repair`, service `core_repair`),
   - Image previews: admin-post `wpcybersec_preview` (capability + per-item nonce) streams a held jpeg/png/gif/webp only after `Upload_Gate::image_preview()` verified it (getimagesize and finfo agree, inside the quarantine folder, severity below high, never svg), with nosniff, inline, private cache and a sandbox CSP.
   - "Allow all clean images": AJAX `clean_images` (count) and `allow_clean` (batches of 5, each id re-checked with `Upload_Gate::is_clean_image()`, approved through `decisions->bulk( 'approve' )` so each is imported like a single Allow).
 - **Activity log.** Guard imports are logged with no user and the visitor IP, never as the administrator whose page load ran the import.
+
+## Opt-in install statistics
+
+Files: `includes/class-stats.php` (`Stats`, service `stats`), `Admin\Settings_Page::share_stats_box()` (wizard
+Alerts step and the "Usage statistics" card of Settings > General), endpoint and admin on qartvelo.com.
+
+- WordPress.org guideline 7: setting `share_stats` (default false) is the only switch, no notice ever asks for it.
+  The Alerts step saves it with "Save and continue" ("Skip" saves nothing); a settings import never copies it.
+  `WPCYBERSEC_DISABLE_STATS` (true) stops every message whatever the setting says.
+- Endpoint `Stats::endpoint()`: `WPCYBERSEC_STATS_URL`, else `https://qartvelo.com/api/cybergate-security/stats`,
+  filter `wpcybersec_stats_url`. `wp_remote_post`, JSON, timeout 5 s, no redirects.
+- Events: `opt_in` (on the switch from off to on, `wpcybersec_settings_updated`), `heartbeat` (cron
+  `wpcybersec_stats_heartbeat`, weekly, main site only, kept in shape on `init` (autoloaded cron option, no query); first run 10 minutes after
+  a reactivation, else a week after the last check-in), `deactivate` (`Installer::deactivate()`, non-blocking),
+  `uninstall` (`uninstall.php` before options are deleted, non-blocking, only when opted in), `opt_out` (on the
+  switch from on to off, one last message). Never from a page view.
+- Identity: network option `wpcybersec_stats_identity` `{ id (UUID), secret (64 hex), site (home URL without
+  scheme), registered }`, created at the first message and again when the site address changes (clones are new
+  installs). The secret goes once in `opt_in` (`signing_secret`); every body is signed, header `X-CGS-Signature`
+  = `hash_hmac( 'sha256', body, secret )`. A heartbeat answered 404 (unknown install) registers again with
+  `opt_in`. Last result: network option `wpcybersec_stats_last` (not autoloaded) for the "Last sent" line.
+- Payload (`payload()`): `install_id, event, sent_at, plugin, plugin_version`; plus (not for `opt_out`)
+  `site_url, site_name, wp_version, php_version, db_version, locale, multisite, sites_count`; plus (opt_in and
+  heartbeat) `server_software, hosting_panel, hosting_panel_name, settings { protection_level, upload_mode,
+  install_mode, file_mode, clamav_enabled, maldet_installed, guard_active }, stats { files_monitored,
+  pending_items, threats_last_scan (two significant digits, `round_count()`), last_scan_at }`. Never emails,
+  user names, file names or paths, visitor IPs, keys or content. `Stats::fields()` is the list the UI shows;
+  keep it, readme.txt and the docs page in step with `payload()`.
 
 ## Uninstall and deactivation
 

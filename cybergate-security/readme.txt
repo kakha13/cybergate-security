@@ -87,13 +87,17 @@ Deactivating stops the scans and switches the early guard off. Deleting the plug
 
 Only when you press a fix or install button. Every change to wp-config.php is checked for errors first, and the plugin's own lines are marked so you can find them.
 
+= Does it send any data to the developer? =
+
+Only if you opt in. The setup wizard (Alerts step) and Settings > General offer an optional "Help improve CyberGate Security" switch, off by default. When you turn it on, the site address and setup details listed under External services are sent once a week. No email addresses, user names, file names or site content are ever sent, and you can turn it off at any time.
+
 = Where are held files kept? =
 
 In a private folder with random file names that cannot run as code. The wizard can move this folder outside the web root.
 
 == External services ==
 
-The plugin connects to the services below. It sends no personal data, no site content and no tracking data. Nothing is sent to the plugin author.
+The plugin connects to the services below. It sends no personal data, no site content and no tracking data. Nothing is sent to the plugin author unless you turn on the optional usage statistics described last.
 
 * **WordPress.org core checksums** (api.wordpress.org): during scans and before a core reinstall, to get the official checksums of the WordPress core files of your version. Sent: WordPress version and locale. [Privacy policy](https://wordpress.org/about/privacy/)
 * **WordPress.org plugin checksums** (downloads.wordpress.org): during scans, the official checksums of installed plugins that are hosted on WordPress.org. Sent: plugin slug and version. [Privacy policy](https://wordpress.org/about/privacy/)
@@ -101,6 +105,7 @@ The plugin connects to the services below. It sends no personal data, no site co
 * **WordPress.org Subversion** (core.svn.wordpress.org, plugins.svn.wordpress.org): when you open the "What changed" view of a core file or a WordPress.org plugin file, or press "Restore official file", the original file is downloaded and checked against the official checksum. Sent: the file path, the plugin slug and the version. [Privacy policy](https://wordpress.org/about/privacy/)
 * **Your webhook URL** (optional, Slack, Discord, Microsoft Teams or any service you choose): when you enter one, alerts are posted there. Sent: the site name, the number of held files and threats, the names and paths of the files concerned and a link to the Reports page. Nothing is sent unless you enter a URL; the terms and privacy policy of the service you choose apply.
 * **Your own site** (loopback requests): the early guard live test, the uploads folder test, the data folder test and the check after a core reinstall request pages and test files of this same site. They do not leave your server's own address.
+* **Qartvelo Company statistics** (qartvelo.com), only if you opt in: off by default and nothing is sent before you turn on "Help improve CyberGate Security" in the setup wizard (Alerts step) or in Settings > General. Sent to https://qartvelo.com/api/cybergate-security/stats when you turn it on, then once a week, when the plugin is deactivated or deleted, and one last time when you turn it off. Sent: a random install ID, the event, the site address and name, the versions of the plugin, WordPress and PHP, the plugin database version, the site language, whether it is a multisite network and how many sites it has, the web server type and detected hosting panel, the protection level and upload, install and new-file settings, whether ClamAV is on, Linux Malware Detect is installed and the early guard is active, rounded counts of files monitored, items waiting and threats from the last scan, the time of the last scan, and once a signing key that proves later messages come from the same site. Never sent: email addresses, user names, file names or paths, visitor IP addresses, keys or passwords, or site content. Turn it off in Settings > General at any time; the constant `WPCYBERSEC_DISABLE_STATS` switches it off for good. [Privacy and external services](https://qartvelo.com/cybergate-security/docs/privacy-and-external-services)
 
 The server script offered in Settings > Advanced (Antivirus engines and Developer instructions), cgav, is text for an administrator to read and run on the server. When it is run, it installs ClamAV from the operating system's package repositories and Linux Malware Detect from rfxn.com, and its test command fetches the harmless EICAR test file from secure.eicar.org. The same commands appear in the step by step instructions. The plugin never runs them and never installs software. The only code it ever writes into your site comes from WordPress.org: the official core package for a reinstall you start, or an official original file when you press "Restore official file".
 
@@ -131,3 +136,4 @@ Data kept on your site: for every held file the plugin records the uploading use
 * Clean WordPress core reinstall with checksum verification and automatic rollback.
 * Optional early upload guard, ClamAV with a self-test, freeze lock, real cron and tamper check.
 * Multisite network mode and WP-CLI commands.
+* Optional, opt-in usage statistics for the developer, off by default.

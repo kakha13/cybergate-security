@@ -26,6 +26,7 @@ class Installer {
 		'wpcybersec_maintenance',
 		'wpcybersec_guard_import',
 		'wpcybersec_notify_flush',
+		'wpcybersec_stats_heartbeat',
 	);
 
 	/**
@@ -242,14 +243,21 @@ class Installer {
 	}
 
 	/**
-	 * Deactivation hook: stops cron (on every site of a network) and switches
-	 * the early guard off so it does not keep holding uploads while the plugin
-	 * is inactive.
+	 * Deactivation hook: sends the "deactivate" statistics event when the
+	 * administrator opted in, stops cron (on every site of a network) and
+	 * switches the early guard off so it does not keep holding uploads while
+	 * the plugin is inactive.
 	 *
 	 * @param bool $network_wide Network deactivation (multisite).
 	 */
 	public static function deactivate( $network_wide = false ) {
 		unset( $network_wide );
+		// Opt-in statistics only: tells the developer the plugin was deactivated (no reply awaited).
+		try {
+			Stats::on_deactivate();
+		} catch ( \Throwable $e ) {
+			unset( $e );
+		}
 		Network::clear_cron_everywhere();
 		Guard_Config::set_enabled( false );
 		Network::delete_option( self::REDIRECT_OPTION );

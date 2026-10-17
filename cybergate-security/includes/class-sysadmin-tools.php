@@ -3087,7 +3087,11 @@ class Sysadmin_Tools {
 
 			case 'notifications':
 				$warnings = array();
-				$settings->update( $this->collect_notifications( $post, $warnings ) );
+				$values   = $this->collect_notifications( $post, $warnings );
+				if ( isset( $post['share_stats'] ) ) {
+					$values['share_stats'] = self::post_bool( $post, 'share_stats' );
+				}
+				$settings->update( $values );
 				foreach ( $warnings as $warning ) {
 					self::flash( $warning, 'warn' );
 				}
@@ -3308,6 +3312,9 @@ class Sysadmin_Tools {
 		$values['upload_bypass_roles'] = array_values( array_intersect( $roles, $valid_roles ) );
 
 		$values = array_merge( $values, $this->collect_notifications( $post, $warnings ) );
+		if ( isset( $post['share_stats'] ) ) {
+			$values['share_stats'] = self::post_bool( $post, 'share_stats' );
+		}
 
 		// Protection level: a level picked without JavaScript applies its preset.
 		$presets = Settings::presets();
@@ -3692,7 +3699,8 @@ class Sysadmin_Tools {
 		$defaults = Settings::defaults();
 		$values   = array();
 		foreach ( array_intersect_key( $incoming, $defaults ) as $key => $value ) {
-			if ( 'wizard_completed' === $key ) {
+			// Consent to share statistics is given on each site itself, never copied from another one.
+			if ( 'wizard_completed' === $key || 'share_stats' === $key ) {
 				continue;
 			}
 			$default = $defaults[ $key ];

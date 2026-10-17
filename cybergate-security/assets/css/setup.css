@@ -1672,3 +1672,39 @@ html:has(body.wpcs-settings-screen) {
 .wpcs-wrap details.wpcs-other-ways {
 	margin-top: 10px;
 }
+
+/* Optional statistics (wizard Alerts step, Settings > General). */
+.wpcs-stats-optin {
+	margin: 18px 0 0;
+	padding: 14px 16px;
+	border: 1px dashed var(--wpcs-line-2);
+	border-radius: var(--wpcs-radius-sm);
+	background: var(--wpcs-surface);
+}
+
+.wpcs-settings-card .wpcs-stats-optin {
+	margin: 0;
+	border: 0;
+	padding: 0;
+}
+
+.wpcs-stats-optin .wpcs-disclosure {
+	margin-top: 12px;
+}
+
+.wpcs-stats-optin__list {
+	margin: 0 0 10px 18px;
+	padding: 0;
+	list-style: disc;
+	color: var(--wpcs-ink-2);
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+.wpcs-stats-optin__list li {
+	margin: 0 0 4px;
+}
+
+.wpcs-stats-optin__last {
+	margin-top: 10px;
+}
