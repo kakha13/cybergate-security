@@ -1833,3 +1833,93 @@
 		display: none;
 	}
 }
+
+/* ---------- Core reinstall card ---------- */
+.wpcs-core-card {
+	margin-bottom: 16px;
+}
+.wpcs-core-card .wpcs-card__title .dashicons {
+	color: var(--wpcs-bad);
+}
+.wpcs-core-card--warn .wpcs-card__title .dashicons,
+.wpcs-card--warn.wpcs-core-card .wpcs-card__title .dashicons {
+	color: var(--wpcs-warn);
+}
+.wpcs-core-card__counts {
+	margin: 0 0 10px;
+	padding: 0;
+	list-style: none;
+}
+.wpcs-core-card__counts li {
+	display: flex;
+	gap: 6px;
+	align-items: flex-start;
+	margin: 0 0 4px;
+	color: var(--wpcs-ink-2);
+}
+.wpcs-core-card__counts .dashicons {
+	flex: none;
+	color: var(--wpcs-bad);
+}
+.wpcs-core-card__warn {
+	padding: 8px 12px;
+	border-radius: var(--wpcs-radius-sm);
+	background: var(--wpcs-bad-soft);
+	color: #7f1d1d;
+}
+.wpcs-core-card__options {
+	display: grid;
+	gap: 14px;
+	margin-top: 12px;
+}
+.wpcs-core-option {
+	padding: 12px 14px;
+	border: 1px solid var(--wpcs-line);
+	border-radius: var(--wpcs-radius-sm);
+	background: var(--wpcs-bg);
+}
+.wpcs-core-option h3 {
+	margin: 0 0 6px;
+	font-size: 14px;
+}
+.wpcs-core-manual > summary {
+	cursor: pointer;
+	font-weight: 600;
+	color: var(--wpcs-brand-2);
+}
+.wpcs-core-card__actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 10px 0 0;
+}
+.wpcs-core-card__actions .button .dashicons {
+	margin-top: 3px;
+	font-size: 16px;
+	width: 16px;
+	height: 16px;
+}
+.wpcs-core-card .wpcs-progress {
+	margin-top: 10px;
+}
+.wpcs-core-card .wpcs-howto {
+	margin: 8px 0 0 18px;
+	padding: 0;
+	font-size: 13px;
+	color: var(--wpcs-ink-2);
+}
+.wpcs-core-card .wpcs-howto li {
+	margin: 0 0 8px;
+	padding-left: 2px;
+}
+.wpcs-core-card .wpcs-howto .wpcs-code {
+	margin: 6px 0 4px;
+}
+.wpcs-core-card details.wpcs-other-ways {
+	margin-top: 8px;
+}
+.wpcs-core-card details.wpcs-other-ways > summary {
+	cursor: pointer;
+	font-weight: 600;
+	color: var(--wpcs-brand-2);
+}

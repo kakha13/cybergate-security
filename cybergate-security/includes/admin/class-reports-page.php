@@ -374,6 +374,9 @@ class Reports_Page {
 	 * Pending, threats, quarantine and history tabs.
 	 */
 	private function render_items_tab() {
+		if ( in_array( $this->tab, array( 'pending', 'threats' ), true ) && '' === $this->search && ! $this->filters['type'] && ! $this->filters['severity'] ) {
+			Core_Repair_Card::render( 'reports' );
+		}
 		$this->render_tab_intro();
 
 		$args   = $this->item_args();

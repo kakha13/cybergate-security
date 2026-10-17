@@ -375,6 +375,12 @@ class Admin {
 			)
 		);
 
+		$page = self::current_page();
+		if ( in_array( $page, array( self::PAGE_DASHBOARD, self::PAGE_REPORTS ), true ) ) {
+			wp_enqueue_script( 'wpcybersec-core-repair', WPCYBERSEC_URL . 'assets/js/core-repair.js', array( 'wpcybersec-core' ), \WPCyberSecurity\Admin\Assets::ver( 'assets/js/core-repair.js' ), true );
+			wp_localize_script( 'wpcybersec-core-repair', 'wpcybersecCore', array( 'i18n' => Core_Repair_Card::i18n() ) );
+		}
+
 		/**
 		 * Fires after the base, core and admin assets are enqueued on a plugin screen.
 		 * The setup module can enqueue setup.css / setup.js here.

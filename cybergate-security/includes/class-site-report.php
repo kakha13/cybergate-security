@@ -127,6 +127,7 @@ class Site_Report {
 
 		$html .= $this->section_overview( $counts, $last, $baseline );
 		$html .= $this->section_scan( $last, $baseline );
+		$html .= $this->section_core();
 		$html .= $this->section_items();
 		$html .= $this->section_admins();
 		$html .= $this->section_settings();
@@ -274,6 +275,68 @@ class Site_Report {
 			$rows[ __( 'Message', 'cybergate-security' ) ] = (string) $last['message'];
 		}
 		return $html . $this->kv( $rows ) . '</section>';
+	}
+
+	/**
+	 * The core reinstall suggestion (Core_Repair) when the core looks damaged:
+	 * counts, the one-click option and every step by hand.
+	 *
+	 * @return string
+	 */
+	private function section_core() {
+		$repair = wpcybersec()->core_repair;
+		if ( ! $repair instanceof Core_Repair ) {
+			return '';
+		}
+		try {
+			$damage = $repair->damage();
+			if ( ! $damage['show'] ) {
+				return '';
+			}
+			$auto  = $repair->auto_status();
+			$steps = $repair->manual_steps();
+		} catch ( \Throwable $e ) {
+			return '';
+		}
+		$html  = '<section><h2>' . $this->t( __( 'WordPress core looks damaged', 'cybergate-security' ) ) . ' <span class="count">' . esc_html( number_format_i18n( $damage['total'] ) ) . '</span></h2>';
+		$html .= $this->kv(
+			array(
+				__( 'Changed core files', 'cybergate-security' )      => number_format_i18n( $damage['modified'] ),
+				__( 'Threats in core files', 'cybergate-security' )   => number_format_i18n( $damage['threats'] ),
+				__( 'Extra files in wp-admin or wp-includes', 'cybergate-security' ) => sprintf(
+					/* translators: 1: number of files, 2: number that can run code */
+					__( '%1$s (%2$s can run code)', 'cybergate-security' ),
+					number_format_i18n( $damage['unknown'] ),
+					number_format_i18n( $damage['unknown_exec'] )
+				),
+				__( 'Missing core files', 'cybergate-security' )      => number_format_i18n( $damage['missing'] ),
+			)
+		);
+		$html .= '<p>' . $this->t(
+			sprintf(
+				/* translators: %s: WordPress version */
+				__( 'Recommended: replace the whole WordPress core with a clean copy of version %s instead of reviewing these files one by one. wp-config.php, wp-content, .htaccess and the other files that were added stay as they are.', 'cybergate-security' ),
+				$damage['version']
+			)
+		) . '</p>';
+		$html .= '<p>' . $this->t(
+			$auto['ok']
+				? __( 'One click: Dashboard > "Reinstall clean core for me" downloads and verifies the official package, swaps core with maintenance mode on and puts the old core back by itself if the site does not answer.', 'cybergate-security' )
+				: __( 'The one-click reinstall is not available on this site:', 'cybergate-security' ) . ' ' . $auto['reason']
+		) . '</p>';
+		$html .= '<p><strong>' . $this->t( __( 'By hand:', 'cybergate-security' ) ) . '</strong></p><ol>';
+		foreach ( $steps as $step ) {
+			if ( ! empty( $step['other'] ) ) {
+				$html .= '</ol><p><strong>' . $this->t( (string) $step['text'] ) . ':</strong></p><ol>';
+				continue;
+			}
+			$html .= '<li>' . $this->t( isset( $step['text'] ) ? (string) $step['text'] : '' );
+			if ( ! empty( $step['code'] ) ) {
+				$html .= '<pre>' . $this->t( (string) $step['code'] ) . '</pre>';
+			}
+			$html .= '</li>';
+		}
+		return $html . '</ol></section>';
 	}
 
 	/**

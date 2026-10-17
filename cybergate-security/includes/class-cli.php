@@ -389,6 +389,91 @@ class Cli {
 	}
 
 	/* ------------------------------------------------------------------ */
+	/* core-reinstall                                                      */
+	/* ------------------------------------------------------------------ */
+
+	/**
+	 * Replaces WordPress core (wp-admin, wp-includes and the core files in the WordPress folder) with the verified official files of the installed version.
+	 *
+	 * Downloads the no-content package from wordpress.org, checks every file
+	 * against the official checksums, then swaps core with maintenance mode on.
+	 * When the site does not answer afterwards, the old core is put back. The
+	 * old core is kept as a backup for 7 days (Dashboard > Restore the previous
+	 * core). wp-config.php, wp-content and every other file stay as they are.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--yes]
+	 * : Do not ask for confirmation before the swap.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     $ wp wpcybersec core-reinstall
+	 *     $ wp wpcybersec core-reinstall --yes
+	 *
+	 * @subcommand core-reinstall
+	 *
+	 * @param array $args       Positional arguments.
+	 * @param array $assoc_args Associative arguments.
+	 */
+	public function core_reinstall( $args, $assoc_args ) {
+		unset( $args );
+		$repair = $this->service( 'core_repair' );
+		$damage = $repair->damage();
+		/* translators: 1: number of files, 2: changed, 3: threats, 4: extra, 5: missing */
+		\WP_CLI::log( sprintf( __( 'Core files affected: %1$s (%2$s changed, %3$s threats, %4$s extra files in wp-admin or wp-includes, %5$s missing).', 'cybergate-security' ), $damage['total'], $damage['modified'], $damage['threats'], $damage['unknown'], $damage['missing'] ) );
+
+		$state = $repair->start();
+		while ( ! is_wp_error( $state ) && isset( $state['step'] ) && in_array( $state['step'], array( 'download', 'extract', 'verify' ), true ) ) {
+			$public = Core_Repair::public_state( $state );
+			\WP_CLI::log( $public['label'] . ' (' . $public['percent'] . '%)' );
+			$state = $repair->tick();
+		}
+		if ( is_wp_error( $state ) ) {
+			\WP_CLI::error( $state->get_error_message() );
+		}
+		if ( ! isset( $state['step'] ) || 'ready' !== $state['step'] ) {
+			\WP_CLI::error( isset( $state['message'] ) && '' !== $state['message'] ? $state['message'] : __( 'The package could not be prepared.', 'cybergate-security' ) );
+		}
+		$confirm = Core_Repair::confirm_text( $state );
+		\WP_CLI::log( $confirm['text'] );
+		\WP_CLI::log( $confirm['verdict'] );
+		if ( ! $this->flag( $assoc_args, 'yes', false ) ) {
+			// WP_CLI::confirm() exits on "no"; the verified package must be cleaned up first.
+			fwrite( STDOUT, $confirm['title'] . ' [y/n] ' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- interactive CLI prompt.
+			$answer = strtolower( trim( (string) fgets( STDIN ) ) );
+			if ( 'y' !== $answer && 'yes' !== $answer ) {
+				$repair->cancel();
+				\WP_CLI::log( __( 'Cancelled. Nothing was changed.', 'cybergate-security' ) );
+				return;
+			}
+		}
+		$state = $repair->swap();
+		while ( ! is_wp_error( $state ) && isset( $state['step'] ) && 'finish' === $state['step'] ) {
+			$state = $repair->tick();
+		}
+		if ( is_wp_error( $state ) ) {
+			\WP_CLI::error( $state->get_error_message() );
+		}
+		if ( ! isset( $state['step'] ) || 'done' !== $state['step'] ) {
+			\WP_CLI::error( isset( $state['message'] ) ? (string) $state['message'] : __( 'The reinstall did not finish.', 'cybergate-security' ) );
+		}
+		$repair->dismiss();
+		\WP_CLI::success( (string) $state['message'] );
+		foreach ( Core_Repair::after_steps() as $step ) {
+			\WP_CLI::log( '- ' . $step['text'] . ( ! empty( $step['code'] ) ? ' ' . $step['code'] : '' ) );
+		}
+		$job = $this->service( 'scan_job' );
+		if ( $this->is_running( $job->status() ) ) {
+			\WP_CLI::log( __( 'Running the quick scan...', 'cybergate-security' ) );
+			$final = $job->run_to_completion();
+			if ( is_array( $final ) && ! empty( $final['message'] ) ) {
+				\WP_CLI::log( (string) $final['message'] );
+			}
+		}
+	}
+
+	/* ------------------------------------------------------------------ */
 	/* pending / approve / deny                                            */
 	/* ------------------------------------------------------------------ */
 

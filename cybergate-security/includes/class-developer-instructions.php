@@ -192,6 +192,36 @@ class Developer_Instructions {
 			}
 		}
 
+		// 4. A damaged WordPress core (Core_Repair): the reinstall by hand, with the panel's file manager.
+		$repair = Sysadmin_Tools::service( 'core_repair' );
+		if ( $repair instanceof Core_Repair ) {
+			try {
+				$damage = $repair->damage();
+				if ( $damage['show'] ) {
+					$items['core_reinstall'] = array(
+						'id'       => 'core_reinstall',
+						/* translators: %s: WordPress version */
+						'title'    => sprintf( __( 'Reinstall a clean WordPress %s core', 'cybergate-security' ), $damage['version'] ),
+						'why'      => sprintf(
+							/* translators: 1: number of files, 2: changed, 3: threats, 4: extra files, 5: missing */
+							__( '%1$s core files are affected (%2$s changed, %3$s threats, %4$s extra files in wp-admin or wp-includes, %5$s missing). Replacing core is faster and safer than reviewing them one by one; the one-click reinstall on the Dashboard does it when the server allows it.', 'cybergate-security' ),
+							number_format_i18n( $damage['total'] ),
+							number_format_i18n( $damage['modified'] ),
+							number_format_i18n( $damage['threats'] ),
+							number_format_i18n( $damage['unknown'] ),
+							number_format_i18n( $damage['missing'] )
+						),
+						'steps'    => $repair->manual_steps(),
+						'error'    => '',
+						'at'       => 0,
+						'optional' => false,
+					);
+				}
+			} catch ( \Throwable $e ) {
+				unset( $items['core_reinstall'] );
+			}
+		}
+
 		$items = array_values( $items );
 		usort(
 			$items,

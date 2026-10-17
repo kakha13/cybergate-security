@@ -41,8 +41,10 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
 - PHP 7.4 compatible syntax: no `match`, no nullsafe `?->`, no named arguments, no union types,
   no `str_contains` (use `false !== strpos`).
 - File operations go through `Fs` (WordPress filesystem API): `delete`, `rmdir`, `mkdir`, `chmod`,
-  `is_writable`, `touch`, `move` (never overwrites, never leaves two copies) and `replace`
-  (atomic temp file + rename). Raw PHP file functions stay only where WordPress is not loaded
+  `is_writable`, `touch`, `move` (never overwrites, never leaves two copies), `replace`
+  (atomic temp file + rename), `rename` (one-step rename on the same filesystem, folders too,
+  never onto an existing path), `copy`, `delete_tree` (recursive, never follows symlinks:
+  WP_Filesystem_Direct::delete() would) and `same_device`. Raw PHP file functions stay only where WordPress is not loaded
   (`guard/guard.php`, `bin/cron.php`) or for streams (`fopen`/`flock`), each with a
   `phpcs:ignore ... -- reason` comment. The release must pass Plugin Check with no errors.
 
@@ -72,6 +74,7 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
 | hardening | `Hardening` | setup (one-click fixes) |
 | developer | `Developer_Instructions` | setup (steps that need server access) |
 | hosting | `Hosting` | setup (hosting panel detection and panel steps) |
+| core_repair | `Core_Repair` | engine (core damage check, clean core reinstall) |
 | admin | `Admin\Admin` | admin UI |
 
 Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` (core), `Network`
@@ -687,7 +690,9 @@ Files: `includes/admin/class-wizard.php`, `includes/admin/class-settings-page.ph
   on the server (status, install-clamav, install-maldet, monitor, test, update, scan, logs; safe to
   re-run, never deletes site files).
 - `Cli`: static `register()` -> `WP_CLI::add_command('wpcybersec', ...)` with `status`, `scan`,
-  `pending`, `approve`, `deny`, `allowlist`, `guard`, `unlock`, `lock`, `report`.
+  `pending`, `approve`, `deny`, `allowlist`, `guard`, `unlock`, `lock`, `report`,
+  `core-reinstall [--yes]` (Core_Repair start/tick/swap, asks before the swap without --yes, then
+  runs the quick scan to completion).
 
 ## Hosting panel detection
 
@@ -712,6 +717,9 @@ Files: `includes/class-hosting.php`; used by `Sysadmin_Tools` (check `hosting`),
   nginx rules from `Sysadmin_Tools::nginx_uploads_block()` (the `UPLOADS_EXEC_PATTERN` rule as a prefix location
   with the PHP block nested, so it works wherever a panel includes it) and `nginx_data_rule()`, Apache rules
   from `apache_uploads_rules()`. Filter `wpcybersec_hosting_steps`.
+- `file_manager()`: `{ name, open, upload, extract, move }` of the panel's own file manager (null when it has
+  none); `manages_core()`: the name of a host that manages WordPress core itself ('' otherwise). Both for
+  `Core_Repair::manual_steps()`.
 - `merge( $task, $generic )`: panel steps, then the marker step `Hosting::other_ways()` (`{ text, other: true }`),
   then the generic ones; `Settings_Page::render_steps()` folds what follows the marker under "Other ways",
   `Developer_Instructions::as_text()` prints "Other ways:". `prepend` adds the `php_restart` steps; `data_dir`
@@ -721,6 +729,93 @@ Files: `includes/class-hosting.php`; used by `Sysadmin_Tools` (check `hosting`),
 - `server-tools/cgav.sh` `detect_panel()` checks the same install folders (then the site path) as root, prints the
   panel in `cgav status`, and `install-clamav` follows it (cPanel's own package, DirectAdmin CustomBuild hint
   unless `CGAV_OS_PACKAGES=1`, Plesk note, system packages elsewhere).
+
+## Core reinstall
+
+Files: `includes/class-core-repair.php` (`Core_Repair`, service `core_repair`),
+`includes/admin/class-core-repair-card.php` (`Admin\Core_Repair_Card::render( 'dashboard'|'reports' )`),
+`assets/js/core-repair.js` (enqueued on the Dashboard and Reports pages, strings in `wpcybersecCore`).
+
+- Detection, `damage()`: open (pending, not held) file/threat items whose `original_path` is under
+  ABSPATH `wp-admin/`, `wp-includes/` or the WordPress root (one query on the items table, skipped
+  when `Store::counts()` has nothing pending), classified by `classify()` from what the scan stored:
+  `modified` (`details.verified = core`, `checksum = mismatch`; a localized version.php never),
+  `unknown` (sig `core_unknown_file` / `core_unknown_config`, or `checksum = unknown_file`; `exec`
+  when it can run code), `threat` (other open threats in core folders or root core file names,
+  `ROOT_FALLBACK`), plus `missing_core` of the last scan. One count per path. `show` = total >=
+  `THRESHOLD` (5, filter `wpcybersec_core_damage_threshold`) or any unknown executable file. Root
+  PHP files that are not core (backdoor.php) are not counted: they stay in Reports. With 1 to 4
+  changed files the per-file "Restore official file" stays the way. Called only on the Dashboard,
+  the Reports Pending/Threats tabs (no search or filter), the downloadable report
+  (`Site_Report::section_core()`) and Developer instructions (entry `core_reinstall`); normal admin
+  pages never load it.
+- Card: counts, why replacing core beats reviewing files, option B (when `auto_status()` is ok) and
+  option A ("Do it by hand", open when B is not available) with "Download the package", "Turn on
+  maintenance mode" (AJAX `core_maintenance`, standard `.maintenance`, 10 minutes) and the .txt of
+  Developer instructions. A running job (resumed by the script on page load), the finished or
+  failed job (Dismiss) and every kept backup ("Restore the previous core", Dashboard only).
+- `layout()`: `standard`, `composer` (composer.json one or two folders up naming roots/wordpress,
+  johnpbloch/wordpress, wordpress/core-implementation or roots/bedrock, ABSPATH under vendor/, or
+  Bedrock's `web/wp/`), `symlink` (wp-admin or wp-includes is a link), `custom` (WPINC renamed).
+  `Hosting::manages_core()`: WP Engine, Kinsta, Pantheon, WordPress.com, Pressable, Flywheel.
+- By hand, `manual_steps()` (`{ text, code }`, `Hosting::other_ways()` marker before the SSH block):
+  backup, the no-content zip of this exact version (`package_url()`: the `update_core` offer's
+  `packages->no_content` when it is for this version and en_US, else
+  `https://downloads.wordpress.org/release/wordpress-<v>-no-content.zip`), the English-package note
+  for localized sites, the panel's file manager (`Hosting::file_manager()`: cPanel, Plesk,
+  DirectAdmin, CyberPanel, aaPanel, HestiaCP, VestaCP, CloudPanel, CWP, Virtualmin, FASTPANEL,
+  ISPmanager, Hostinger, SiteGround; SFTP otherwise), upload first, maintenance, delete wp-admin,
+  wp-includes and exactly the root files of the checksum list (`root_files()`), keep everything
+  else (what is in the folder is listed), extract, move up, clean up, full scan, then
+  `after_steps()` (passwords, salts, plugins/themes/uploads). Other ways: `ssh_block()` (subshell
+  with `set -e`, refuses without wp-config.php / wp-content, curl, `.sha1` check, unzip or PHP
+  ZipArchive, `.maintenance`, delete exactly the core paths, copy, chown to the owner of
+  wp-content when run as root, clean up) and `wp core verify-checksums` (with the warning against
+  `wp core download --force` on 7.x). Composer: `composer reinstall <package>` instead, no delete
+  steps. Managed hosts: ask the host or use its restore tools.
+- One click, `auto_status( $live )`: refused with the reason for DISALLOW_FILE_MODS, the freeze lock,
+  a non-standard layout, a managed host, no ZipArchive, `get_filesystem_method()` other than
+  `direct`, ABSPATH/wp-admin/wp-includes not writable, or no place (`places()`): the work folder
+  `<data>/core-stage/<id>` (data folder on the same filesystem as ABSPATH) else
+  `<parent of ABSPATH>/.wpcybersec-core-stage`; the backup `<data>/core-backup/<id>` when the data
+  folder is outside the web root, or inside it on Apache/LiteSpeed with its deny-all .htaccess, or
+  when the web probe says blocked, else `<parent>/.wpcybersec-core-backup-<id>` (same filesystem,
+  writable, not served, not in the scan set). Never a backup that the web can reach.
+- Job (option `wpcybersec_core_reinstall`, not autoloaded; AJAX `core_reinstall`
+  do=start|tick|swap|cancel|status|dismiss): `start()` (checks incl. the live ones, no running scan,
+  `checksums( $version )` = `get_core_checksums( $version, 'en_US' )` without wp-content, saved as
+  `checksums.json` in the work folder) -> `download` (`download_url()`, compared with the release
+  `.sha1`) -> `extract` (every entry name checked first: under `wordpress/`, no `..`, no wp-content;
+  then ZipArchive batches within `BUDGET`) -> `verify` (md5 of every listed file, then no extra file;
+  any difference fails with nothing changed) -> `ready` (`confirm_text()` for `confirmDialog()`) ->
+  `swap()`: backup folder with marker `.wpcybersec-core-backup` (JSON id, abspath, version, added
+  root files, disabled configs), `exchange()`: wp-admin/includes/file.php and update.php loaded
+  first, a loopback of the home page, `.maintenance` (`maintenance_on()`, an existing foreign one is
+  kept), wp-includes then wp-admin renamed into the backup and the verified ones renamed in, root
+  files copied to `<backup>/root/` and replaced atomically (`put_file()`), every step journaled in
+  the state, `opcache_reset()`, maintenance off, `post_check()` (version.php included in a closure
+  must report the version; home page not 5xx, and answering when it answered before; filter
+  `wpcybersec_core_reinstall_check`), on failure maintenance on, `rollback()` of the journal,
+  maintenance off. A shutdown function rolls back when PHP dies mid-swap; `recover()` (every
+  request that looks at the job) rolls back a swap whose state is older than `STALE`. When a step
+  cannot be undone, the backup and work folder are kept. Then the backup's .htaccess/.user.ini/
+  php.ini/web.config files get `.wpcs-off` (an attacker's .htaccess must not open the backup) ->
+  `finish()`: core items resolved (`details.resolution` `core_reinstalled`, or `removed_with_core`
+  for extra files in wp-admin/wp-includes, plus `core_backup`), the extra files logged
+  (`core_unknown_moved`), manifest rows under wp-admin/ and wp-includes/ dropped and every new core
+  file upserted trusted (`run_id` core), `missing_core` of the last scan recounted, work folder
+  deleted, a quick scan started (trigger `update`).
+- Backups (option `wpcybersec_core_backups`): `restore( $id )` (AJAX `core_restore`) swaps the old
+  core back with the same exchange, check and rollback, forgets the manifest rows of core paths so
+  the next scan judges the old files again, deletes the backup and the replaced clean core, starts a
+  quick scan. `prune()` on `wpcybersec_maintenance`: backups older than `KEEP_DAYS` (7, only folders
+  with their marker) and jobs left for a day. Uninstall with "Delete all data" removes marked
+  backups next to the WordPress folder too.
+- Multisite: network admin only (`Admin::can()`), one core for every site, the loopback goes to the
+  network home. Log events `core_reinstall_started`, `core_package_verified`, `core_reinstalled`,
+  `core_items_resolved`, `core_items_removed`, `core_unknown_moved`, `core_reinstall_failed`,
+  `core_reinstall_rolled_back`, `core_reinstall_cancelled`, `core_restored_previous`,
+  `core_backup_deleted`, `core_maintenance_on`.
 
 ## Speed and usability contracts
 

@@ -80,6 +80,19 @@ if ( $wpcybersec_delete ) {
 		}
 	}
 
+	// Backups of a replaced WordPress core (Core_Repair) that live next to the WordPress
+	// folder instead of in the data folder: only folders that carry their own marker.
+	$wpcybersec_core_backups = wpcybersec_uninstall_option( 'wpcybersec_core_backups', array() );
+	if ( is_array( $wpcybersec_core_backups ) && class_exists( '\WPCyberSecurity\Fs' ) ) {
+		foreach ( $wpcybersec_core_backups as $wpcybersec_entry ) {
+			$wpcybersec_dir = is_array( $wpcybersec_entry ) && isset( $wpcybersec_entry['dir'], $wpcybersec_entry['id'] ) ? (string) $wpcybersec_entry['dir'] : '';
+			$wpcybersec_mk  = '' !== $wpcybersec_dir ? json_decode( (string) @file_get_contents( $wpcybersec_dir . '/.wpcybersec-core-backup' ), true ) : null; // phpcs:ignore
+			if ( is_array( $wpcybersec_mk ) && isset( $wpcybersec_mk['id'] ) && (string) $wpcybersec_mk['id'] === (string) $wpcybersec_entry['id'] ) {
+				\WPCyberSecurity\Fs::delete_tree( $wpcybersec_dir );
+			}
+		}
+	}
+
 	// The guard lines in .user.ini and .htaccess of the WordPress folder (and the
 	// front controller folder), and the PHP block in the uploads .htaccess.
 	$wpcybersec_ini_name = (string) ini_get( 'user_ini.filename' );

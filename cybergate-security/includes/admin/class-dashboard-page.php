@@ -66,6 +66,7 @@ class Dashboard_Page {
 			$actions
 		);
 
+		Core_Repair_Card::render( 'dashboard' );
 		$this->render_setup_cta();
 		$this->render_alerts();
 		$this->render_stats();

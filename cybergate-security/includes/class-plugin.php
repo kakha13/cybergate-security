@@ -63,6 +63,8 @@ final class Plugin {
 	public $developer;
 	/** @var Hosting */
 	public $hosting;
+	/** @var Core_Repair */
+	public $core_repair;
 	/** @var Ajax */
 	public $ajax;
 	/** @var Admin\Admin|null */
@@ -120,6 +122,7 @@ final class Plugin {
 		$this->hardening     = new Hardening();
 		$this->developer     = new Developer_Instructions();
 		$this->hosting       = new Hosting();
+		$this->core_repair   = new Core_Repair();
 		$this->ajax          = new Ajax();
 
 		$modules = array(
@@ -136,6 +139,7 @@ final class Plugin {
 			$this->sysadmin,
 			$this->hardening,
 			$this->developer,
+			$this->core_repair,
 			$this->ajax,
 		);
 		foreach ( $modules as $module ) {

@@ -904,6 +904,74 @@ class Hosting {
 	}
 
 	/**
+	 * The hosting panel's own file manager, for steps that upload, extract and
+	 * delete files by hand (the core reinstall). Null when the panel has none
+	 * or nothing was detected (SFTP steps apply then).
+	 *
+	 * @param array|null $info current() (default).
+	 * @return array|null { name, open, upload, extract, move }
+	 */
+	public function file_manager( $info = null ) {
+		$info = is_array( $info ) ? $info : $this->current();
+		$id   = isset( $info['id'] ) ? (string) $info['id'] : '';
+		$fm   = static function ( $name, $open, $extract, $move = '' ) {
+			return array(
+				'name'    => $name,
+				'open'    => $open,
+				/* translators: %s: file manager name */
+				'upload'  => sprintf( __( 'Use the Upload button of %s.', 'cybergate-security' ), $name ),
+				'extract' => $extract,
+				'move'    => '' !== $move ? $move : __( 'Open the new "wordpress" folder, select everything in it and use Move to put it one folder up (into the WordPress folder).', 'cybergate-security' ),
+			);
+		};
+		switch ( $id ) {
+			case 'cpanel':
+				return $fm( 'cPanel File Manager', __( 'In cPanel open Files > File Manager.', 'cybergate-security' ), __( 'Right-click the zip file and choose Extract, then confirm the folder shown.', 'cybergate-security' ) );
+			case 'plesk':
+				return $fm( 'Plesk File Manager', __( 'In Plesk open Websites & Domains > Files (File Manager).', 'cybergate-security' ), __( 'Open the menu of the zip file and choose Extract Files.', 'cybergate-security' ) );
+			case 'directadmin':
+				return $fm( 'DirectAdmin File Manager', __( 'In DirectAdmin open System Info & Files > File Manager.', 'cybergate-security' ), __( 'Select the zip file and choose Extract.', 'cybergate-security' ) );
+			case 'cyberpanel':
+				return $fm( 'CyberPanel File Manager', __( 'In CyberPanel open Websites > List Websites > Manage (this site) > File Manager.', 'cybergate-security' ), __( 'Right-click the zip file and choose Extract.', 'cybergate-security' ) );
+			case 'aapanel':
+				return $fm( 'aaPanel Files', __( 'In aaPanel open Files in the left menu.', 'cybergate-security' ), __( 'Click Unzip next to the zip file.', 'cybergate-security' ), __( 'Open the new "wordpress" folder, select everything, choose Cut and paste it one folder up (into the WordPress folder).', 'cybergate-security' ) );
+			case 'hestia':
+				return $fm( 'HestiaCP File Manager', __( 'In HestiaCP open Files at the top.', 'cybergate-security' ), __( 'Select the zip file and choose Extract from the menu.', 'cybergate-security' ) );
+			case 'vesta':
+				return $fm( 'VestaCP File Manager', __( 'In VestaCP open File Manager at the top.', 'cybergate-security' ), __( 'Select the zip file and choose Extract.', 'cybergate-security' ) );
+			case 'cloudpanel':
+				return $fm( 'CloudPanel File Manager', __( 'In CloudPanel open the site and choose File Manager.', 'cybergate-security' ), __( 'Right-click the zip file and choose Extract.', 'cybergate-security' ) );
+			case 'cwp':
+				return $fm( 'CWP File Manager', __( 'In the CWP user panel open File Management > File Manager.', 'cybergate-security' ), __( 'Select the zip file and choose Extract.', 'cybergate-security' ) );
+			case 'virtualmin':
+			case 'webmin':
+				return $fm( 'Virtualmin File Manager', __( 'In Virtualmin open Tools > File Manager (Others > File Manager on older versions).', 'cybergate-security' ), __( 'Select the zip file and choose Extract from the File menu.', 'cybergate-security' ) );
+			case 'fastpanel':
+				return $fm( 'FASTPANEL File Manager', __( 'In FASTPANEL open the site and choose File Manager.', 'cybergate-security' ), __( 'Right-click the zip file and choose Extract.', 'cybergate-security' ) );
+			case 'ispmanager':
+				return $fm( 'ISPmanager File Manager', __( 'In ISPmanager open Files (File manager).', 'cybergate-security' ), __( 'Select the zip file and choose Extract.', 'cybergate-security' ) );
+			case 'hostinger':
+				return $fm( 'Hostinger File Manager', __( 'In hPanel open Websites > Manage (this site) > Files > File Manager.', 'cybergate-security' ), __( 'Right-click the zip file and choose Extract.', 'cybergate-security' ) );
+			case 'siteground':
+				return $fm( 'SiteGround File Manager', __( 'In Site Tools open Site > File Manager.', 'cybergate-security' ), __( 'Right-click the zip file and choose Extract.', 'cybergate-security' ) );
+		}
+		return null;
+	}
+
+	/**
+	 * Hosts that manage WordPress core themselves (read-only or replaced by
+	 * the host): a core reinstall goes through the host's own restore tools.
+	 *
+	 * @param array|null $info current() (default).
+	 * @return string Host name, '' when the host lets the site owner replace core.
+	 */
+	public function manages_core( $info = null ) {
+		$info = is_array( $info ) ? $info : $this->current();
+		$id   = isset( $info['id'] ) ? (string) $info['id'] : '';
+		return in_array( $id, array( 'wpengine', 'kinsta', 'pantheon', 'wpcom', 'pressable', 'flywheel' ), true ) ? self::name( $id ) : '';
+	}
+
+	/**
 	 * Marker step: the steps after it are the generic "Other ways".
 	 *
 	 * @return array
