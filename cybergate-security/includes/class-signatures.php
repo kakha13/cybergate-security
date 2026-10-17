@@ -1019,43 +1019,41 @@ class Signatures {
 
 		// Candidate matches. Only the first $limit are ever examined, so they are
 		// fetched one by one: a file with hundreds of thousands of matches costs
-		// no more than one with $limit. min_count signatures need the total.
+		// no more than one with $limit (never a list of every match, which on a
+		// large minified bundle can take more memory than the host allows).
+		// $limit is at least min_count, so counting stops once a min_count
+		// signature has enough matches.
 		$candidates = array();
 		$failed     = false;
+		$from       = 0;
+		$size       = strlen( $content );
+		while ( count( $candidates ) < $limit && $from <= $size ) {
+			$m  = array();
+			$ok = @preg_match( $sig['pattern'], $content, $m, PREG_OFFSET_CAPTURE, $from ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( false === $ok ) {
+				$failed = true;
+				break;
+			}
+			if ( 1 !== $ok ) {
+				break;
+			}
+			$candidates[] = $m[0];
+			$end          = $m[0][1] + strlen( $m[0][0] );
+			$from         = $end > $m[0][1] ? $end : $end + 1;
+		}
+		$count = count( $candidates );
+		$more  = $count >= $limit && $from <= $size;
 		if ( $min_count > 1 ) {
-			$all   = array();
-			$count = @preg_match_all( $sig['pattern'], $content, $all, PREG_OFFSET_CAPTURE ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
-			if ( false === $count ) {
+			if ( $failed ) {
 				// A PCRE limit was hit: fail closed instead of reporting the file clean.
 				return array( self::incomplete_hit( $sig ) );
 			}
 			if ( $count < $min_count ) {
 				return array();
 			}
-			$candidates = array_slice( $all[0], 0, $limit );
-			unset( $all );
-		} else {
-			$from = 0;
-			$size = strlen( $content );
-			while ( count( $candidates ) < $limit && $from <= $size ) {
-				$m  = array();
-				$ok = @preg_match( $sig['pattern'], $content, $m, PREG_OFFSET_CAPTURE, $from ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
-				if ( false === $ok ) {
-					$failed = true;
-					break;
-				}
-				if ( 1 !== $ok ) {
-					break;
-				}
-				$candidates[] = $m[0];
-				$end          = $m[0][1] + strlen( $m[0][0] );
-				$from         = $end > $m[0][1] ? $end : $end + 1;
-			}
-			$count = count( $candidates );
-			if ( ! $count ) {
-				// A PCRE limit was hit: fail closed instead of reporting the file clean.
-				return $failed ? array( self::incomplete_hit( $sig ) ) : array();
-			}
+		} elseif ( ! $count ) {
+			// A PCRE limit was hit: fail closed instead of reporting the file clean.
+			return $failed ? array( self::incomplete_hit( $sig ) ) : array();
 		}
 		if ( ! empty( $sig['requires'] ) ) {
 			$required = @preg_match( $sig['requires'], $content ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
@@ -1111,8 +1109,13 @@ class Signatures {
 				$snippet = self::clean_snippet( substr( $text, 0, 90 ) . ' => ' . $decoded );
 			}
 			if ( $min_count > 1 ) {
-				/* translators: %d: number of occurrences */
-				$snippet = self::clean_snippet( sprintf( __( '%d occurrences, first:', 'cybergate-security' ), $count ) . ' ' . $snippet );
+				$snippet = self::clean_snippet(
+					( $more
+						/* translators: %d: number of occurrences counted before counting stopped */
+						? sprintf( __( '%d or more occurrences, first:', 'cybergate-security' ), $count )
+						/* translators: %d: number of occurrences */
+						: sprintf( __( '%d occurrences, first:', 'cybergate-security' ), $count ) ) . ' ' . $snippet
+				);
 			}
 
 			$lines[ $line ] = true;

@@ -40,6 +40,13 @@ defined( 'ABSPATH' ) || exit;
  *
  * Every read checks the SHA-256 of the decompressed content (of the redacted
  * text for a redacted copy).
+ *
+ * Limits: at most snapshot_max_files copies and snapshot_max_mb on disk
+ * (shared hosts count inodes). The running totals live in USAGE_OPTION; a
+ * new copy is refused while the store is full, and enforce_cap() (after
+ * every scan and from prune()) deletes the least recently used copies until
+ * the store is back under 90 % of both limits. usage() reports the numbers,
+ * refused copies and write failures for the dashboard.
  */
 class Snapshots {
 
@@ -62,6 +69,12 @@ class Snapshots {
 
 	/** Cached stats(). */
 	const STATS_TRANSIENT = 'wpcybersec_snapshot_stats';
+
+	/** Running totals: { files, bytes, at (last exact count), failures, refused, last_failure }. */
+	const USAGE_OPTION = 'wpcybersec_snapshot_usage';
+
+	/** enforce_cap() deletes down to this share of the limits. */
+	const CAP_TARGET = 0.9;
 
 	/** Hard cap for one copy (also for downloaded originals). */
 	const HARD_MAX = 4194304;
@@ -94,6 +107,15 @@ class Snapshots {
 
 	/** @var bool Whether the folder was created and protected in this request. */
 	private $ready = false;
+
+	/** @var array|null USAGE_OPTION loaded for this request. */
+	private $usage = null;
+
+	/** @var int Changes to $usage not saved yet. */
+	private $usage_dirty = 0;
+
+	/** @var bool A shutdown save of $usage is registered. */
+	private $usage_hooked = false;
 
 	/**
 	 * Hooks: re-copy trusted files when copies are switched on or allowed to be larger.
@@ -496,11 +518,18 @@ class Snapshots {
 			Fs::touch( $path ); // needed again: keep it past the next prune().
 			return true;
 		}
+		if ( ! $replace && $this->is_full() ) {
+			// The store is at its limit: no new copy until enforce_cap() made room.
+			$this->count_usage( 'refused' );
+			return false;
+		}
 		if ( ! $this->ensure_root() ) {
+			$this->count_usage( 'failures' );
 			return false;
 		}
 		$dir = dirname( $path );
 		if ( ! @is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$this->count_usage( 'failures' );
 			return false;
 		}
 		$gz = gzencode( $content, 6 );
@@ -510,6 +539,7 @@ class Snapshots {
 		$tmp = $dir . '/.' . substr( basename( $path, '.gz' ), 0, 12 ) . '-' . substr( md5( uniqid( 'wpcs', true ) ), 0, 8 ) . '.tmp';
 		if ( false === @file_put_contents( $tmp, $gz ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions
 			Fs::delete( $tmp );
+			$this->count_usage( 'failures' );
 			return false;
 		}
 		Fs::chmod( $tmp, 0600 );
@@ -518,9 +548,242 @@ class Snapshots {
 				return true;
 			}
 			Fs::delete( $tmp );
-			return ! $replace && @is_file( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- written by another process meanwhile.
+			$exists = @is_file( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- written by another process meanwhile.
+			if ( ! $exists ) {
+				$this->count_usage( 'failures' );
+			}
+			return ! $replace && $exists;
+		}
+		if ( ! $replace ) {
+			$this->count_usage( 'added', strlen( $gz ) );
 		}
 		return true;
+	}
+
+	/* ------------------------------------------------------------------ */
+	/* Limits and usage                                                    */
+	/* ------------------------------------------------------------------ */
+
+	/**
+	 * @return int Most stored copies.
+	 */
+	public function max_files() {
+		return max( 1000, (int) wpcybersec()->settings->get( 'snapshot_max_files', 20000 ) );
+	}
+
+	/**
+	 * @return int Most bytes on disk.
+	 */
+	public function max_total_bytes() {
+		return max( 10, (int) wpcybersec()->settings->get( 'snapshot_max_mb', 200 ) ) * MB_IN_BYTES;
+	}
+
+	/**
+	 * Numbers for the dashboard and the settings page.
+	 *
+	 * @return array { enabled: bool, files: int, bytes: int, max_files: int, max_bytes: int,
+	 *                 percent: float (the fuller of the two limits), full: bool, refused: int
+	 *                 (copies not taken because the store was full, since the last count),
+	 *                 failures: int (copies that could not be written), last_failure: int (unix),
+	 *                 counted_at: int (unix time of the last exact count, 0 = estimate) }
+	 */
+	public function usage() {
+		$usage     = $this->load_usage();
+		$max_files = $this->max_files();
+		$max_bytes = $this->max_total_bytes();
+		$percent   = max( $usage['files'] / $max_files, $usage['bytes'] / $max_bytes ) * 100;
+		return array(
+			'enabled'      => $this->enabled(),
+			'files'        => (int) $usage['files'],
+			'bytes'        => (int) $usage['bytes'],
+			'max_files'    => $max_files,
+			'max_bytes'    => $max_bytes,
+			'percent'      => round( min( 100.0, $percent ), 1 ),
+			'full'         => $this->is_full(),
+			'refused'      => (int) $usage['refused'],
+			'failures'     => (int) $usage['failures'],
+			'last_failure' => (int) $usage['last_failure'],
+			'counted_at'   => (int) $usage['at'],
+		);
+	}
+
+	/**
+	 * Whether a new copy would go over a limit.
+	 *
+	 * @return bool
+	 */
+	public function is_full() {
+		$usage = $this->load_usage();
+		return $usage['files'] >= $this->max_files() || $usage['bytes'] >= $this->max_total_bytes();
+	}
+
+	/**
+	 * Deletes the least recently used copies (oldest file time; a copy is
+	 * touched whenever it is needed again) until both totals are under
+	 * CAP_TARGET of their limits. Recounts first when the totals are older
+	 * than a day. Two passes over the store: an hourly histogram of file
+	 * times picks the cut-off, then older copies are deleted, so memory stays
+	 * small however many copies there are.
+	 *
+	 * @param float $seconds Time budget (the rest is done next time).
+	 * @return int Copies deleted.
+	 */
+	public function enforce_cap( $seconds = 5.0 ) {
+		$usage = $this->load_usage();
+		if ( (int) $usage['at'] < time() - DAY_IN_SECONDS ) {
+			$this->stats( true ); // Exact totals (also saved as usage).
+			$usage = $this->load_usage();
+		}
+		if ( ! $this->is_full() && $usage['files'] < $this->max_files() * 0.98 && $usage['bytes'] < $this->max_total_bytes() * 0.98 ) {
+			return 0;
+		}
+		$deadline   = microtime( true ) + max( 1.0, (float) $seconds );
+		$need_files = max( 0, (int) $usage['files'] - (int) floor( $this->max_files() * self::CAP_TARGET ) );
+		$need_bytes = max( 0, (int) $usage['bytes'] - (int) floor( $this->max_total_bytes() * self::CAP_TARGET ) );
+		if ( ! $need_files && ! $need_bytes ) {
+			return 0;
+		}
+
+		// Pass 1: copies and bytes per hour of last use.
+		$hours = array();
+		foreach ( $this->copy_files() as $file ) {
+			$mtime = (int) @filemtime( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$size  = (int) @filesize( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$hour  = (int) floor( $mtime / HOUR_IN_SECONDS );
+			if ( ! isset( $hours[ $hour ] ) ) {
+				$hours[ $hour ] = array( 0, 0 );
+			}
+			++$hours[ $hour ][0];
+			$hours[ $hour ][1] += $size;
+		}
+		ksort( $hours );
+		$cut   = null;
+		$files = 0;
+		$bytes = 0;
+		foreach ( $hours as $hour => $sum ) {
+			if ( $files + $sum[0] >= $need_files && $bytes + $sum[1] >= $need_bytes ) {
+				$cut = $hour; // Only part of this hour has to go.
+				break;
+			}
+			$files += $sum[0];
+			$bytes += $sum[1];
+		}
+		if ( null === $cut ) {
+			return 0;
+		}
+		// Still to delete from the cut-off hour itself, after every older copy.
+		$rest_files = $need_files - $files;
+		$rest_bytes = $need_bytes - $bytes;
+
+		// Pass 2: delete every copy last used before the cut-off hour, and
+		// from that hour only as many as are still needed.
+		$deleted = 0;
+		$freed   = 0;
+		foreach ( $this->copy_files() as $file ) {
+			if ( microtime( true ) >= $deadline ) {
+				break;
+			}
+			$hour = (int) floor( (int) @filemtime( $file ) / HOUR_IN_SECONDS ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( $hour > $cut || ( $hour === $cut && $rest_files <= 0 && $rest_bytes <= 0 ) ) {
+				continue;
+			}
+			$size = (int) @filesize( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( Fs::delete( $file ) ) {
+				++$deleted;
+				$freed += $size;
+				if ( $hour === $cut ) {
+					--$rest_files;
+					$rest_bytes -= $size;
+				}
+			}
+		}
+		if ( $deleted ) {
+			$this->usage['files']   = max( 0, (int) $this->usage['files'] - $deleted );
+			$this->usage['bytes']   = max( 0, (int) $this->usage['bytes'] - $freed );
+			$this->usage['refused'] = 0;
+			$this->save_usage();
+			delete_transient( self::STATS_TRANSIENT );
+			wpcybersec()->logger->log(
+				'snapshots_capped',
+				sprintf(
+					/* translators: 1: number of files, 2: file count limit, 3: size limit */
+					_n( 'Deleted %1$s stored file copy (the oldest) to stay under the limits of %2$s copies and %3$s.', 'Deleted %1$s stored file copies (the oldest) to stay under the limits of %2$s copies and %3$s.', $deleted, 'cybergate-security' ),
+					number_format_i18n( $deleted ),
+					number_format_i18n( $this->max_files() ),
+					size_format( $this->max_total_bytes() )
+				),
+				array(
+					'deleted' => $deleted,
+					'freed'   => $freed,
+				)
+			);
+		}
+		return $deleted;
+	}
+
+	/**
+	 * @return array USAGE_OPTION with every key.
+	 */
+	private function load_usage() {
+		if ( null === $this->usage ) {
+			$saved       = get_option( self::USAGE_OPTION, array() );
+			$this->usage = array_merge(
+				array(
+					'files'        => 0,
+					'bytes'        => 0,
+					'at'           => 0,
+					'failures'     => 0,
+					'refused'      => 0,
+					'last_failure' => 0,
+				),
+				is_array( $saved ) ? $saved : array()
+			);
+			if ( ! is_array( $saved ) || ! $saved ) {
+				// First use: start from the cached count when there is one (an
+				// exact count runs in enforce_cap(), never in the middle of a scan).
+				$cached = get_transient( self::STATS_TRANSIENT );
+				if ( is_array( $cached ) && isset( $cached['files'], $cached['bytes'] ) ) {
+					$this->usage['files'] = (int) $cached['files'];
+					$this->usage['bytes'] = (int) $cached['bytes'];
+				}
+			}
+		}
+		return $this->usage;
+	}
+
+	/**
+	 * @param string $what  added | refused | failures.
+	 * @param int    $bytes Size of an added copy.
+	 */
+	private function count_usage( $what, $bytes = 0 ) {
+		$this->load_usage();
+		if ( 'added' === $what ) {
+			++$this->usage['files'];
+			$this->usage['bytes'] += (int) $bytes;
+		} else {
+			++$this->usage[ $what ];
+			if ( 'failures' === $what ) {
+				$this->usage['last_failure'] = time();
+			}
+		}
+		++$this->usage_dirty;
+		if ( $this->usage_dirty >= 50 ) {
+			$this->save_usage();
+		} elseif ( ! $this->usage_hooked ) {
+			$this->usage_hooked = true;
+			register_shutdown_function( array( $this, 'save_usage' ) );
+		}
+	}
+
+	/**
+	 * Saves the running totals (also at the end of the request).
+	 */
+	public function save_usage() {
+		if ( null === $this->usage || 0 === $this->usage_dirty ) {
+			return;
+		}
+		$this->usage_dirty = 0;
+		update_option( self::USAGE_OPTION, $this->usage, false );
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -718,6 +981,12 @@ class Snapshots {
 			}
 		}
 		set_transient( self::STATS_TRANSIENT, $stats, HOUR_IN_SECONDS );
+		$this->load_usage();
+		$this->usage['files'] = $stats['files'];
+		$this->usage['bytes'] = $stats['bytes'];
+		$this->usage['at']    = time();
+		++$this->usage_dirty;
+		$this->save_usage();
 		return $stats;
 	}
 
@@ -737,6 +1006,13 @@ class Snapshots {
 		}
 		delete_transient( self::STATS_TRANSIENT );
 		delete_option( self::CURSOR_OPTION );
+		$this->load_usage();
+		$this->usage['files']   = 0;
+		$this->usage['bytes']   = 0;
+		$this->usage['refused'] = 0;
+		$this->usage['at']      = time();
+		++$this->usage_dirty;
+		$this->save_usage();
 		$this->reset_backfill();
 		return $deleted;
 	}
@@ -824,6 +1100,13 @@ class Snapshots {
 		}
 		if ( $result['deleted'] ) {
 			delete_transient( self::STATS_TRANSIENT );
+			$this->load_usage();
+			// Sizes of pruned copies are not known here: the exact count in
+			// enforce_cap() corrects the bytes; the file count is exact.
+			$this->usage['files'] = max( 0, (int) $this->usage['files'] - (int) $result['deleted'] );
+			$this->usage['at']    = 0;
+			++$this->usage_dirty;
+			$this->save_usage();
 			wpcybersec()->logger->log(
 				'snapshots_pruned',
 				sprintf(
@@ -833,6 +1116,11 @@ class Snapshots {
 				),
 				$result
 			);
+		}
+		// Still over a limit after the unreferenced copies went: drop the oldest.
+		$left = $deadline - microtime( true );
+		if ( $left > 1.0 ) {
+			$result['capped'] = $this->enforce_cap( $left );
 		}
 		return $result;
 	}

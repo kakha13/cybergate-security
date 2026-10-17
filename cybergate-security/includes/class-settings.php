@@ -54,6 +54,8 @@ class Settings {
 			'use_checksums'            => true,         // Verify core and wordpress.org plugin files against official checksums.
 			'snapshots'                => true,         // Keep compressed copies of PHP and config files to show what changed.
 			'snapshot_max_kb'          => 256,          // Largest file copied (16 - 4096 KB).
+			'snapshot_max_files'       => 20000,        // Most stored copies (1000 - 1000000); the oldest go first (inode quotas).
+			'snapshot_max_mb'          => 200,          // Most disk space for stored copies (10 - 10240 MB).
 
 			// Notifications.
 			'notify_mode'              => 'instant',    // instant | digest | off.
@@ -267,6 +269,8 @@ class Settings {
 		$clean['unlock_minutes']     = max( 1, min( 240, $clean['unlock_minutes'] ) );
 		$clean['log_retention_days'] = max( 0, min( 3650, $clean['log_retention_days'] ) );
 		$clean['snapshot_max_kb']    = max( 16, min( 4096, $clean['snapshot_max_kb'] ) );
+		$clean['snapshot_max_files'] = max( 1000, min( 1000000, $clean['snapshot_max_files'] ) );
+		$clean['snapshot_max_mb']    = max( 10, min( 10240, $clean['snapshot_max_mb'] ) );
 
 		// Specific formats.
 		$clean['notify_emails']       = array_values( array_filter( array_map( 'sanitize_email', $clean['notify_emails'] ), 'is_email' ) );

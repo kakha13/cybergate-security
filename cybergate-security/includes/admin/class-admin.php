@@ -48,6 +48,7 @@ class Admin {
 
 	const META_DISMISS_SETUP   = 'wpcybersec_dismiss_setup';
 	const META_DISMISS_PENDING = 'wpcybersec_dismiss_pending';
+	const META_DISMISS_STORAGE = 'wpcybersec_dismiss_storage';
 
 	/** @var array|null Per-request cache of Store::counts(). */
 	private static $counts = null;
@@ -99,6 +100,7 @@ class Admin {
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue' ) );
 		add_action( 'admin_init', array( $this, 'maybe_redirect' ), 1 );
 		add_action( 'admin_notices', array( $this, 'notices' ) );
+		add_action( 'network_admin_notices', array( $this, 'notices' ) );
 		add_filter( 'plugin_action_links_' . WPCYBERSEC_BASENAME, array( $this, 'action_links' ) );
 		add_filter( 'removable_query_args', array( $this, 'removable_query_args' ) );
 
@@ -106,6 +108,7 @@ class Admin {
 		add_action( 'admin_post_wpcybersec_allowlist_remove', array( $this, 'handle_allowlist_remove' ) );
 		add_action( 'admin_post_wpcybersec_reports_bulk', array( $this, 'handle_reports_bulk' ) );
 		add_action( 'admin_post_wpcybersec_dismiss_notice', array( $this, 'handle_dismiss_notice' ) );
+		add_action( 'admin_post_wpcybersec_storage_move', array( $this, 'handle_storage_move' ) );
 		add_action( 'admin_post_wpcybersec_report', array( $this, 'handle_report' ) );
 		add_action( 'admin_post_wpcybersec_recent_report', array( $this, 'handle_recent_report' ) );
 
@@ -732,7 +735,11 @@ class Admin {
 	 * Setup and pending-approval notices on screens outside the plugin.
 	 */
 	public function notices() {
-		if ( ! self::can() || self::is_plugin_page() || is_network_admin() ) {
+		if ( ! self::can() ) {
+			return;
+		}
+		$this->print_storage_notice();
+		if ( self::is_plugin_page() || is_network_admin() ) {
 			return;
 		}
 		$user_id = get_current_user_id();
@@ -753,6 +760,104 @@ class Admin {
 				$this->print_pending_notice( $counts );
 			}
 		}
+	}
+
+	/**
+	 * Data folder problem (not writable, fallback folder in use), on the
+	 * plugin's pages and the dashboard. Checking here also covers "on
+	 * settings load": the state is checked again on every such page.
+	 */
+	private function print_storage_notice() {
+		global $pagenow;
+		if ( ! self::is_plugin_page() && 'index.php' !== $pagenow ) {
+			return;
+		}
+		$storage = self::service( 'storage' );
+		if ( ! is_object( $storage ) || ! method_exists( $storage, 'check' ) ) {
+			return;
+		}
+		$user_id = get_current_user_id();
+		$result  = get_transient( 'wpcybersec_storage_move_' . $user_id );
+		if ( is_array( $result ) && isset( $result['ok'], $result['message'] ) ) {
+			delete_transient( 'wpcybersec_storage_move_' . $user_id );
+			echo '<div class="notice ' . esc_attr( $result['ok'] ? 'notice-success' : 'notice-error' ) . ' is-dismissible wpcs-admin-notice"><p>' . esc_html( (string) $result['message'] ) . '</p></div>';
+		}
+		try {
+			$status  = $storage->check();
+			$problem = $storage->problem( $status );
+		} catch ( \Throwable $e ) {
+			self::debug_log( $e );
+			return;
+		}
+		if ( ! $problem ) {
+			return;
+		}
+		if ( (string) get_user_meta( $user_id, self::META_DISMISS_STORAGE, true ) === self::storage_key( $status ) ) {
+			return;
+		}
+		$can_move = 'fallback' === $status['state'] && ! empty( $status['primary_ok'] ) && ! is_multisite() && ! ( defined( 'WPCYBERSEC_DATA_DIR' ) && WPCYBERSEC_DATA_DIR );
+		?>
+		<div class="notice <?php echo esc_attr( 'error' === $problem['level'] ? 'notice-error' : 'notice-warning' ); ?> wpcs-admin-notice">
+			<p>
+				<strong><?php echo esc_html( $problem['title'] ); ?></strong><br>
+				<?php echo esc_html( $problem['text'] ); ?>
+			</p>
+			<p><?php echo esc_html( $problem['fix'] ); ?></p>
+			<?php if ( '' !== $problem['code'] ) : ?>
+				<p><code><?php echo esc_html( $problem['code'] ); ?></code></p>
+			<?php endif; ?>
+			<p>
+				<?php if ( $can_move ) : ?>
+					<a class="button button-primary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=wpcybersec_storage_move' ), 'wpcybersec_storage_move' ) ); ?>">
+						<?php
+						/* translators: %s: folder path */
+						echo esc_html( sprintf( __( 'Move the data to %s', 'cybergate-security' ), $status['primary'] ) );
+						?>
+					</a>
+				<?php endif; ?>
+				<a class="button-link" style="margin-left:8px" href="<?php echo esc_url( self::dismiss_url( 'storage' ) ); ?>"><?php esc_html_e( 'Hide until this changes', 'cybergate-security' ); ?></a>
+			</p>
+		</div>
+		<?php
+	}
+
+	/**
+	 * Identifies a storage state, so a hidden notice comes back when it changes.
+	 *
+	 * @param array $status Storage::status().
+	 * @return string
+	 */
+	private static function storage_key( array $status ) {
+		return md5( $status['state'] . '|' . $status['dir'] . '|' . ( empty( $status['primary_ok'] ) ? '0' : '1' ) );
+	}
+
+	/**
+	 * Moves the data from the fallback folder back to the configured one.
+	 */
+	public function handle_storage_move() {
+		$this->require_cap();
+		check_admin_referer( 'wpcybersec_storage_move' );
+		$storage  = self::service( 'storage' );
+		$hardener = self::service( 'hardening' );
+		$result   = new \WP_Error( 'wpcybersec_storage', __( 'The data folder could not be moved.', 'cybergate-security' ) );
+		if ( is_object( $storage ) && is_object( $hardener ) && method_exists( $hardener, 'move_data_dir' ) ) {
+			$status = $storage->check();
+			if ( 'fallback' === $status['state'] && ! empty( $status['primary_ok'] ) ) {
+				$result = $hardener->move_data_dir( $status['primary'] );
+			} else {
+				$result = __( 'Nothing to move: the data is already in the configured folder.', 'cybergate-security' );
+			}
+			\WPCyberSecurity\Storage::reset();
+		}
+		set_transient(
+			'wpcybersec_storage_move_' . get_current_user_id(),
+			array(
+				'ok'      => ! is_wp_error( $result ),
+				'message' => is_wp_error( $result ) ? $result->get_error_message() : ( is_string( $result ) ? $result : __( 'Moved.', 'cybergate-security' ) ),
+			),
+			5 * MINUTE_IN_SECONDS
+		);
+		$this->redirect_back( self::page_url( self::PAGE_DASHBOARD ), array() );
 	}
 
 	/**
@@ -811,7 +916,7 @@ class Admin {
 	}
 
 	/**
-	 * @param string $which setup | pending.
+	 * @param string $which setup | pending | storage.
 	 * @return string
 	 */
 	private static function dismiss_url( $which ) {
@@ -1171,6 +1276,11 @@ class Admin {
 			update_user_meta( $user_id, self::META_DISMISS_SETUP, time() + 3 * DAY_IN_SECONDS );
 		} elseif ( 'pending' === $which ) {
 			update_user_meta( $user_id, self::META_DISMISS_PENDING, self::newest_open_item_id() );
+		} elseif ( 'storage' === $which ) {
+			$storage = self::service( 'storage' );
+			if ( is_object( $storage ) && method_exists( $storage, 'status' ) ) {
+				update_user_meta( $user_id, self::META_DISMISS_STORAGE, self::storage_key( $storage->status() ) );
+			}
 		}
 		$this->redirect_back( admin_url(), array() );
 	}

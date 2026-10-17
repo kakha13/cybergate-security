@@ -46,30 +46,355 @@ class Storage {
 	 */
 	const SPOOL_RUNTIME = array( 'spool/guard-uploads.jsonl', 'spool/guard-uploads.work.jsonl', 'spool/guard-uploads.work.pos', 'spool/guard-import.lock' );
 
+	/**
+	 * Folder inside the uploads folder used when no configured folder is
+	 * writable (read-only wp-content, FTP-owned files, read-only containers).
+	 * Holds the absolute path with a random suffix; a site option on multisite.
+	 */
+	const FALLBACK_OPTION = 'wpcybersec_data_fallback';
+
+	/** Last storage state seen by check(): { state, dir, primary, time }. */
+	const STATUS_OPTION = 'wpcybersec_storage_status';
+
 	/** @var string Value of the move lock this request holds. */
 	private $lock_value = '';
 
 	/** @var int Last time the move lock was refreshed. */
 	private $lock_beat = 0;
 
+	/** @var array|null Per-request result of resolve(), shared by every instance. */
+	private static $resolved = null;
+
 	/**
-	 * Resolution order: WPCYBERSEC_DATA_DIR constant, then the folder chosen by
-	 * the one-click move (option, single sites only), then wp-content/wpcybersec.
+	 * The folder in use. Resolution order, first writable one wins:
+	 *   1. WPCYBERSEC_DATA_DIR constant,
+	 *   2. a fallback folder inside uploads that is already in use (it keeps
+	 *      being used until the data is moved, so held items stay reachable),
+	 *   3. the folder chosen by the one-click move (option, single sites only),
+	 *   4. wp-content/wpcybersec,
+	 *   5. a new fallback folder wp-content/uploads/wpcybersec-<random>.
+	 * When none is writable, status() says "unavailable" and this returns the
+	 * configured folder (ensure() then fails with an explanation).
 	 *
 	 * @return string Absolute path, no trailing slash.
 	 */
 	public function data_dir() {
+		$status = $this->resolve();
+		return $status['dir'];
+	}
+
+	/**
+	 * The folder the configuration asks for, without looking at permissions:
+	 * the constant, else the moved folder, else wp-content/wpcybersec.
+	 *
+	 * @return string
+	 */
+	public function configured_dir() {
 		if ( defined( 'WPCYBERSEC_DATA_DIR' ) && WPCYBERSEC_DATA_DIR ) {
 			return untrailingslashit( wp_normalize_path( WPCYBERSEC_DATA_DIR ) );
 		}
+		$moved = $this->moved_dir();
+		return '' !== $moved ? $moved : $this->default_dir();
+	}
+
+	/**
+	 * Folder chosen by the one-click move, when it still exists.
+	 *
+	 * @return string '' when none.
+	 */
+	private function moved_dir() {
 		// On multisite every site shares one folder, so a per-site option cannot move it.
-		if ( ! is_multisite() ) {
-			$moved = get_option( self::DIR_OPTION, '' );
-			if ( is_string( $moved ) && '' !== $moved && Paths::is_absolute( wp_normalize_path( $moved ) ) && @is_dir( $moved ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-				return untrailingslashit( wp_normalize_path( $moved ) );
+		if ( is_multisite() ) {
+			return '';
+		}
+		$moved = get_option( self::DIR_OPTION, '' );
+		if ( is_string( $moved ) && '' !== $moved && Paths::is_absolute( wp_normalize_path( $moved ) ) && @is_dir( $moved ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return untrailingslashit( wp_normalize_path( $moved ) );
+		}
+		return '';
+	}
+
+	/**
+	 * Where the data lives and why.
+	 *
+	 * @return array {
+	 *     state   ok (the configured folder) | fallback (another writable folder) | unavailable,
+	 *     dir     folder in use (the configured one when unavailable),
+	 *     primary configured folder (constant, moved folder or the default),
+	 *     source  constant | moved | default | fallback (where dir comes from),
+	 *     primary_ok whether the configured folder is writable now
+	 * }
+	 */
+	public function status() {
+		return $this->resolve();
+	}
+
+	/**
+	 * Whether held files, scan files and the guard config can be stored at all.
+	 *
+	 * @return bool
+	 */
+	public function available() {
+		$status = $this->resolve();
+		return 'unavailable' !== $status['state'];
+	}
+
+	/**
+	 * Forgets the resolved folder (after a move or a permission change).
+	 */
+	public static function reset() {
+		self::$resolved = null;
+	}
+
+	/**
+	 * Resolves the folder once per request.
+	 *
+	 * @return array See status().
+	 */
+	private function resolve() {
+		if ( null !== self::$resolved ) {
+			return self::$resolved;
+		}
+		$const   = defined( 'WPCYBERSEC_DATA_DIR' ) && WPCYBERSEC_DATA_DIR ? untrailingslashit( wp_normalize_path( WPCYBERSEC_DATA_DIR ) ) : '';
+		$moved   = $this->moved_dir();
+		$default = $this->default_dir();
+		$primary = '' !== $const ? $const : ( '' !== $moved ? $moved : $default );
+
+		$candidates = array();
+		if ( '' !== $const ) {
+			$candidates[] = array( $const, 'constant' );
+		}
+		// A fallback folder in use keeps being used (held items and the guard
+		// config live there) until its data is moved away; the folder of a move
+		// that has switched over is the old one and no longer counts.
+		$fallback = $this->stored_fallback();
+		$move     = get_option( self::MOVE_OPTION, null );
+		$leaving  = is_array( $move ) && ! empty( $move['source'] ) && 'switched' === ( isset( $move['phase'] ) ? $move['phase'] : '' ) ? untrailingslashit( wp_normalize_path( (string) $move['source'] ) ) : '';
+		if ( '' !== $fallback && $fallback !== $leaving && @is_dir( $fallback ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$candidates[] = array( $fallback, 'fallback' );
+		}
+		if ( '' !== $moved ) {
+			$candidates[] = array( $moved, 'moved' );
+		}
+		$candidates[] = array( $default, 'default' );
+
+		$primary_ok = self::dir_ok( $primary );
+		$found      = null;
+		foreach ( $candidates as $candidate ) {
+			if ( $candidate[0] === $primary ? $primary_ok : self::dir_ok( $candidate[0] ) ) {
+				$found = $candidate;
+				break;
 			}
 		}
-		return $this->default_dir();
+		if ( null === $found ) {
+			$new = $this->new_fallback();
+			if ( '' !== $new && self::dir_ok( $new ) ) {
+				$found = array( $new, 'fallback' );
+			}
+		}
+
+		if ( null === $found ) {
+			$state = 'unavailable';
+			$dir   = $primary;
+			$from  = '' !== $const ? 'constant' : ( '' !== $moved ? 'moved' : 'default' );
+		} else {
+			$dir   = $found[0];
+			$from  = $found[1];
+			$state = $dir === $primary ? 'ok' : 'fallback';
+		}
+		self::$resolved = array(
+			'state'      => $state,
+			'dir'        => $dir,
+			'primary'    => $primary,
+			'source'     => $from,
+			'primary_ok' => $primary_ok,
+		);
+		return self::$resolved;
+	}
+
+	/**
+	 * Whether a folder is writable, or can be created because its nearest
+	 * existing parent is writable.
+	 *
+	 * @param string $dir Folder.
+	 * @return bool
+	 */
+	private static function dir_ok( $dir ) {
+		$dir = (string) $dir;
+		if ( '' === $dir || ! self::path_allowed( $dir ) ) {
+			return false;
+		}
+		if ( @is_dir( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( ! wp_is_writable( $dir ) ) {
+				return false;
+			}
+			// A folder copied by another user can be writable at the top only.
+			$quarantine = $dir . '/quarantine';
+			return ! @is_dir( $quarantine ) || wp_is_writable( $quarantine ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		}
+		if ( @file_exists( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return false;
+		}
+		$parent = dirname( $dir );
+		for ( $i = 0; $i < 20; $i++ ) {
+			if ( ! self::path_allowed( $parent ) ) {
+				return false; // wp_mkdir_p() would have to look outside open_basedir.
+			}
+			if ( @is_dir( $parent ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				return wp_is_writable( $parent );
+			}
+			if ( @file_exists( $parent ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				return false;
+			}
+			$up = dirname( $parent );
+			if ( $up === $parent ) {
+				break;
+			}
+			$parent = $up;
+		}
+		return false;
+	}
+
+	/**
+	 * Fallback folder remembered earlier (it may not exist any more).
+	 *
+	 * @return string
+	 */
+	public function stored_fallback() {
+		$value = is_multisite() ? get_site_option( self::FALLBACK_OPTION, '' ) : get_option( self::FALLBACK_OPTION, '' );
+		if ( ! is_string( $value ) || '' === $value || ! Paths::is_absolute( wp_normalize_path( $value ) ) ) {
+			return '';
+		}
+		return untrailingslashit( wp_normalize_path( $value ) );
+	}
+
+	/**
+	 * A fallback folder inside the uploads folder, with a random name so it
+	 * cannot be guessed on servers that ignore the deny files (nginx). The
+	 * name is remembered, so every request uses the same folder.
+	 *
+	 * @return string '' when the uploads folder is unknown.
+	 */
+	private function new_fallback() {
+		$stored = $this->stored_fallback();
+		if ( '' !== $stored ) {
+			return $stored;
+		}
+		// On multisite the main site's uploads folder: a sub site's folder is deleted with the site.
+		$switched = false;
+		if ( is_multisite() && function_exists( 'get_main_site_id' ) && ! is_main_site() ) {
+			$switched = switch_to_blog( get_main_site_id() );
+		}
+		$uploads = wp_upload_dir( null, false );
+		if ( $switched ) {
+			restore_current_blog();
+		}
+		if ( ! is_array( $uploads ) || ! empty( $uploads['error'] ) || empty( $uploads['basedir'] ) ) {
+			return '';
+		}
+		$base = untrailingslashit( wp_normalize_path( (string) $uploads['basedir'] ) );
+		if ( ! self::dir_ok( $base . '/wpcybersec-probe' ) ) {
+			return ''; // Nothing to remember while uploads is not writable either.
+		}
+		$dir = $base . '/wpcybersec-' . strtolower( wp_generate_password( 16, false, false ) );
+		if ( is_multisite() ) {
+			update_site_option( self::FALLBACK_OPTION, $dir );
+		} else {
+			update_option( self::FALLBACK_OPTION, $dir, true );
+		}
+		return $dir;
+	}
+
+	/**
+	 * Checks where the data can be stored (activation, settings and plugin
+	 * pages), remembers the result and logs a change of state.
+	 *
+	 * @return array See status().
+	 */
+	public function check() {
+		self::reset();
+		$status = $this->resolve();
+		$saved  = get_option( self::STATUS_OPTION, array() );
+		$saved  = is_array( $saved ) ? $saved : array();
+		if ( ! isset( $saved['state'], $saved['dir'] ) || $saved['state'] !== $status['state'] || $saved['dir'] !== $status['dir'] ) {
+			update_option(
+				self::STATUS_OPTION,
+				array(
+					'state'   => $status['state'],
+					'dir'     => $status['dir'],
+					'primary' => $status['primary'],
+					'time'    => time(),
+				),
+				false
+			);
+			if ( 'unavailable' === $status['state'] ) {
+				/* translators: %s: folder path */
+				self::log( 'storage_unavailable', sprintf( __( 'No writable data folder: %s is not writable and neither is the uploads folder. Uploads are not held (only uploads that look malicious are blocked) and scans cannot run.', 'cybergate-security' ), $status['primary'] ) );
+			} elseif ( 'fallback' === $status['state'] ) {
+				/* translators: 1: folder in use, 2: configured folder */
+				self::log( 'storage_fallback', sprintf( __( 'Data is kept in %1$s because %2$s is not writable (or the data was kept there before).', 'cybergate-security' ), $status['dir'], $status['primary'] ) );
+			} elseif ( isset( $saved['state'] ) ) {
+				/* translators: %s: folder path */
+				self::log( 'storage_ok', sprintf( __( 'The data folder %s is writable.', 'cybergate-security' ), $status['dir'] ) );
+			}
+		}
+		return $status;
+	}
+
+	/**
+	 * Plain explanation of a storage state that needs attention, for the admin
+	 * notice and the environment check.
+	 *
+	 * @param array|null $status status() result (current when null).
+	 * @return array|null { level error|warning, title, text, fix, code } or null when all is well.
+	 */
+	public function problem( $status = null ) {
+		$status  = is_array( $status ) ? $status : $this->resolve();
+		$primary = $status['primary'];
+		$const   = defined( 'WPCYBERSEC_DATA_DIR' ) && WPCYBERSEC_DATA_DIR;
+		$outside = $this->suggested_outside_dir();
+		if ( $this->is_in_webroot( $outside ) ) {
+			$outside = '/path/outside/the/web/root/wpcybersec'; // Nothing suitable was found: a placeholder to fill in.
+		}
+		$code = "define( 'WPCYBERSEC_DATA_DIR', " . var_export( $outside, true ) . ' );'; // phpcs:ignore WordPress.PHP.DevelopmentFunctions
+		if ( 'unavailable' === $status['state'] ) {
+			return array(
+				'level' => 'error',
+				'title' => __( 'CyberGate Security cannot store any data', 'cybergate-security' ),
+				/* translators: %s: folder path */
+				'text'  => sprintf( __( '%s is not writable for WordPress, and neither is the uploads folder. Uploads are not held for approval right now (only uploads that look malicious are blocked), held files cannot be kept and scans cannot run.', 'cybergate-security' ), $primary ),
+				'fix'   => $const
+					? __( 'Fix: make the folder set by WPCYBERSEC_DATA_DIR in wp-config.php writable for the web server user, or point it to a folder that is.', 'cybergate-security' )
+					: __( 'Fix: make wp-content writable for the web server user (so WordPress can create the wpcybersec folder), or add this line to wp-config.php with a folder outside the web root that the web server user can write:', 'cybergate-security' ),
+				'code'  => $const ? '' : $code,
+			);
+		}
+		if ( 'fallback' !== $status['state'] ) {
+			return null;
+		}
+		if ( $status['primary_ok'] ) {
+			return array(
+				'level' => 'warning',
+				'title' => __( 'CyberGate Security keeps its data in a temporary folder', 'cybergate-security' ),
+				/* translators: 1: folder in use, 2: configured folder */
+				'text'  => sprintf( __( 'The data is kept in %1$s (inside the uploads folder) because %2$s was not writable earlier. That folder is writable now.', 'cybergate-security' ), $status['dir'], $primary ),
+				'fix'   => is_multisite()
+					? __( 'Fix: on a multisite network set WPCYBERSEC_DATA_DIR in wp-config.php to a folder outside the web root, then move the files of the folder above into it.', 'cybergate-security' )
+					: __( 'Fix: move the data back with the button below. Held items keep working.', 'cybergate-security' ),
+				'code'  => '',
+			);
+		}
+		return array(
+			'level' => 'warning',
+			'title' => __( 'CyberGate Security uses a fallback data folder', 'cybergate-security' ),
+			/* translators: 1: configured folder, 2: folder in use */
+			'text'  => sprintf( __( '%1$s is not writable for WordPress, so held files and scan data are kept in %2$s inside the uploads folder. Everything works, but a folder outside the web root is safer.', 'cybergate-security' ), $primary, $status['dir'] ),
+			'fix'   => $const
+				? __( 'Fix: make the folder set by WPCYBERSEC_DATA_DIR in wp-config.php writable for the web server user, or point it to a folder that is.', 'cybergate-security' )
+				/* translators: %s: folder path */
+				: sprintf( __( 'Fix: make wp-content writable for the web server user; a button to move the data back then appears here. Or create a folder outside the web root that the web server user can write, copy everything from %s into it, and add this line to wp-config.php:', 'cybergate-security' ), $status['dir'] ),
+			'code'  => $const ? '' : $code,
+		);
 	}
 
 	/**
@@ -109,6 +434,9 @@ class Storage {
 		// localhost site whose sub folders are the real sites), so skip it.
 		$dir = wp_normalize_path( dirname( untrailingslashit( ABSPATH ) ) );
 		for ( $i = 0; $i < 3; $i++ ) {
+			if ( ! self::path_allowed( $dir ) || ! self::path_allowed( $dir . '/' . $name ) ) {
+				break; // Never suggest (or look at) a folder open_basedir hides.
+			}
 			if ( ! self::looks_served( $dir ) && Fs::is_writable( $dir ) && ! $this->is_in_webroot( $dir . '/' . $name ) ) {
 				return $dir . '/' . $name;
 			}
@@ -119,6 +447,39 @@ class Storage {
 			$dir = $up;
 		}
 		return wp_normalize_path( dirname( untrailingslashit( ABSPATH ) ) ) . '/' . $name;
+	}
+
+	/**
+	 * Whether open_basedir lets PHP look at a path (true when it is not set).
+	 * Paths outside it are never touched or suggested: every file function
+	 * on them prints an "open_basedir restriction in effect" warning.
+	 *
+	 * @param string $path Absolute path.
+	 * @return bool
+	 */
+	public static function path_allowed( $path ) {
+		$limit = trim( (string) ini_get( 'open_basedir' ) );
+		if ( '' === $limit ) {
+			return true;
+		}
+		$path = wp_normalize_path( (string) $path );
+		foreach ( explode( PATH_SEPARATOR, $limit ) as $dir ) {
+			$dir = trim( $dir );
+			if ( '' === $dir ) {
+				continue;
+			}
+			if ( '.' === $dir || 0 === strpos( $dir, './' ) ) {
+				continue; // Relative to the running script: cannot be judged here.
+			}
+			$dir = rtrim( wp_normalize_path( $dir ), '/' );
+			if ( '' === $dir ) {
+				return true; // "/" allows everything.
+			}
+			if ( $path === $dir || 0 === strpos( $path, $dir . '/' ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -177,6 +538,9 @@ class Storage {
 	 */
 	public function dir_usable( $dir ) {
 		$dir = untrailingslashit( wp_normalize_path( (string) $dir ) );
+		if ( ! self::path_allowed( $dir ) ) {
+			return false;
+		}
 		if ( ! @file_exists( $dir ) && ! @is_link( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			return true;
 		}
@@ -232,6 +596,13 @@ class Storage {
 		$target = untrailingslashit( wp_normalize_path( (string) $target ) );
 		if ( '' === $target || ! Paths::is_absolute( $target ) ) {
 			return new \WP_Error( 'wpcybersec_storage_target', __( 'The new folder must be an absolute path.', 'cybergate-security' ) );
+		}
+		if ( ! self::path_allowed( $target ) ) {
+			return new \WP_Error(
+				'wpcybersec_storage_basedir',
+				/* translators: %s: folder path */
+				sprintf( __( 'PHP may not use %s on this server (open_basedir). Nothing was moved. Add the folder to open_basedir in the PHP settings of this site, or choose a folder inside the allowed ones.', 'cybergate-security' ), $target )
+			);
 		}
 		$locked = $this->acquire_move_lock();
 		if ( is_wp_error( $locked ) ) {
@@ -419,6 +790,7 @@ class Storage {
 		// Phase 2: switch over.
 		$this->save_move_state( $source, $target, 'switched' );
 		update_option( self::DIR_OPTION, $target, true );
+		self::reset();
 		$this->ensure();
 		$this->rewrite_item_paths( $source, $target );
 		self::unlock_file( $import_lock );
@@ -1140,6 +1512,14 @@ class Storage {
 	 * @return true|\WP_Error
 	 */
 	public function ensure() {
+		$status = $this->resolve();
+		if ( 'unavailable' === $status['state'] ) {
+			return new \WP_Error(
+				'wpcybersec_storage',
+				/* translators: %s: directory path */
+				sprintf( __( 'No writable data folder: %s is not writable for WordPress, and neither is the uploads folder. Make wp-content writable or set WPCYBERSEC_DATA_DIR in wp-config.php to a writable folder.', 'cybergate-security' ), $status['primary'] )
+			);
+		}
 		$dirs = array( $this->data_dir(), $this->quarantine_dir(), $this->jobs_dir(), $this->spool_dir(), $this->guard_dir() );
 		foreach ( $dirs as $dir ) {
 			if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) {
@@ -1147,6 +1527,10 @@ class Storage {
 				return new \WP_Error( 'wpcybersec_storage', sprintf( __( 'Could not create %s. Check folder permissions.', 'cybergate-security' ), $dir ) );
 			}
 			$this->protect( $dir );
+		}
+		// A fallback folder inside uploads is found and removed by uninstall.php through this marker.
+		if ( 'fallback' === $status['source'] && ! $this->marker_matches( $status['dir'] ) ) {
+			$this->write_marker( $status['dir'] );
 		}
 		return true;
 	}
@@ -1179,7 +1563,8 @@ class Storage {
 	 * @return bool
 	 */
 	public function is_in_webroot( $path ) {
-		$path  = wp_normalize_path( (string) ( realpath( $path ) ?: $path ) );
+		$real  = self::path_allowed( $path ) ? realpath( $path ) : false;
+		$path  = wp_normalize_path( (string) ( $real ? $real : $path ) );
 		$roots = array( wp_normalize_path( (string) ( realpath( ABSPATH ) ?: ABSPATH ) ) );
 		if ( ! empty( $_SERVER['DOCUMENT_ROOT'] ) ) {
 			$doc = realpath( wp_unslash( $_SERVER['DOCUMENT_ROOT'] ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput

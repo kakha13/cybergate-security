@@ -16,8 +16,17 @@ defined( 'ABSPATH' ) || exit;
  * back from a stored byte offset.
  *
  * Phases:
- *   enumerating  Iterative DFS, building <id>.list. Symlinked dirs are not
- *                followed; Paths::is_excluded folders are skipped.
+ *   enumerating  Iterative DFS, building <id>.list. A whole-site run walks
+ *                every folder of Paths::scan_set(): the scan root, the
+ *                WordPress folders outside it (listed by absolute path), the
+ *                home folder (its own files only) and a wp-config.php above
+ *                ABSPATH. Directories are read as a stream; a folder too
+ *                large for one tick continues from an entry count next tick
+ *                (state 'cursor'), and its rows are never treated as deleted.
+ *                A symlinked directory is not walked through the link: when
+ *                its target is inside the scan set it is scanned there once,
+ *                otherwise it is counted ("symlinked folders not scanned").
+ *                Paths::is_excluded folders are skipped.
  *   processing   Batches of ~50 lines: stat, look up the manifest, decide,
  *                hash and malware-scan only when needed, upsert the manifest.
  *                The state is saved after every batch and the deadline is
@@ -49,6 +58,20 @@ defined( 'ABSPATH' ) || exit;
  * 'wpcybersec_rebaseline_queue' (relative prefix => microtime when queued):
  * their new and changed files are judged like a baseline until a scan that
  * started after the entry was queued, and covers the folder, finishes.
+ *
+ * Folders outside the scan root that earlier versions never scanned (option
+ * 'wpcybersec_manifest_extra' lists the ones a whole-site run has covered) are
+ * adopted like a baseline by the first run that covers them, so an upgrade
+ * does not report every file there as new.
+ *
+ * Crash guard: before a file that needs real work (hash, checksum, signatures)
+ * its name goes into <jobs_dir>/<id>.cur, which is emptied when the file is
+ * done. A request that dies on the file (fatal error, memory, time limit, a
+ * killed worker) leaves the name behind; a file that stopped the scan twice is
+ * skipped, reported as "could not be scanned" (a pending file item) and
+ * remembered in 'wpcybersec_unscannable' (path hash => size:mtime) so later
+ * runs skip it at once until it changes. A shutdown function records the fatal
+ * error message and releases the lock.
  */
 class Scan_Job {
 
@@ -59,6 +82,26 @@ class Scan_Job {
 	const QUEUE_OPTION    = 'wpcybersec_rebaseline_queue';
 	const LOCK_OPTION     = 'wpcybersec_job_lock';
 	const CANCEL_OPTION   = 'wpcybersec_job_cancel';
+	const EXTRA_OPTION    = 'wpcybersec_manifest_extra';
+	const SKIP_OPTION     = 'wpcybersec_unscannable';
+
+	/** Times a file may stop the scan before it is skipped. */
+	const CRASH_LIMIT = 2;
+
+	/** Files remembered as unscannable. */
+	const SKIP_MAX = 200;
+
+	/** Entries of one folder read and sorted at once; a larger folder is streamed (and may span ticks). */
+	const DIR_CAP = 20000;
+
+	/** Files listed from one top-level-only folder (the home folder). */
+	const TOP_MAX = 5000;
+
+	/** Examples kept in the state for the summary and the log. */
+	const EXAMPLES = 5;
+
+	/** WordPress drop-ins (loaded from the top of WP_CONTENT_DIR); never moved to quarantine automatically. */
+	const DROPINS = array( 'advanced-cache.php', 'db.php', 'db-error.php', 'install.php', 'maintenance.php', 'object-cache.php', 'php-error.php', 'fatal-error-handler.php', 'sunrise.php', 'blog-deleted.php', 'blog-inactive.php', 'blog-suspended.php' );
 
 	const BATCH          = 50;
 	const ENUM_CHECK     = 200;
@@ -100,6 +143,21 @@ class Scan_Job {
 
 	/** @var array|null Last checksum verdict: [ rel, sha256, verify_details() result ]. */
 	private $verified = null;
+
+	/** @var array|null File that stopped an earlier tick: { rel, attempts, error } (read once per tick). */
+	private $crashed = null;
+
+	/** @var string File being worked on now ('' between files), for the shutdown handler. */
+	private $inflight = '';
+
+	/** @var int Attempt number of the file being worked on. */
+	private $inflight_attempts = 0;
+
+	/** @var bool The shutdown handler is registered for this request. */
+	private $shutdown_registered = false;
+
+	/** @var array|null Folders that are their own entry of the scan set (path => true), skipped inside other walks. */
+	private $skip_dirs = null;
 
 	/**
 	 * Light hooks only; the heavy work is driven by Ajax and File_Monitor.
@@ -162,9 +220,11 @@ class Scan_Job {
 			$mode = 'incremental';
 		}
 
-		$ensured = wpcybersec()->storage->ensure();
-		if ( is_wp_error( $ensured ) ) {
-			return $ensured;
+		// The file list lives in the data folder; without a writable one it goes
+		// to a private folder in the system temp directory, so scans still run.
+		$jobs_dir = $this->jobs_dir_for_run();
+		if ( is_wp_error( $jobs_dir ) ) {
+			return $jobs_dir;
 		}
 
 		$root  = Paths::scan_root();
@@ -194,7 +254,17 @@ class Scan_Job {
 		}
 
 		$id   = gmdate( 'YmdHis' ) . substr( md5( uniqid( 'wpcs', true ) ), 0, 8 );
-		$list = wpcybersec()->storage->jobs_dir() . '/' . $id . '.list';
+		$list = $jobs_dir['dir'] . '/' . $id . '.list';
+
+		// WordPress folders outside the scan root (whole-site runs only), and
+		// the ones no whole-site run has covered yet (adopted like a baseline).
+		$scope = $this->scope_for_run( $paths['abs'] ? array() : Paths::extra_roots(), $mode );
+		$stack = $paths['stack'];
+		foreach ( $scope['extra'] as $entry ) {
+			if ( 'all' === $entry['d'] ) {
+				$stack[] = rtrim( $entry['p'], '/' );
+			}
+		}
 
 		$trigger  = isset( $opts['trigger'] ) ? sanitize_key( $opts['trigger'] ) : 'manual';
 		$database = false;
@@ -225,6 +295,21 @@ class Scan_Job {
 			'paths'        => $paths['abs'],
 			'prefixes'     => $paths['rel'],
 			'root'         => $root,
+			// Scan set entries outside the root this run walks ({ p, d, k }), the
+			// top-level-only folders and single files still to list, the ones
+			// adopted like a baseline, and the folders walked on their own.
+			'extra'        => $scope['extra'],
+			'tops'         => $scope['tops'],
+			'adopt'        => $scope['adopt'],
+			'skip'         => $scope['skip'],
+			// Directory being listed when a tick ran out of time: { d: stack entry, n: entries done }.
+			'cursor'       => null,
+			'resumed'      => array(),
+			'symlinks'     => 0,
+			'symlink_list' => array(),
+			'unscannable'  => 0,
+			'unscan_list'  => array(),
+			'mem_limited'  => 0,
 			'enc'          => self::ENCODING,
 			// Queued folder rebaselines this run will list from scratch (see settle_rebaseline_queue()).
 			'queue_seen'   => $this->rebaseline_queue( true ),
@@ -234,8 +319,10 @@ class Scan_Job {
 			// deleted, limit raised) keeps the backfill pending for the next scan.
 			'backfill_gen' => wpcybersec()->snapshots ? wpcybersec()->snapshots->backfill_generation() : 0,
 			'list_file'    => $list,
+			// Temp folder holding the list when the data folder is not writable ('' otherwise).
+			'tmp_dir'      => $jobs_dir['tmp'] ? $jobs_dir['dir'] : '',
 			'list_offset'  => 0,
-			'stack'        => array_map( 'rawurlencode', $paths['stack'] ),
+			'stack'        => array_map( 'rawurlencode', $stack ),
 			'enum_count'   => 0,
 			'files_total'  => 0,
 			'files_done'   => 0,
@@ -255,6 +342,9 @@ class Scan_Job {
 		// Start the list file empty. No 0640 chmod: a CLI runner and the web
 		// server user must both be able to continue a job when they share a group.
 		if ( false === @file_put_contents( $list, '' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions
+			if ( $jobs_dir['tmp'] ) {
+				Fs::rmdir( $jobs_dir['dir'] );
+			}
 			$this->state = null;
 			return new \WP_Error( 'wpcybersec_job_list', __( 'Could not create the scan file list. Check the data folder permissions.', 'cybergate-security' ) );
 		}
@@ -262,6 +352,18 @@ class Scan_Job {
 
 		$this->clear_cancel();
 		$this->save();
+
+		if ( $scope['adopt'] ) {
+			wpcybersec()->logger->log(
+				'scan_scope_added',
+				sprintf(
+					/* translators: %s: list of folders */
+					__( 'This scan also covers WordPress folders outside the scan folder for the first time: %s. Their files are added to the baseline.', 'cybergate-security' ),
+					implode( ', ', wp_list_pluck( $scope['adopt'], 'p' ) )
+				),
+				array( 'id' => $id )
+			);
+		}
 
 		wpcybersec()->logger->log(
 			'scan_started',
@@ -278,6 +380,91 @@ class Scan_Job {
 			)
 		);
 		return $id;
+	}
+
+	/**
+	 * Folder for this run's file list: the data folder's jobs/ folder, or,
+	 * when no data folder is writable (Storage::available() false or ensure()
+	 * failing), a new random-named folder in get_temp_dir() that the run
+	 * deletes when it ends.
+	 *
+	 * @return array|\WP_Error { dir: string, tmp: bool }
+	 */
+	private function jobs_dir_for_run() {
+		$storage   = wpcybersec()->storage;
+		$available = ! method_exists( $storage, 'available' ) || $storage->available();
+		$ensured   = $available ? $storage->ensure() : null;
+		if ( $available && ! is_wp_error( $ensured ) ) {
+			return array(
+				'dir' => $storage->jobs_dir(),
+				'tmp' => false,
+			);
+		}
+		$tmp = function_exists( 'get_temp_dir' ) ? untrailingslashit( wp_normalize_path( get_temp_dir() ) ) : '';
+		if ( '' !== $tmp && @is_dir( $tmp ) && Fs::is_writable( $tmp ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$dir = $tmp . '/wpcybersec-jobs-' . strtolower( wp_generate_password( 16, false ) );
+			if ( wp_mkdir_p( $dir ) ) {
+				Fs::chmod( $dir, 0700 );
+				wpcybersec()->logger->log( 'scan_temp_list', __( 'No writable data folder: this scan keeps its file list in the system temp folder. Held files and file copies cannot be stored until the data folder is fixed.', 'cybergate-security' ) );
+				return array(
+					'dir' => $dir,
+					'tmp' => true,
+				);
+			}
+		}
+		if ( is_wp_error( $ensured ) ) {
+			return $ensured;
+		}
+		$problem = method_exists( $storage, 'problem' ) ? $storage->problem() : array();
+		$message = is_array( $problem ) && ! empty( $problem['text'] ) ? $problem['text'] : __( 'No writable data folder, so the scan cannot start.', 'cybergate-security' );
+		return new \WP_Error( 'wpcybersec_storage', $message );
+	}
+
+	/**
+	 * Scan set entries outside the root that a run walks.
+	 *
+	 * @param array[] $entries Paths::extra_roots() (empty for runs limited to folders).
+	 * @param string  $mode    Scan mode.
+	 * @return array { extra: [{p, d, k}], tops: [{p (rawurlencoded), d}], adopt: [{p, d}], skip: string[] }
+	 */
+	private function scope_for_run( array $entries, $mode ) {
+		$out = array(
+			'extra' => array(),
+			'tops'  => array(),
+			'adopt' => array(),
+			'skip'  => array(),
+		);
+		foreach ( Paths::scan_set() as $entry ) {
+			if ( 'all' === $entry['depth'] && Store::db_text( $entry['path'] ) === $entry['path'] ) {
+				$out['skip'][] = $entry['path'];
+			}
+		}
+		$known = get_option( self::EXTRA_OPTION, array() );
+		$known = is_array( $known ) ? $known : array();
+		foreach ( $entries as $entry ) {
+			if ( Store::db_text( $entry['path'] ) !== $entry['path'] ) {
+				continue; // Not storable in the job state (invalid UTF-8 name).
+			}
+			$item           = array(
+				'p' => $entry['path'],
+				'd' => $entry['depth'],
+				'k' => $entry['kind'],
+			);
+			$out['extra'][] = $item;
+			if ( 'all' !== $entry['depth'] ) {
+				$out['tops'][] = array(
+					'p' => rawurlencode( $entry['path'] ),
+					'd' => $entry['depth'],
+				);
+			}
+			if ( 'baseline' !== $mode && ! in_array( $entry['path'], $known, true ) ) {
+				$out['adopt'][] = array(
+					'p' => $entry['path'],
+					'd' => $entry['depth'],
+				);
+			}
+		}
+		return $out;
 	}
 
 	/**
@@ -320,7 +507,7 @@ class Scan_Job {
 		$this->lost_lock  = false;
 		$this->chain      = false;
 
-		$budget          = max( 1.0, (float) $budget_seconds );
+		$budget          = self::clamp_budget( max( 1.0, (float) $budget_seconds ) );
 		$this->lock_hold = 2 * $budget + 30;
 		$this->lock      = $this->acquire_lock( $this->lock_hold, 0 );
 		if ( '' === $this->lock ) {
@@ -358,9 +545,30 @@ class Scan_Job {
 		}
 
 		$deadline                 = microtime( true ) + $budget;
-		$this->state              = $state;
+		$this->state              = array_merge( self::state_defaults(), $state ); // Jobs started by an older version lack the newer keys.
 		$this->state['ticked_at'] = time();
 		$this->queue              = null;
+		$this->skip_dirs          = null;
+
+		// Large files are read whole for the signatures: ask for the higher
+		// admin memory limit where the host allows it (Scanner::read_cap()
+		// lowers the read size when memory is still short).
+		if ( function_exists( 'wp_raise_memory_limit' ) ) {
+			wp_raise_memory_limit( 'admin' );
+		}
+		$this->crashed = $this->read_marker();
+		if ( ! $this->shutdown_registered ) {
+			$this->shutdown_registered = true;
+			register_shutdown_function( array( $this, 'on_shutdown' ) );
+			// WordPress' own fatal error handler is a shutdown function that ends
+			// with wp_die(), so shutdown functions registered after it never run
+			// after a fatal error. It filters the message it is about to show
+			// first: record there. (Without that handler, or with a php-error.php
+			// drop-in, the shutdown function runs; when nothing runs, the marker
+			// written before the file still counts the attempt and the lock
+			// expires on its own.)
+			add_filter( 'wp_php_error_message', array( $this, 'on_fatal_error' ), 1, 2 );
+		}
 
 		try {
 			if ( $this->cancel_requested( true ) ) {
@@ -383,6 +591,7 @@ class Scan_Job {
 		} catch ( \Throwable $e ) {
 			$this->fail( $e->getMessage() );
 		}
+		$this->inflight = '';
 
 		if ( $this->lost_lock ) {
 			// Another runner owns the job now; do not overwrite its state.
@@ -393,6 +602,110 @@ class Scan_Job {
 			$this->save();
 		}
 		return $this->status();
+	}
+
+	/**
+	 * Seconds left before max_execution_time ends this request, null when
+	 * there is no limit (0, the CLI default).
+	 *
+	 * @return float|null
+	 */
+	public static function exec_seconds_left() {
+		$max = (int) ini_get( 'max_execution_time' );
+		if ( $max <= 0 ) {
+			return null;
+		}
+		$start = isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ? (float) $_SERVER['REQUEST_TIME_FLOAT'] : microtime( true ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- a number set by PHP.
+		return max( 0.0, $max - ( microtime( true ) - $start ) );
+	}
+
+	/**
+	 * A tick never takes more than about half of what max_execution_time has
+	 * left (the rest covers the batch that runs over the deadline, the state
+	 * save and the database scan step). 0 means no limit.
+	 *
+	 * @param float $budget Seconds asked for.
+	 * @return float
+	 */
+	public static function clamp_budget( $budget ) {
+		$left = self::exec_seconds_left();
+		if ( null === $left ) {
+			return (float) $budget;
+		}
+		return max( 1.0, min( (float) $budget, $left / 2 ) );
+	}
+
+	/**
+	 * Shutdown handler: when the request ends while a file is being worked on
+	 * (a fatal error, memory exhausted, max_execution_time), keeps the file
+	 * and the error in the crash marker and frees the lock at once, so the
+	 * next tick can skip the file after the second time.
+	 */
+	public function on_shutdown() {
+		if ( '' === $this->inflight || ! is_array( $this->state ) ) {
+			return;
+		}
+		$rel            = $this->inflight;
+		$this->inflight = ''; // Once: the fatal error filter and the shutdown function both call this.
+		$this->inflight_shutdown( $rel );
+	}
+
+	/**
+	 * 'wp_php_error_message' filter (runs inside WordPress' fatal error
+	 * handler, before it ends the request): records the file, changes nothing.
+	 *
+	 * @param string $message Message WordPress shows.
+	 * @param array  $error   error_get_last() result.
+	 * @return string
+	 */
+	public function on_fatal_error( $message, $error = array() ) {
+		unset( $error );
+		$this->on_shutdown();
+		return $message;
+	}
+
+	/**
+	 * on_shutdown() body.
+	 *
+	 * @param string $rel File being worked on.
+	 */
+	private function inflight_shutdown( $rel ) {
+		$error   = error_get_last();
+		$message = '';
+		if ( is_array( $error ) && in_array( (int) $error['type'], array( E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR, E_RECOVERABLE_ERROR ), true ) ) {
+			$message = (string) $error['message'];
+			// Exhausted memory: a little more lets the handler finish its work.
+			if ( false !== stripos( $message, 'memory' ) ) {
+				$room = Scanner::memory_room();
+				if ( null !== $room ) {
+					@ini_set( 'memory_limit', (string) ( (int) wp_convert_hr_to_bytes( (string) ini_get( 'memory_limit' ) ) + 32 * MB_IN_BYTES ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.PHP.IniSet.memory_limit_Disallowed -- only after a fatal error, so this handler can record it.
+				}
+			}
+		}
+		try {
+			$this->write_marker( $rel, $this->inflight_attempts, $message );
+			if ( '' !== $message && function_exists( 'wpcybersec' ) && wpcybersec()->logger ) {
+				wpcybersec()->logger->log(
+					'scan_file_stopped',
+					sprintf(
+						/* translators: 1: relative path, 2: error message */
+						__( 'The scan stopped while checking %1$s: %2$s', 'cybergate-security' ),
+						Store::db_text( $rel ),
+						Signatures::clean_snippet( $message )
+					),
+					array(
+						'id'       => isset( $this->state['id'] ) ? $this->state['id'] : '',
+						'attempts' => $this->inflight_attempts,
+					)
+				);
+			}
+			if ( '' !== $this->lock ) {
+				$this->release_lock( $this->lock );
+				$this->lock = '';
+			}
+		} catch ( \Throwable $e ) {
+			return; // Nothing more can be done while the request ends.
+		}
 	}
 
 	/**
@@ -528,6 +841,33 @@ class Scan_Job {
 			'db_findings'  => isset( $state['db_findings'] ) ? (int) $state['db_findings'] : 0,
 			'missing_core' => isset( $state['missing_core'] ) ? (int) $state['missing_core'] : -1,
 			'new_admins'   => isset( $state['new_admins'] ) ? (int) $state['new_admins'] : 0,
+			'symlinks'     => isset( $state['symlinks'] ) ? (int) $state['symlinks'] : 0,
+			'unscannable'  => isset( $state['unscannable'] ) ? (int) $state['unscannable'] : 0,
+			'mem_limited'  => isset( $state['mem_limited'] ) ? (int) $state['mem_limited'] : 0,
+			'extra_roots'  => isset( $state['extra'] ) ? count( (array) $state['extra'] ) : 0,
+		);
+	}
+
+	/**
+	 * Values of the state keys newer versions added (merged under the state
+	 * of a job an older version started).
+	 *
+	 * @return array
+	 */
+	private static function state_defaults() {
+		return array(
+			'extra'        => array(),
+			'tops'         => array(),
+			'adopt'        => array(),
+			'skip'         => array(),
+			'cursor'       => null,
+			'resumed'      => array(),
+			'symlinks'     => 0,
+			'symlink_list' => array(),
+			'unscannable'  => 0,
+			'unscan_list'  => array(),
+			'mem_limited'  => 0,
+			'tmp_dir'      => '',
 		);
 	}
 
@@ -551,16 +891,24 @@ class Scan_Job {
 	 * after now finishes, its new and changed files are judged like a baseline
 	 * (trusted unless malware) instead of being reported as new.
 	 *
-	 * @param string $abs_dir Absolute folder inside the scan root.
+	 * @param string $abs_dir Absolute folder inside the scan root, or inside a
+	 *                        folder of the scan set outside it (queued by its
+	 *                        absolute path, the form its manifest rows use).
 	 * @return bool
 	 */
 	public function queue_rebaseline( $abs_dir ) {
 		$root = Paths::scan_root();
 		$dir  = trailingslashit( wp_normalize_path( (string) $abs_dir ) );
-		if ( 0 !== strpos( $dir, $root ) || $dir === $root ) {
+		if ( 0 === strpos( $dir, $root ) ) {
+			if ( $dir === $root ) {
+				return false;
+			}
+			$prefix = substr( $dir, strlen( $root ) );
+		} elseif ( Paths::in_full_scope( $dir ) ) {
+			$prefix = $dir;
+		} else {
 			return false;
 		}
-		$prefix = substr( $dir, strlen( $root ) );
 		if ( Store::db_text( $prefix ) !== $prefix ) {
 			return false; // Not storable in an option; the next scan reports it instead.
 		}
@@ -587,12 +935,12 @@ class Scan_Job {
 			return false; // That job's finish() starts them.
 		}
 
-		$root    = Paths::scan_root();
 		$paths   = array();
 		$removed = false;
 		foreach ( array_keys( $queue ) as $prefix ) {
-			if ( @is_dir( $root . $prefix ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-				$paths[] = untrailingslashit( $root . $prefix );
+			$dir = Paths::abs( (string) $prefix );
+			if ( @is_dir( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				$paths[] = untrailingslashit( $dir );
 			} else {
 				unset( $queue[ $prefix ] ); // Folder removed since; its rows go with the next scan.
 				$removed = true;
@@ -703,12 +1051,16 @@ class Scan_Job {
 	/* ------------------------------------------------------------------ */
 
 	/**
-	 * Iterative DFS that appends relative file paths to the list file.
+	 * Iterative DFS that appends relative file paths to the list file (files
+	 * outside the scan root by their absolute path). Directories are read as
+	 * a stream, so a folder with a million entries never sits in memory; when
+	 * the tick runs out of time inside one, the stack entry and the number of
+	 * entries already handled are kept in 'cursor' and the next tick goes on
+	 * from there (readdir order is stable for an unchanged folder).
 	 *
 	 * @param float $deadline Microtime deadline.
 	 */
 	private function enumerate( $deadline ) {
-		$root   = $this->root();
 		$handle = @fopen( $this->state['list_file'], 'ab' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- appended in chunks while the folder tree is walked.
 		if ( ! $handle ) {
 			$this->fail( __( 'Could not open the scan file list for writing. Check the data folder permissions and that the same user runs every scan step.', 'cybergate-security' ) );
@@ -717,6 +1069,21 @@ class Scan_Job {
 
 		$checks = 0;
 		$buffer = '';
+
+		// Single files and top-level-only folders of the scan set (the home
+		// folder, a wp-config.php above ABSPATH): listed once, first.
+		while ( ! empty( $this->state['tops'] ) ) {
+			$top  = array_shift( $this->state['tops'] );
+			$path = rawurldecode( (string) $top['p'] );
+			if ( 'file' === $top['d'] ) {
+				if ( @is_file( $path ) && ! Paths::is_excluded( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					$this->add_line( $handle, $buffer, $path );
+				}
+				continue;
+			}
+			$this->list_top( $handle, $buffer, rtrim( $path, '/' ) );
+		}
+
 		while ( ! empty( $this->state['stack'] ) ) {
 			if ( $this->cancel_requested() ) {
 				$this->flush_enum( $handle, $buffer );
@@ -724,65 +1091,83 @@ class Scan_Job {
 				$this->cancel_now();
 				return;
 			}
+			$entry   = (string) end( $this->state['stack'] );
 			$rel_dir = $this->stack_pop();
-			$abs_dir = '' === $rel_dir ? rtrim( $root, '/' ) : $root . $rel_dir;
+			$abs_dir = $this->abs_of( $rel_dir );
+			if ( '' === $rel_dir ) {
+				$abs_dir = rtrim( $this->root(), '/' );
+			}
+
+			// Continue a very large folder an earlier tick stopped inside.
+			$skip = -1;
+			if ( is_array( $this->state['cursor'] ) && isset( $this->state['cursor']['d'] ) && (string) $this->state['cursor']['d'] === $entry ) {
+				$skip = (int) $this->state['cursor']['n'];
+			}
+			$this->state['cursor'] = null;
 
 			$dh = @opendir( $abs_dir ); // phpcs:ignore
 			if ( ! $dh ) {
 				++$this->state['skipped'];
 				continue;
 			}
-			$entries = array();
-			while ( false !== ( $entry = readdir( $dh ) ) ) {
-				if ( '.' === $entry || '..' === $entry ) {
-					continue;
+
+			// Usual folders are read whole and handled in name order. Only a
+			// folder with more than DIR_CAP entries is streamed, and only such a
+			// folder can be continued by a later tick.
+			$names = array();
+			$huge  = $skip >= 0;
+			if ( ! $huge ) {
+				while ( false !== ( $name = readdir( $dh ) ) ) {
+					if ( '.' === $name || '..' === $name ) {
+						continue;
+					}
+					$names[] = $name;
+					if ( count( $names ) > self::DIR_CAP ) {
+						$huge = true;
+						break;
+					}
 				}
-				$entries[] = $entry;
-				if ( ++$checks % self::ENUM_CHECK === 0 && microtime( true ) >= $deadline ) {
-					// Put this directory back and resume next tick.
+				if ( ! $huge ) {
 					closedir( $dh );
-					$this->stack_push( $rel_dir );
-					$this->flush_enum( $handle, $buffer );
-					fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- stream of the scan file list, written in chunks.
-					$this->state['current'] = Store::db_text( $rel_dir );
-					return;
+					sort( $names, SORT_STRING );
 				}
 			}
-			closedir( $dh );
-			sort( $entries, SORT_STRING );
-
-			foreach ( $entries as $entry ) {
-				$rel = '' === $rel_dir ? $entry : $rel_dir . '/' . $entry;
-				$abs = $root . $rel;
-
-				if ( is_link( $abs ) ) {
-					// Never follow symlinked directories; a symlinked file is listed
-					// but scanned by its own path, which realpath checks will catch.
-					if ( @is_dir( $abs ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$seen = 0;
+			foreach ( $names as $name ) {
+				++$seen;
+				$this->enum_entry( $handle, $buffer, $rel_dir, $abs_dir, $name );
+			}
+			$names = array();
+			if ( $huge ) {
+				while ( false !== ( $name = readdir( $dh ) ) ) {
+					if ( '.' === $name || '..' === $name ) {
 						continue;
 					}
-				}
-
-				if ( @is_dir( $abs ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-					if ( Paths::is_excluded( $rel . '/' ) ) {
+					++$seen;
+					if ( $seen <= $skip ) {
 						continue;
 					}
-					$this->stack_push( $rel );
-					continue;
-				}
+					$this->enum_entry( $handle, $buffer, $rel_dir, $abs_dir, $name );
 
-				if ( ! @is_file( $abs ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-					continue;
+					if ( ++$checks % self::ENUM_CHECK === 0 && microtime( true ) >= $deadline ) {
+						// Put this directory back and go on from here next tick
+						// (readdir order is stable while the folder does not change).
+						closedir( $dh );
+						$this->stack_push( $rel_dir );
+						$this->state['cursor'] = array(
+							'd' => $entry,
+							'n' => $seen,
+						);
+						if ( count( $this->state['resumed'] ) < 100 && ! in_array( $entry, $this->state['resumed'], true ) ) {
+							$this->state['resumed'][] = $entry;
+						}
+						$this->state['current'] = Store::db_text( $rel_dir );
+						$this->flush_enum( $handle, $buffer );
+						fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- stream of the scan file list, written in chunks.
+						return;
+					}
 				}
-				if ( Paths::is_excluded( $rel ) ) {
-					continue;
-				}
-
-				$buffer .= $this->encode_line( $rel ) . "\n";
-				++$this->state['files_total'];
-				if ( strlen( $buffer ) >= 65536 ) {
-					$this->flush_enum( $handle, $buffer );
-				}
+				closedir( $dh );
 			}
 
 			++$this->state['enum_count'];
@@ -798,6 +1183,120 @@ class Scan_Job {
 		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- stream of the scan file list, written in chunks.
 		$this->state['state']   = 'processing';
 		$this->state['current'] = '';
+	}
+
+	/**
+	 * Handles one directory entry: a folder goes on the stack, a file into
+	 * the list.
+	 *
+	 * @param resource $handle  Open list file.
+	 * @param string   $buffer  Buffered lines.
+	 * @param string   $rel_dir Relative (or absolute) folder.
+	 * @param string   $abs_dir Absolute folder.
+	 * @param string   $name    Entry name.
+	 */
+	private function enum_entry( $handle, &$buffer, $rel_dir, $abs_dir, $name ) {
+		$rel = '' === $rel_dir ? $name : $rel_dir . '/' . $name;
+		$abs = $abs_dir . '/' . $name;
+
+		if ( is_link( $abs ) && @is_dir( $abs ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			// Never walked through the link (no loops, no file listed twice).
+			// When the target is in the scan set it is scanned at its real path
+			// (an uploads folder linked to ../files is a folder of the set);
+			// anything else is counted so the summary says it was not scanned.
+			$real = realpath( $abs );
+			if ( ! $real || ! Paths::in_full_scope( wp_normalize_path( $real ) ) ) {
+				++$this->state['symlinks'];
+				if ( count( $this->state['symlink_list'] ) < self::EXAMPLES ) {
+					$this->state['symlink_list'][] = Store::db_text( $rel );
+				}
+			}
+			return;
+		}
+
+		if ( @is_dir( $abs ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( $this->is_own_root( $abs ) || Paths::is_excluded( $rel . '/' ) ) {
+				return;
+			}
+			$this->stack_push( $rel );
+			return;
+		}
+
+		if ( ! @is_file( $abs ) || Paths::is_excluded( $rel ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return;
+		}
+		$this->add_line( $handle, $buffer, $rel );
+	}
+
+	/**
+	 * Lists the files (not the folders) at the top of a folder.
+	 *
+	 * @param resource $handle Open list file.
+	 * @param string   $buffer Buffered lines.
+	 * @param string   $dir    Absolute folder without a trailing slash.
+	 */
+	private function list_top( $handle, &$buffer, $dir ) {
+		$dh = @opendir( $dir ); // phpcs:ignore
+		if ( ! $dh ) {
+			++$this->state['skipped'];
+			return;
+		}
+		$count = 0;
+		while ( false !== ( $name = readdir( $dh ) ) ) {
+			if ( '.' === $name || '..' === $name ) {
+				continue;
+			}
+			$abs = $dir . '/' . $name;
+			if ( @is_dir( $abs ) || ! @is_file( $abs ) || Paths::is_excluded( $abs ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				continue;
+			}
+			$this->add_line( $handle, $buffer, $abs );
+			if ( ++$count >= self::TOP_MAX ) {
+				break;
+			}
+		}
+		closedir( $dh );
+	}
+
+	/**
+	 * @param resource $handle Open list file.
+	 * @param string   $buffer Buffered lines.
+	 * @param string   $rel    Relative (or absolute) path.
+	 */
+	private function add_line( $handle, &$buffer, $rel ) {
+		$buffer .= $this->encode_line( $rel ) . "\n";
+		++$this->state['files_total'];
+		if ( strlen( $buffer ) >= 65536 ) {
+			$this->flush_enum( $handle, $buffer );
+		}
+	}
+
+	/**
+	 * Whether a folder met inside another walk is an entry of the scan set of
+	 * its own (walked separately, with its own keys).
+	 *
+	 * @param string $abs Absolute folder.
+	 * @return bool
+	 */
+	private function is_own_root( $abs ) {
+		if ( null === $this->skip_dirs ) {
+			$this->skip_dirs = array();
+			$skip            = isset( $this->state['skip'] ) ? (array) $this->state['skip'] : array();
+			foreach ( $skip as $dir ) {
+				$this->skip_dirs[ (string) $dir ] = true;
+			}
+		}
+		return isset( $this->skip_dirs[ trailingslashit( wp_normalize_path( $abs ) ) ] );
+	}
+
+	/**
+	 * Absolute path of a list entry or stack entry.
+	 *
+	 * @param string $rel Relative (or absolute) path.
+	 * @return string
+	 */
+	private function abs_of( $rel ) {
+		return Paths::is_absolute( $rel ) ? $rel : $this->root() . $rel;
 	}
 
 	/**
@@ -823,7 +1322,7 @@ class Scan_Job {
 	 * @param float $deadline Microtime deadline.
 	 */
 	private function process( $deadline ) {
-		$root = $this->root();
+		$skiplist = $this->skip_list();
 
 		do {
 			if ( $this->cancel_requested() ) {
@@ -856,15 +1355,46 @@ class Scan_Job {
 			$count    = count( $lines );
 			foreach ( $lines as $i => $entry ) {
 				list( $rel, $end ) = $entry;
-				$abs               = $root . $rel;
+				$abs               = $this->abs_of( $rel );
 				$stat              = $this->stat( $abs );
 				if ( null === $stat ) {
 					// Vanished or unreadable between listing and processing.
 					++$this->state['skipped'];
 				} else {
-					$row    = isset( $manifest[ $hashes[ $rel ] ] ) ? $manifest[ $hashes[ $rel ] ] : null;
-					$result = $this->evaluate( $abs, $rel, $stat, $row );
-					$this->capture( $abs, $rel, $stat, $row, $result );
+					$row = isset( $manifest[ $hashes[ $rel ] ] ) ? $manifest[ $hashes[ $rel ] ] : null;
+
+					// Crash guard: a file that stopped the scan CRASH_LIMIT times
+					// (or did so in an earlier run and has not changed since) is
+					// reported as "could not be scanned" instead of being retried.
+					$stamp    = $stat['size'] . ':' . $stat['mtime'];
+					$attempts = 1;
+					$light    = is_array( $row ) && Store::STATE_TRUSTED === (string) $row['state'] && (int) $row['size'] === $stat['size'] && (int) $row['mtime'] === $stat['mtime'] && '' !== (string) $row['sha256'] && 'full' !== $this->state['mode'];
+					if ( isset( $skiplist[ $hashes[ $rel ] ] ) && $skiplist[ $hashes[ $rel ] ] === $stamp ) {
+						$result = $this->unscannable( $abs, $rel, $stat, $row, '', false );
+					} elseif ( is_array( $this->crashed ) && $this->crashed['rel'] === $rel && $this->crashed['attempts'] >= self::CRASH_LIMIT ) {
+						$result        = $this->unscannable( $abs, $rel, $stat, $row, (string) $this->crashed['error'], true );
+						$this->crashed = null;
+						$this->write_marker( '', 0 );
+					} else {
+						if ( is_array( $this->crashed ) && $this->crashed['rel'] === $rel ) {
+							$attempts = (int) $this->crashed['attempts'] + 1;
+						}
+						if ( ! $light ) {
+							// Unchanged trusted files only take the cheap path: no marker.
+							$this->inflight          = $rel;
+							$this->inflight_attempts = $attempts;
+							$this->write_marker( $rel, $attempts );
+						}
+						$result = $this->evaluate( $abs, $rel, $stat, $row );
+						$this->capture( $abs, $rel, $stat, $row, $result );
+						if ( ! $light ) {
+							$this->inflight = '';
+							$this->write_marker( '', 0 );
+							if ( $attempts > 1 ) {
+								$this->crashed = null;
+							}
+						}
+					}
 
 					// A file that was flagged and now verifies (official checksum or
 					// approved fingerprint) no longer needs a decision.
@@ -962,7 +1492,9 @@ class Scan_Job {
 			);
 		}
 
-		$is_new     = ! $known;
+		// A row without a fingerprint (the file could not be read or scanned
+		// before) was never judged: its content is judged like a new file.
+		$is_new     = ! $known || '' === $prev_sha;
 		$changed    = $known && ! $unchanged && '' !== $prev_sha && ! hash_equals( $prev_sha, $sha );
 		$too_big    = $stat['size'] > $scanner->max_bytes();
 		$executable = Paths::is_executable( $abs );
@@ -971,8 +1503,9 @@ class Scan_Job {
 		// an image are not approved as a PHP file.
 		$allowed = wpcybersec()->allowlist->is_allowed_hash( $sha, $executable );
 
-		/* -------- Baseline (or a folder re-baselined after an update). -------- */
-		if ( 'baseline' === $mode || ( ! $unchanged && $this->in_rebaseline_queue( $rel ) ) ) {
+		/* -------- Baseline (or a folder re-baselined after an update, or a folder
+		   outside the scan root covered for the first time). -------- */
+		if ( 'baseline' === $mode || ( ! $unchanged && ( $this->in_rebaseline_queue( $rel ) || $this->in_adopted( $rel ) ) ) ) {
 			return $this->evaluate_baseline( $abs, $rel, $sha, $stat, $row, $change, $executable, $allowed, $too_big, $integrity, $changed );
 		}
 
@@ -1013,7 +1546,7 @@ class Scan_Job {
 		}
 
 		if ( '' !== $integrity ) {
-			$hits = $malware && ! $too_big ? $scanner->scan_file( $abs, $rel ) : array();
+			$hits = $malware && ! $too_big ? $this->scan_content( $abs, $rel ) : array();
 			return $this->handle_integrity( $integrity, $abs, $rel, $sha, $stat, $row, $hits, $verify, $is_new, $changed, $executable, false );
 		}
 
@@ -1025,7 +1558,7 @@ class Scan_Job {
 		$hits     = array();
 		$scan_now = $malware && ! $too_big && ( $is_new || $changed || 'full' === $mode );
 		if ( $scan_now ) {
-			$hits = $scanner->scan_file( $abs, $rel );
+			$hits = $this->scan_content( $abs, $rel );
 		}
 		$severity = $scanner->max_severity( $hits );
 
@@ -1139,7 +1672,7 @@ class Scan_Job {
 
 		$hits = array();
 		if ( $this->state['malware'] && ! $too_big ) {
-			$hits = $scanner->scan_file( $abs, $rel );
+			$hits = $this->scan_content( $abs, $rel );
 		}
 		// A baseline trusts what is there, except files that are wrong by where
 		// they are (unknown file in wp-admin or wp-includes, stray root PHP file).
@@ -1168,6 +1701,195 @@ class Scan_Job {
 			);
 		}
 		return $trusted;
+	}
+
+	/**
+	 * Scanner::scan_file(), counting files whose content was not read because
+	 * the memory left was too small (Scanner::read_cap()).
+	 *
+	 * @param string $abs Path.
+	 * @param string $rel Relative path.
+	 * @return array[] Hits.
+	 */
+	private function scan_content( $abs, $rel ) {
+		$scanner = wpcybersec()->scanner;
+		$hits    = $scanner->scan_file( $abs, $rel );
+		if ( $scanner->memory_limited() ) {
+			++$this->state['mem_limited'];
+		}
+		return $hits;
+	}
+
+	/**
+	 * Whether a path lies in a folder outside the scan root that this run
+	 * covers for the first time (judged like a baseline).
+	 *
+	 * @param string $rel Relative (absolute for these folders) path.
+	 * @return bool
+	 */
+	private function in_adopted( $rel ) {
+		if ( empty( $this->state['adopt'] ) || ! Paths::is_absolute( $rel ) ) {
+			return false;
+		}
+		foreach ( (array) $this->state['adopt'] as $entry ) {
+			$path = (string) $entry['p'];
+			if ( 'all' === $entry['d'] && 0 === strpos( $rel, $path ) ) {
+				return true;
+			}
+			if ( 'top' === $entry['d'] && trailingslashit( wp_normalize_path( dirname( $rel ) ) ) === $path ) {
+				return true;
+			}
+			if ( 'file' === $entry['d'] && $rel === $path ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A file that stopped the scan CRASH_LIMIT times (or is remembered as
+	 * such and unchanged): never read again, reported as a pending file item
+	 * "could not be scanned" (deduplicated like every item), and remembered
+	 * so later runs skip it at once until it changes.
+	 *
+	 * @param string     $abs      Path.
+	 * @param string     $rel      Relative path.
+	 * @param array      $stat     Stat.
+	 * @param array|null $row      Manifest row.
+	 * @param string     $error    Last fatal error message ('' when unknown).
+	 * @param bool       $remember Add it to the skip list.
+	 * @return array { state, sha256 }
+	 */
+	private function unscannable( $abs, $rel, array $stat, $row, $error, $remember ) {
+		++$this->state['unscannable'];
+		if ( count( $this->state['unscan_list'] ) < self::EXAMPLES ) {
+			$this->state['unscan_list'][] = Store::db_text( $rel );
+		}
+		// The previous fingerprint only (hashing the file again could be what stops the scan).
+		$sha = is_array( $row ) ? (string) $row['sha256'] : '';
+		if ( $remember ) {
+			$this->remember_unscannable( $rel, $stat );
+			wpcybersec()->logger->log(
+				'scan_file_unscannable',
+				sprintf(
+					/* translators: 1: relative path, 2: number of attempts */
+					__( 'Skipped %1$s: the scan stopped on this file %2$s times. It is reported as not scanned.', 'cybergate-security' ),
+					Store::db_text( $rel ),
+					number_format_i18n( self::CRASH_LIMIT )
+				),
+				array(
+					'id'    => $this->state['id'],
+					'path'  => Store::db_text( $rel ),
+					'error' => Signatures::clean_snippet( $error ),
+				)
+			);
+		}
+		$store = wpcybersec()->store;
+		if ( ! $store->item_find_open( Store::TYPE_FILE, $rel, $sha ) ) {
+			$hit = array(
+				'sig'      => 'scan_stopped',
+				'title'    => __( 'Could not be scanned: the scan stopped on this file (fatal error, memory or time limit)', 'cybergate-security' ),
+				'severity' => Store::SEV_MEDIUM,
+				'line'     => 0,
+				'snippet'  => Signatures::clean_snippet( '' !== $error ? $error : $rel ),
+			);
+			$id  = $store->item_insert(
+				array(
+					'type'          => Store::TYPE_FILE,
+					'status'        => Store::STATUS_PENDING,
+					'severity'      => Store::SEV_MEDIUM,
+					'path'          => $rel,
+					'original_path' => $abs,
+					'sha256'        => $sha,
+					'size'          => $stat['size'],
+					'mime'          => $this->mime( $abs ),
+					'source'        => 'scan',
+					'details'       => array(
+						'change'  => is_array( $row ) ? 'modified' : 'new',
+						'hits'    => array( $hit ),
+						'context' => 'scan_stopped',
+					),
+				)
+			);
+			if ( $id ) {
+				$this->notify_item( $id );
+			}
+		}
+		return array(
+			'state'  => is_array( $row ) && Store::STATE_THREAT === (string) $row['state'] ? Store::STATE_THREAT : Store::STATE_PENDING,
+			'sha256' => $sha,
+		);
+	}
+
+	/**
+	 * @return array path hash => "size:mtime" of files remembered as unscannable.
+	 */
+	private function skip_list() {
+		$list = get_option( self::SKIP_OPTION, array() );
+		return is_array( $list ) ? $list : array();
+	}
+
+	/**
+	 * @param string $rel  Relative path.
+	 * @param array  $stat Stat.
+	 */
+	private function remember_unscannable( $rel, array $stat ) {
+		$list                       = $this->skip_list();
+		$list[ Paths::hash( $rel ) ] = $stat['size'] . ':' . $stat['mtime'];
+		if ( count( $list ) > self::SKIP_MAX ) {
+			$list = array_slice( $list, -self::SKIP_MAX, null, true );
+		}
+		update_option( self::SKIP_OPTION, $list, false );
+	}
+
+	/**
+	 * Crash marker of the running job.
+	 *
+	 * @return string Path ('' when there is no job).
+	 */
+	private function marker_file() {
+		if ( empty( $this->state['list_file'] ) ) {
+			return '';
+		}
+		return preg_replace( '~\.list$~', '.cur', (string) $this->state['list_file'] );
+	}
+
+	/**
+	 * Records the file being worked on ('' clears it).
+	 *
+	 * @param string $rel      Relative path.
+	 * @param int    $attempts Attempt number.
+	 * @param string $error    Fatal error message.
+	 */
+	private function write_marker( $rel, $attempts, $error = '' ) {
+		$file = $this->marker_file();
+		if ( '' === $file ) {
+			return;
+		}
+		$data = '' === $rel ? '' : "v1\n" . rawurlencode( $rel ) . "\n" . (int) $attempts . "\n" . str_replace( array( "\r", "\n" ), ' ', substr( (string) $error, 0, 500 ) );
+		@file_put_contents( $file, $data ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions -- a few bytes before and after each file; must work in a shutdown handler.
+	}
+
+	/**
+	 * The file a previous tick was working on when its request ended.
+	 *
+	 * @return array|null { rel, attempts, error }
+	 */
+	private function read_marker() {
+		$file = $this->marker_file();
+		if ( '' === $file || ! @is_file( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return null;
+		}
+		$data = (string) @file_get_contents( $file, false, null, 0, 8192 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$part = explode( "\n", $data, 4 );
+		if ( count( $part ) < 3 || 'v1' !== $part[0] || '' === $part[1] ) {
+			return null;
+		}
+		return array(
+			'rel'      => rawurldecode( $part[1] ),
+			'attempts' => max( 1, (int) $part[2] ),
+			'error'    => isset( $part[3] ) ? (string) $part[3] : '',
+		);
 	}
 
 	/**
@@ -1241,6 +1963,59 @@ class Scan_Job {
 		if ( $snapshots && '' !== (string) $sha ) {
 			$snapshots->store( $abs, $sha );
 		}
+	}
+
+	/**
+	 * Files WordPress or a cache plugin writes and loads, which are never
+	 * moved to quarantine automatically (they are still reported):
+	 *   dropin     a drop-in name at the top of WP_CONTENT_DIR
+	 *              (advanced-cache.php, object-cache.php, db.php, sunrise.php...);
+	 *   generated  wp-content/cache/, wp-content/litespeed/,
+	 *              wp-content/wp-rocket-config/, wp-content/w3tc-config/ and
+	 *              wp-content/wp-cache-config.php (page and object caches and
+	 *              their settings, rewritten by the plugin).
+	 *
+	 * @param string $abs Absolute path.
+	 * @return string dropin | generated | ''
+	 */
+	public static function generated_kind( $abs ) {
+		static $roots = null;
+		if ( null === $roots ) {
+			$roots = array();
+			foreach ( array( defined( 'WP_CONTENT_DIR' ) ? WP_CONTENT_DIR : '', ABSPATH . 'wp-content' ) as $dir ) {
+				if ( '' === $dir ) {
+					continue;
+				}
+				$roots[] = trailingslashit( wp_normalize_path( $dir ) );
+				$real    = realpath( $dir );
+				if ( $real ) {
+					$roots[] = trailingslashit( wp_normalize_path( $real ) );
+				}
+			}
+			$roots = array_values( array_unique( $roots ) );
+		}
+		$abs = wp_normalize_path( (string) $abs );
+		foreach ( $roots as $root ) {
+			if ( 0 !== strpos( $abs, $root ) ) {
+				continue;
+			}
+			$sub = substr( $abs, strlen( $root ) );
+			if ( false === strpos( $sub, '/' ) ) {
+				$names = self::DROPINS;
+				if ( function_exists( '_get_dropins' ) ) {
+					$names = array_merge( $names, array_keys( (array) _get_dropins() ) );
+				}
+				if ( in_array( strtolower( $sub ), $names, true ) ) {
+					return 'dropin';
+				}
+				return 'wp-cache-config.php' === strtolower( $sub ) ? 'generated' : '';
+			}
+			if ( preg_match( '~^(?:cache|litespeed|wp-rocket-config|w3tc-config)/~i', $sub ) ) {
+				return 'generated';
+			}
+			return '';
+		}
+		return '';
 	}
 
 	/**
@@ -1324,7 +2099,10 @@ class Scan_Job {
 	private function quarantine_file( $abs, $rel, $sha, array $stat, $change, array $base, array $hits = array() ) {
 		$this->snapshot_current( $abs, $sha );
 		// A file the site needs to start (wp-config.php, core files) is only ever reported.
-		$held = Decisions::is_critical_path( $abs ) ? new \WP_Error( 'wpcybersec_critical', 'critical' ) : wpcybersec()->quarantine->hold( $abs, true );
+		// Nor are drop-ins and files cache plugins write (advanced-cache.php,
+		// object-cache.php, wp-content/cache/...): moving them breaks the site
+		// or the plugin writes them again at once. They are still reported.
+		$held = Decisions::is_critical_path( $abs ) || '' !== self::generated_kind( $abs ) ? new \WP_Error( 'wpcybersec_critical', 'critical' ) : wpcybersec()->quarantine->hold( $abs, true );
 		if ( is_wp_error( $held ) ) {
 			// Could not move it; fall back to reporting it in place.
 			$this->record_file( $abs, $rel, $sha, $stat, $change, $base, $hits );
@@ -1544,7 +2322,7 @@ class Scan_Job {
 		}
 
 		$quarantine_path = '';
-		if ( Store::SEV_CRITICAL === $severity && wpcybersec()->settings->get( 'auto_quarantine', false ) && ! $this->is_own_code( $verify ) && ! Decisions::is_critical_path( $abs ) ) {
+		if ( Store::SEV_CRITICAL === $severity && wpcybersec()->settings->get( 'auto_quarantine', false ) && ! $this->is_own_code( $verify ) && ! Decisions::is_critical_path( $abs ) && 'dropin' !== self::generated_kind( $abs ) ) {
 			$held = wpcybersec()->quarantine->hold( $abs, true );
 			if ( ! is_wp_error( $held ) ) {
 				$quarantine_path = $held['quarantine_path'];
@@ -1778,7 +2556,14 @@ class Scan_Job {
 					break;
 				}
 				$delete = array();
+				$keep   = array();
 				foreach ( $rows as $row ) {
+					if ( $this->in_resumed_dir( (string) $row['path'] ) ) {
+						// Listed over several ticks: a file added or renamed meanwhile
+						// can have been missed, so its row is kept, not deleted.
+						$keep[] = $row['path_hash'];
+						continue;
+					}
 					$delete[] = $row['path_hash'];
 					++$this->state['deleted'];
 					if ( Store::STATE_TRUSTED !== (string) $row['state'] ) {
@@ -1786,6 +2571,9 @@ class Scan_Job {
 					}
 				}
 				wpcybersec()->store->manifest_delete( $delete );
+				if ( $keep ) {
+					wpcybersec()->store->manifest_touch( $keep, $this->state['id'] );
+				}
 			} while ( count( $rows ) >= 500 );
 		}
 
@@ -1800,6 +2588,16 @@ class Scan_Job {
 			update_option( self::BASELINE_OPTION, time(), false );
 			update_option( self::ROOT_OPTION, $this->root(), false );
 		}
+		if ( empty( $this->state['paths'] ) ) {
+			// The folders outside the scan root are covered from now on: later
+			// runs judge new files there like anywhere else.
+			update_option( self::EXTRA_OPTION, array_values( wp_list_pluck( (array) $this->state['extra'], 'p' ) ), false );
+		}
+		if ( wpcybersec()->snapshots && method_exists( wpcybersec()->snapshots, 'enforce_cap' ) ) {
+			// Keep stored copies under their count and size limits (inode quotas).
+			wpcybersec()->snapshots->enforce_cap( 5.0 );
+		}
+		$this->log_scope_notes();
 		if ( ! empty( $this->state['backfill'] ) && empty( $this->state['paths'] ) && wpcybersec()->snapshots ) {
 			// Every trusted file of the site has been looked at once: copies exist
 			// now, unless the backfill was reset while this scan ran.
@@ -1825,6 +2623,10 @@ class Scan_Job {
 				'db_findings'  => isset( $this->state['db_findings'] ) ? (int) $this->state['db_findings'] : 0,
 				'missing_core' => isset( $this->state['missing_core'] ) ? (int) $this->state['missing_core'] : -1,
 				'new_admins'   => isset( $this->state['new_admins'] ) ? (int) $this->state['new_admins'] : 0,
+				'symlinks'     => (int) $this->state['symlinks'],
+				'unscannable'  => (int) $this->state['unscannable'],
+				'mem_limited'  => (int) $this->state['mem_limited'],
+				'extra_roots'  => count( (array) $this->state['extra'] ),
 			)
 		);
 
@@ -1839,6 +2641,56 @@ class Scan_Job {
 		 * @param array $status Final status.
 		 */
 		do_action( 'wpcybersec_scan_finished', $this->status() );
+	}
+
+	/**
+	 * Whether a manifest path lies in a folder that was listed over several
+	 * ticks (a subfolder missed there would take its whole tree with it).
+	 *
+	 * @param string $path Manifest path.
+	 * @return bool
+	 */
+	private function in_resumed_dir( $path ) {
+		if ( empty( $this->state['resumed'] ) ) {
+			return false;
+		}
+		foreach ( (array) $this->state['resumed'] as $entry ) {
+			$folder = Store::db_text( $this->encoded() ? rawurldecode( (string) $entry ) : (string) $entry );
+			if ( '' === $folder || 0 === strpos( $path, $folder . '/' ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Logs what the summary only counts: symlinked folders that were not
+	 * scanned and files that could not be scanned or read in full (examples).
+	 */
+	private function log_scope_notes() {
+		if ( ! empty( $this->state['symlinks'] ) ) {
+			wpcybersec()->logger->log(
+				'scan_symlinks_skipped',
+				sprintf(
+					/* translators: 1: number of folders, 2: examples */
+					_n( '%1$s symlinked folder was not scanned because it points outside the WordPress folders (%2$s). Add its target as the scan folder or scan it separately.', '%1$s symlinked folders were not scanned because they point outside the WordPress folders (for example %2$s). Add their targets as the scan folder or scan them separately.', (int) $this->state['symlinks'], 'cybergate-security' ),
+					number_format_i18n( (int) $this->state['symlinks'] ),
+					implode( ', ', (array) $this->state['symlink_list'] )
+				),
+				array( 'id' => $this->state['id'] )
+			);
+		}
+		if ( ! empty( $this->state['mem_limited'] ) ) {
+			wpcybersec()->logger->log(
+				'scan_memory_limited',
+				sprintf(
+					/* translators: %s: number of files */
+					_n( '%s file was not checked for malware because the PHP memory limit left too little room to read it. Raise memory_limit (or WP_MAX_MEMORY_LIMIT) or lower the largest file size to scan.', '%s files were not checked for malware because the PHP memory limit left too little room to read them. Raise memory_limit (or WP_MAX_MEMORY_LIMIT) or lower the largest file size to scan.', (int) $this->state['mem_limited'], 'cybergate-security' ),
+					number_format_i18n( (int) $this->state['mem_limited'] )
+				),
+				array( 'id' => $this->state['id'] )
+			);
+		}
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -2055,8 +2907,19 @@ class Scan_Job {
 			return;
 		}
 		$file = (string) $state['list_file'];
-		if ( Storage::is_within( $file, wpcybersec()->storage->jobs_dir() ) && @is_file( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-			Fs::delete( $file );
+		$tmp  = ! empty( $state['tmp_dir'] ) ? (string) $state['tmp_dir'] : '';
+		// A temp folder is only ever one this plugin created for a run.
+		if ( '' !== $tmp && ! preg_match( '~/wpcybersec-jobs-[a-z0-9]{16}$~', $tmp ) ) {
+			$tmp = '';
+		}
+		foreach ( array( $file, preg_replace( '~\.list$~', '.cur', $file ) ) as $path ) {
+			$inside = Storage::is_within( $path, wpcybersec()->storage->jobs_dir() ) || ( '' !== $tmp && Storage::is_within( $path, $tmp ) );
+			if ( $inside && @is_file( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				Fs::delete( $path );
+			}
+		}
+		if ( '' !== $tmp && @is_dir( $tmp ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			Fs::rmdir( $tmp );
 		}
 	}
 
@@ -2244,6 +3107,8 @@ class Scan_Job {
 	/**
 	 * Normalizes requested scan folders to absolute paths inside the scan root
 	 * plus the relative prefixes for deleted detection and the DFS stack.
+	 * Folders inside a fully walked folder of the scan set outside the root
+	 * (Bedrock's web/app/plugins/foo) are accepted with absolute prefixes.
 	 *
 	 * @param array $paths Absolute folders.
 	 * @return array { abs: string[], rel: string[], stack: string[] }
@@ -2262,14 +3127,15 @@ class Scan_Job {
 			if ( $real ) {
 				$norm = wp_normalize_path( $real );
 			}
-			$norm = trailingslashit( $norm );
-			if ( 0 !== strpos( $norm, $root ) || ! @is_dir( $norm ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-				continue; // Refuse folders outside the scan root, and missing ones.
+			$norm   = trailingslashit( $norm );
+			$inside = 0 === strpos( $norm, $root );
+			if ( ( ! $inside && ! Paths::in_full_scope( $norm ) ) || ! @is_dir( $norm ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				continue; // Refuse folders outside the scan set, and missing ones.
 			}
 			if ( Store::db_text( $norm ) !== $norm ) {
 				continue; // Not storable in the job state; a whole-site scan covers it.
 			}
-			$prefix  = ltrim( substr( $norm, strlen( $root ) ), '/' );
+			$prefix  = $inside ? ltrim( substr( $norm, strlen( $root ) ), '/' ) : $norm;
 			$abs[]   = rtrim( $norm, '/' );
 			$rel[]   = $prefix;
 			$stack[] = rtrim( $prefix, '/' );
@@ -2330,6 +3196,22 @@ class Scan_Job {
 			/* translators: %s: number of accounts */
 			$text .= ' ' . sprintf( __( 'New administrators: %s.', 'cybergate-security' ), number_format_i18n( (int) $state['new_admins'] ) );
 		}
+		if ( ! empty( $state['extra'] ) ) {
+			/* translators: %s: number of folders */
+			$text .= ' ' . sprintf( _n( 'Also scanned %s WordPress folder outside the scan folder.', 'Also scanned %s WordPress folders outside the scan folder.', count( (array) $state['extra'] ), 'cybergate-security' ), number_format_i18n( count( (array) $state['extra'] ) ) );
+		}
+		if ( ! empty( $state['unscannable'] ) ) {
+			/* translators: %s: number of files */
+			$text .= ' ' . sprintf( __( 'Could not be scanned: %s.', 'cybergate-security' ), number_format_i18n( (int) $state['unscannable'] ) );
+		}
+		if ( ! empty( $state['symlinks'] ) ) {
+			/* translators: %s: number of folders */
+			$text .= ' ' . sprintf( _n( '%s symlinked folder not scanned.', '%s symlinked folders not scanned.', (int) $state['symlinks'], 'cybergate-security' ), number_format_i18n( (int) $state['symlinks'] ) );
+		}
+		if ( ! empty( $state['mem_limited'] ) ) {
+			/* translators: %s: number of files */
+			$text .= ' ' . sprintf( __( 'Not checked for malware (memory limit too low): %s.', 'cybergate-security' ), number_format_i18n( (int) $state['mem_limited'] ) );
+		}
 		return $text;
 	}
 
@@ -2360,6 +3242,10 @@ class Scan_Job {
 			'db_findings'  => 0,
 			'missing_core' => -1,
 			'new_admins'   => 0,
+			'symlinks'     => 0,
+			'unscannable'  => 0,
+			'mem_limited'  => 0,
+			'extra_roots'  => 0,
 		);
 	}
 }

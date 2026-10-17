@@ -33,6 +33,7 @@ class Guard_Manager {
 	const IMPORT_HOOK      = 'wpcybersec_guard_import';
 	const SCHEDULE         = 'wpcybersec_ten_minutes';
 	const MARKER           = 'CyberGate Security Guard';
+	const FRONT_OPTION     = 'wpcybersec_front_root';
 
 	/** Lines imported per cron run, and its time budget (seconds); the rest waits for the next run. */
 	const IMPORT_BATCH   = 200;
@@ -67,10 +68,19 @@ class Guard_Manager {
 		// pages only, never in the uploader's own (possibly anonymous) request, so
 		// nobody can make the site scan files on demand.
 
-		// Re-enable (or keep disabled) the config on boot, in admin and cron requests only.
+		// Re-enable (or keep disabled) the config, in admin and cron requests only.
+		// On init: the config holds translated messages, and WordPress 6.7+
+		// warns when translations load before init.
 		if ( is_admin() || wp_doing_cron() ) {
-			$this->maintain();
+			add_action( 'init', array( $this, 'on_init' ), 20 );
 		}
+	}
+
+	/**
+	 * init: keeps the config in sync (see maintain()).
+	 */
+	public function on_init() {
+		$this->maintain();
 	}
 
 	/**
@@ -136,7 +146,7 @@ class Guard_Manager {
 			return;
 		}
 		$wanted = $this->config_array();
-		$keys   = array( 'enabled', 'action', 'quarantine_dir', 'spool_file', 'allow_file', 'exempt', 'max_bytes', 'max_spool_bytes', 'max_quarantine_files', 'max_quarantine_bytes', 'min_free_bytes', 'exec_extensions', 'exec_filenames', 'home_path', 'login_cookie', 'root' );
+		$keys   = array( 'enabled', 'action', 'quarantine_dir', 'spool_file', 'allow_file', 'exempt', 'max_bytes', 'max_spool_bytes', 'max_quarantine_files', 'max_quarantine_bytes', 'min_free_bytes', 'exec_extensions', 'exec_filenames', 'home_path', 'login_cookie', 'root', 'front_root' );
 		foreach ( $keys as $key ) {
 			if ( ! array_key_exists( $key, $current ) || $current[ $key ] !== $wanted[ $key ] ) {
 				$this->sync_config();
@@ -248,7 +258,139 @@ class Guard_Manager {
 			'message'              => __( 'This upload is waiting for administrator approval (CyberGate Security). After approval, send it again and it will go through.', 'cybergate-security' ),
 			'message_refused'      => __( 'This upload was refused because it could not be checked (CyberGate Security). Please contact the site administrator.', 'cybergate-security' ),
 			'root'                 => trailingslashit( wp_normalize_path( $root ? $root : ABSPATH ) ),
+			// Folder of the front controller index.php when it is not the WordPress
+			// folder (WordPress in a sub folder, Bedrock): REST routes run there.
+			'front_root'           => $this->front_root(),
 		);
+	}
+
+	/**
+	 * Folder of the site's front controller (the index.php that loads
+	 * wp-blog-header.php) when it differs from the WordPress folder: WordPress
+	 * in its own sub folder ("Giving WordPress its own directory") or Bedrock
+	 * (web/index.php loads web/wp/). PHP reads .user.ini and Apache reads
+	 * .htaccess from the folder of the requested script upwards, so the guard
+	 * must be wired in there too, or requests to the front controller (pages,
+	 * REST uploads through /wp-json/) run without it.
+	 *
+	 * @return string Real path with a trailing slash, or '' when it is ABSPATH.
+	 */
+	public function front_root() {
+		static $cache = null;
+		if ( null !== $cache ) {
+			return $cache;
+		}
+		$cache    = '';
+		$real_abs = realpath( ABSPATH );
+		$abs      = trailingslashit( wp_normalize_path( $real_abs ? $real_abs : ABSPATH ) );
+
+		$candidates = array();
+		// Site address path is a prefix of the WordPress address path: the
+		// difference is the sub folder WordPress lives in.
+		$home = trim( (string) wp_parse_url( home_url(), PHP_URL_PATH ), '/' );
+		$site = trim( (string) wp_parse_url( site_url(), PHP_URL_PATH ), '/' );
+		if ( $site !== $home && ( '' === $home || 0 === strpos( $site . '/', $home . '/' ) ) ) {
+			$sub = trim( substr( $site, strlen( $home ) ), '/' );
+			if ( '' !== $sub && substr( $abs, -strlen( $sub ) - 1 ) === $sub . '/' ) {
+				$candidates[] = substr( $abs, 0, strlen( $abs ) - strlen( $sub ) - 1 );
+			}
+		}
+		// Bedrock and similar layouts: the document root holds the front controller.
+		if ( ! empty( $_SERVER['DOCUMENT_ROOT'] ) ) {
+			$doc = wp_unslash( $_SERVER['DOCUMENT_ROOT'] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- compared as a path only.
+			$doc = Storage::path_allowed( $doc ) ? realpath( $doc ) : false;
+			if ( $doc ) {
+				$candidates[] = trailingslashit( wp_normalize_path( $doc ) );
+			}
+		}
+		foreach ( $candidates as $dir ) {
+			if ( ! Storage::path_allowed( $dir ) ) {
+				continue; // open_basedir hides it: PHP could not write its .user.ini or .htaccess either.
+			}
+			$real = realpath( $dir );
+			$dir  = $real ? trailingslashit( wp_normalize_path( $real ) ) : $dir;
+			if ( $dir === $abs || 0 !== strpos( $abs, $dir ) ) {
+				continue; // WordPress must live below the front controller.
+			}
+			if ( self::loads_wordpress( $dir . 'index.php', substr( $abs, strlen( $dir ) ) ) ) {
+				$cache = $dir;
+				break;
+			}
+		}
+		// Cron and WP-CLI have no DOCUMENT_ROOT: reuse what a web request found,
+		// so the guard config does not change with the kind of request.
+		$stored = (string) get_option( self::FRONT_OPTION, '' );
+		if ( '' === $cache && empty( $_SERVER['DOCUMENT_ROOT'] ) && '' !== $stored && 0 === strpos( $abs, $stored ) && $stored !== $abs && self::loads_wordpress( $stored . 'index.php', substr( $abs, strlen( $stored ) ) ) ) {
+			$cache = $stored;
+		} elseif ( $cache !== $stored && ( '' !== $cache || ! empty( $_SERVER['DOCUMENT_ROOT'] ) ) ) {
+			update_option( self::FRONT_OPTION, $cache, false );
+		}
+		return $cache;
+	}
+
+	/**
+	 * Whether $index is a front controller that loads this WordPress:
+	 * it requires "<sub folder>/wp-blog-header.php".
+	 *
+	 * @param string $index index.php path.
+	 * @param string $sub   WordPress folder relative to the index (trailing slash).
+	 * @return bool
+	 */
+	private static function loads_wordpress( $index, $sub ) {
+		if ( ! Storage::path_allowed( $index ) || ! @is_file( $index ) || ! @is_readable( $index ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return false;
+		}
+		$code = (string) @file_get_contents( $index, false, null, 0, 16384 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions
+		return false !== strpos( $code, $sub . 'wp-blog-header.php' );
+	}
+
+	/**
+	 * Folders whose .user.ini / .htaccess wire in the guard: the WordPress
+	 * folder and, when different, the front controller folder.
+	 *
+	 * @return string[] With trailing slashes.
+	 */
+	public function wiring_dirs() {
+		$dirs  = array( trailingslashit( wp_normalize_path( ABSPATH ) ) );
+		$front = $this->front_root();
+		if ( '' !== $front ) {
+			$dirs[] = $front;
+		}
+		return $dirs;
+	}
+
+	/**
+	 * LiteSpeed edition serving this request.
+	 *
+	 * OpenLiteSpeed ignores php_value in .htaccess (its php.ini settings come
+	 * from WebAdmin, php.ini or .user.ini), LiteSpeed Enterprise reads it like
+	 * Apache. Both report "LiteSpeed" in SERVER_SOFTWARE by default, so the
+	 * install is checked as well: OpenLiteSpeed ships bin/openlitespeed,
+	 * Enterprise needs a license key or serial file.
+	 *
+	 * @return string openlitespeed | enterprise | unknown | '' (not LiteSpeed)
+	 */
+	public static function litespeed_edition() {
+		$soft    = isset( $_SERVER['SERVER_SOFTWARE'] ) ? strtolower( sanitize_text_field( wp_unslash( $_SERVER['SERVER_SOFTWARE'] ) ) ) : '';
+		$edition = isset( $_SERVER['LSWS_EDITION'] ) ? strtolower( sanitize_text_field( wp_unslash( $_SERVER['LSWS_EDITION'] ) ) ) : '';
+		if ( 'litespeed' !== PHP_SAPI && false === strpos( $soft, 'litespeed' ) ) {
+			return '';
+		}
+		if ( false !== strpos( $soft, 'openlitespeed' ) || false !== strpos( $edition, 'open' ) ) {
+			return 'openlitespeed';
+		}
+		if ( false !== strpos( $edition, 'enterprise' ) ) {
+			return 'enterprise';
+		}
+		$root = getenv( 'LSWS_HOME' );
+		$root = is_string( $root ) && '' !== $root ? rtrim( $root, '/' ) : '/usr/local/lsws';
+		if ( @is_file( $root . '/bin/openlitespeed' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return 'openlitespeed';
+		}
+		if ( @is_file( $root . '/conf/license.key' ) || @is_file( $root . '/conf/serial.no' ) || @is_file( $root . '/conf/trial.key' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return 'enterprise';
+		}
+		return 'unknown';
 	}
 
 	/**
@@ -542,6 +684,8 @@ class Guard_Manager {
 			'conflict_snippet'    => $snippet,
 			'chain'               => (string) get_option( self::CHAIN_OPTION, '' ),
 			'sapi'                => PHP_SAPI,
+			'litespeed'           => self::litespeed_edition(),
+			'front_root'          => $this->front_root(),
 			'recommended'         => $this->recommended_snippet(),
 			'pending_spool'       => $this->spool_count(),
 			'config_file'         => Guard_Config::file(),
@@ -570,28 +714,47 @@ class Guard_Manager {
 		$ver         = PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION;
 
 		$htaccess = array( '# BEGIN ' . self::MARKER );
-		foreach ( array( 'php_module', 'php7_module', 'php5_module', 'mod_php.c', 'mod_php8.c', 'mod_php7.c', 'mod_php5.c' ) as $module ) {
+		// mod_php names, then LiteSpeed Enterprise and mod_lsapi (CloudLinux), which read php_value too.
+		// OpenLiteSpeed ignores php_value in .htaccess: it uses .user.ini or its WebAdmin instead.
+		foreach ( array( 'php_module', 'php7_module', 'php5_module', 'mod_php.c', 'mod_php8.c', 'mod_php7.c', 'mod_php5.c', 'LiteSpeed', 'lsapi_module' ) as $module ) {
 			$htaccess[] = '<IfModule ' . $module . '>';
 			$htaccess[] = "\tphp_value auto_prepend_file \"" . $bootstrap . '"';
 			$htaccess[] = '</IfModule>';
 		}
 		$htaccess[] = '# END ' . self::MARKER;
 
+		$ini_files = array();
+		$ht_files  = array();
+		foreach ( $this->wiring_dirs() as $dir ) {
+			$ini_files[] = wp_normalize_path( $dir . $ini_name );
+			$ht_files[]  = wp_normalize_path( $dir . '.htaccess' );
+		}
+		$front = '' !== $this->front_root()
+			? ' ' . __( 'This site\'s front controller (index.php) is in another folder than WordPress, so add it to both files.', 'cybergate-security' )
+			: '';
+
 		$snippets = array(
 			array(
 				'id'   => 'user_ini',
-				'label' => __( '.user.ini (PHP-FPM, FastCGI, LiteSpeed)', 'cybergate-security' ),
-				'file' => wp_normalize_path( ABSPATH . $ini_name ),
+				'label' => __( '.user.ini (PHP-FPM, FastCGI, OpenLiteSpeed)', 'cybergate-security' ),
+				'file' => implode( ' + ', $ini_files ),
 				'code' => '; BEGIN ' . self::MARKER . "\nauto_prepend_file = \"" . $bootstrap . "\"\n; END " . self::MARKER,
 				/* translators: %d: seconds */
-				'help' => sprintf( __( 'Add this to the .user.ini file in the WordPress folder (or use the button that writes it for you). PHP reads it again every %d seconds, so the guard starts within a few minutes. Apache with mod_php ignores .user.ini; use the .htaccess snippet there.', 'cybergate-security' ), max( 0, (int) ini_get( 'user_ini.cache_ttl' ) ) ),
+				'help' => sprintf( __( 'Add this to the .user.ini file in the WordPress folder (or use the button that writes it for you). PHP reads it again every %d seconds, so the guard starts within a few minutes. Apache with mod_php ignores .user.ini; use the .htaccess snippet there.', 'cybergate-security' ), max( 0, (int) ini_get( 'user_ini.cache_ttl' ) ) ) . $front,
 			),
 			array(
 				'id'   => 'htaccess',
-				'label' => __( '.htaccess (Apache with mod_php)', 'cybergate-security' ),
-				'file' => wp_normalize_path( ABSPATH . '.htaccess' ),
+				'label' => __( '.htaccess (Apache with mod_php, LiteSpeed Enterprise)', 'cybergate-security' ),
+				'file' => implode( ' + ', $ht_files ),
 				'code' => implode( "\n", $htaccess ),
-				'help' => __( 'For Apache running PHP as a module (mod_php, PHP 5 to 8). Every line is wrapped in IfModule, so the snippet is ignored on servers without mod_php instead of causing a 500 error. Takes effect on the next request.', 'cybergate-security' ),
+				'help' => __( 'For Apache running PHP as a module (mod_php, PHP 5 to 8), LiteSpeed Enterprise and CloudLinux mod_lsapi. Every line is wrapped in IfModule, so the snippet is ignored on other servers instead of causing a 500 error. OpenLiteSpeed ignores it: use .user.ini or the OpenLiteSpeed snippet there. Takes effect on the next request.', 'cybergate-security' ) . $front,
+			),
+			array(
+				'id'    => 'openlitespeed',
+				'label' => __( 'OpenLiteSpeed (WebAdmin, CyberPanel)', 'cybergate-security' ),
+				'file'  => __( 'WebAdmin > Virtual Hosts > this site > General > php.ini Override (CyberPanel: /usr/local/lsws/conf/vhosts/<domain>/vhost.conf, phpIniOverride block)', 'cybergate-security' ),
+				'code'  => 'php_value auto_prepend_file ' . $bootstrap,
+				'help'  => __( 'OpenLiteSpeed ignores php_value in .htaccess. Add this line, then restart OpenLiteSpeed (and stop the lsphp processes when PHP runs in detached mode, for example: killall lsphp). It applies to this site only. A .user.ini file also works when lsphp has user ini files switched on (LSPHP_ENABLE_USER_INI=on), but only after PHP restarts.', 'cybergate-security' ),
 			),
 			array(
 				'id'   => 'fpm',
@@ -634,7 +797,7 @@ class Guard_Manager {
 			case 'apache2handler':
 				return 'htaccess';
 			case 'litespeed':
-				return 'htaccess';
+				return 'openlitespeed' === self::litespeed_edition() ? 'openlitespeed' : 'htaccess';
 			case 'fpm-fcgi':
 			case 'cgi-fcgi':
 			case 'cgi':
@@ -645,7 +808,9 @@ class Guard_Manager {
 	}
 
 	/**
-	 * Adds or updates auto_prepend_file in ABSPATH/.user.ini.
+	 * Adds or updates auto_prepend_file in .user.ini of the WordPress folder
+	 * and, when different, of the front controller folder (see front_root()).
+	 * A failure in one folder undoes the other, so nothing is half wired.
 	 *
 	 * @return true|\WP_Error
 	 */
@@ -655,7 +820,27 @@ class Guard_Manager {
 		if ( '' === $name ) {
 			return new \WP_Error( 'wpcybersec_user_ini_off', __( 'This server has .user.ini files turned off (user_ini.filename is empty). Use one of the other snippets.', 'cybergate-security' ) );
 		}
-		$file      = wp_normalize_path( ABSPATH . $name );
+		$done = array();
+		foreach ( $this->wiring_dirs() as $dir ) {
+			$result = $this->write_user_ini_file( wp_normalize_path( $dir . $name ) );
+			if ( is_wp_error( $result ) ) {
+				foreach ( $done as $file ) {
+					$this->remove_user_ini_file( $file );
+				}
+				return $result;
+			}
+			$done[] = wp_normalize_path( $dir . $name );
+		}
+		return true;
+	}
+
+	/**
+	 * Adds or updates auto_prepend_file in one .user.ini file.
+	 *
+	 * @param string $file File.
+	 * @return true|\WP_Error
+	 */
+	private function write_user_ini_file( $file ) {
 		$bootstrap = $this->bootstrap_path();
 		$content   = is_file( $file ) ? (string) @file_get_contents( $file ) : ''; // phpcs:ignore
 		$lines     = '' === $content ? array() : preg_split( '/\r\n|\n|\r/', $content );
@@ -716,14 +901,30 @@ class Guard_Manager {
 	}
 
 	/**
-	 * Removes the guard lines from ABSPATH/.user.ini.
+	 * Removes the guard lines from .user.ini in every folder write_user_ini() writes.
 	 *
 	 * @return true|\WP_Error
 	 */
 	public function remove_user_ini() {
-		$name = ini_get( 'user_ini.filename' );
-		$name = false === $name || '' === $name ? '.user.ini' : (string) $name;
-		$file = wp_normalize_path( ABSPATH . $name );
+		$name   = ini_get( 'user_ini.filename' );
+		$name   = false === $name || '' === $name ? '.user.ini' : (string) $name;
+		$result = true;
+		foreach ( $this->wiring_dirs() as $dir ) {
+			$one = $this->remove_user_ini_file( wp_normalize_path( $dir . $name ) );
+			if ( is_wp_error( $one ) ) {
+				$result = $one;
+			}
+		}
+		return $result;
+	}
+
+	/**
+	 * Removes the guard lines from one .user.ini file.
+	 *
+	 * @param string $file File.
+	 * @return true|\WP_Error
+	 */
+	private function remove_user_ini_file( $file ) {
 		if ( ! is_file( $file ) ) {
 			return true;
 		}
@@ -752,12 +953,35 @@ class Guard_Manager {
 	}
 
 	/**
-	 * Adds the mod_php snippet to ABSPATH/.htaccess between markers.
+	 * Adds the .htaccess snippet (mod_php, LiteSpeed Enterprise, mod_lsapi)
+	 * between markers to the WordPress folder and, when different, the front
+	 * controller folder. A failure in one folder undoes the other.
 	 *
 	 * @return true|\WP_Error
 	 */
 	public function write_htaccess() {
-		$file = wp_normalize_path( ABSPATH . '.htaccess' );
+		$done = array();
+		foreach ( $this->wiring_dirs() as $dir ) {
+			$file   = wp_normalize_path( $dir . '.htaccess' );
+			$result = $this->write_htaccess_file( $file );
+			if ( is_wp_error( $result ) ) {
+				foreach ( $done as $written ) {
+					$this->remove_htaccess_file( $written );
+				}
+				return $result;
+			}
+			$done[] = $file;
+		}
+		return true;
+	}
+
+	/**
+	 * Adds the snippet to one .htaccess file.
+	 *
+	 * @param string $file File.
+	 * @return true|\WP_Error
+	 */
+	private function write_htaccess_file( $file ) {
 		if ( is_file( $file ) ) {
 			$content = (string) @file_get_contents( $file ); // phpcs:ignore
 			$outside = preg_replace( '/# BEGIN ' . preg_quote( self::MARKER, '/' ) . '.*?# END ' . preg_quote( self::MARKER, '/' ) . '/s', '', $content );
@@ -802,12 +1026,28 @@ class Guard_Manager {
 	}
 
 	/**
-	 * Removes the guard block from ABSPATH/.htaccess.
+	 * Removes the guard block from .htaccess in every folder write_htaccess() writes.
 	 *
 	 * @return true|\WP_Error
 	 */
 	public function remove_htaccess() {
-		$file = wp_normalize_path( ABSPATH . '.htaccess' );
+		$result = true;
+		foreach ( $this->wiring_dirs() as $dir ) {
+			$one = $this->remove_htaccess_file( wp_normalize_path( $dir . '.htaccess' ) );
+			if ( is_wp_error( $one ) ) {
+				$result = $one;
+			}
+		}
+		return $result;
+	}
+
+	/**
+	 * Removes the guard block from one .htaccess file.
+	 *
+	 * @param string $file File.
+	 * @return true|\WP_Error
+	 */
+	private function remove_htaccess_file( $file ) {
 		if ( ! is_file( $file ) ) {
 			return true;
 		}
@@ -888,7 +1128,12 @@ class Guard_Manager {
 		}
 		$ini_name = ini_get( 'user_ini.filename' );
 		$ini_name = false === $ini_name || '' === $ini_name ? '.user.ini' : (string) $ini_name;
-		foreach ( array( ABSPATH . $ini_name, ABSPATH . '.htaccess', dirname( ABSPATH ) . '/' . $ini_name, dirname( ABSPATH ) . '/.htaccess' ) as $file ) {
+		$files = array( ABSPATH . $ini_name, ABSPATH . '.htaccess', dirname( ABSPATH ) . '/' . $ini_name, dirname( ABSPATH ) . '/.htaccess' );
+		foreach ( $this->wiring_dirs() as $dir ) {
+			$files[] = $dir . $ini_name;
+			$files[] = $dir . '.htaccess';
+		}
+		foreach ( array_unique( $files ) as $file ) {
 			if ( ! @is_readable( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 				continue;
 			}

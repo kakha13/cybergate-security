@@ -508,6 +508,10 @@ class Decisions {
 		if ( ! $loc ) {
 			return new \WP_Error( 'wpcybersec_official', __( 'This file already matches the official copy, or no official copy is known for it.', 'cybergate-security' ) );
 		}
+		// The current version is saved as a gzip copy first; without zlib that is impossible.
+		if ( ! function_exists( 'gzencode' ) || ! function_exists( 'gzdecode' ) ) {
+			return new \WP_Error( 'wpcybersec_official', __( 'PHP\'s zlib extension is missing on this server, so the current version cannot be saved as a copy first and nothing was changed. Ask your host to enable zlib, or replace the file with the official one yourself (SFTP or your hosting file manager).', 'cybergate-security' ) );
+		}
 		$official = ( new Originals() )->fetch( (string) $item['path'] );
 		if ( ! is_array( $official ) || ! Originals::accept( $loc, $official['content'] ) ) {
 			return new \WP_Error( 'wpcybersec_official', __( 'The official copy could not be downloaded and verified, so nothing was changed. Restore the file from a backup, or try again later.', 'cybergate-security' ) );

@@ -139,7 +139,7 @@ class Install_Gate {
 			return $source;
 		}
 
-		list( $hits, $partial ) = $this->scan_package( $source );
+		list( $hits, $partial ) = $this->scan_package( self::local_path( $source ) );
 		$severity               = $this->max_severity( $hits );
 		$display                = self::display_name( '' !== $info['name'] ? $info['name'] : $slug );
 
@@ -548,7 +548,8 @@ class Install_Gate {
 		if ( ! is_object( $upgrader ) || empty( $upgrader->result ) || ! is_array( $upgrader->result ) || empty( $upgrader->result['destination'] ) ) {
 			return '';
 		}
-		return untrailingslashit( wp_normalize_path( (string) $upgrader->result['destination'] ) );
+		$local = self::local_path( (string) $upgrader->result['destination'] );
+		return '' !== $local ? untrailingslashit( $local ) : '';
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -580,9 +581,12 @@ class Install_Gate {
 	 * Temporarily allows file changes (and installs without approval).
 	 *
 	 * @param int $minutes Minutes (1 to 240).
-	 * @return int Unix time when the unlock ends.
+	 * @return int Unix time when the unlock ends (0 when DISALLOW_FILE_MODS leaves nothing to unlock).
 	 */
 	public function unlock( $minutes ) {
+		if ( self::mods_disallowed() ) {
+			return 0; // wp-config.php disables installs and updates: nothing to unlock.
+		}
 		$minutes = max( 1, min( 240, (int) $minutes ) );
 		$until   = time() + $minutes * MINUTE_IN_SECONDS;
 		update_option( self::UNLOCK_OPTION, $until, false );
@@ -686,14 +690,19 @@ class Install_Gate {
 	 * @return array
 	 */
 	private function package_info( $source, $type ) {
-		$info   = array(
+		$info  = array(
 			'name'      => '',
 			'version'   => '',
 			'author'    => '',
 			'uri'       => '',
 			'main_file' => '',
 		);
-		$source = trailingslashit( wp_normalize_path( $source ) );
+		$local = self::local_path( $source );
+		if ( '' === $local ) {
+			// FTP or SSH filesystem whose paths are not local paths: read through it.
+			return $this->package_info_remote( $source, $type, $info );
+		}
+		$source = trailingslashit( wp_normalize_path( $local ) );
 
 		if ( 'theme' === $type ) {
 			$candidates = array( $source . 'style.css' );
@@ -734,6 +743,126 @@ class Install_Gate {
 	}
 
 	/**
+	 * package_info() through $wp_filesystem, for FTP / SSH filesystems
+	 * (FS_METHOD ftpext, ftpsockets, ssh2) whose paths are not local.
+	 *
+	 * @param string $source Package folder (filesystem path).
+	 * @param string $type   plugin | theme.
+	 * @param array  $info   Empty info.
+	 * @return array
+	 */
+	private function package_info_remote( $source, $type, array $info ) {
+		global $wp_filesystem;
+		if ( ! is_object( $wp_filesystem ) || ! method_exists( $wp_filesystem, 'get_contents' ) ) {
+			return $info;
+		}
+		$source = trailingslashit( wp_normalize_path( $source ) );
+		if ( 'theme' === $type ) {
+			$candidates = array( $source . 'style.css' );
+			$headers    = array(
+				'name'    => 'Theme Name',
+				'version' => 'Version',
+				'author'  => 'Author',
+				'uri'     => 'Theme URI',
+			);
+		} else {
+			$candidates = array();
+			$list       = method_exists( $wp_filesystem, 'dirlist' ) ? $wp_filesystem->dirlist( $source, false, false ) : false;
+			foreach ( is_array( $list ) ? $list : array() as $name => $entry ) {
+				if ( isset( $entry['type'] ) && 'f' === $entry['type'] && '.php' === strtolower( substr( (string) $name, -4 ) ) ) {
+					$candidates[] = $source . $name;
+				}
+				if ( count( $candidates ) >= 50 ) {
+					break;
+				}
+			}
+			$headers = array(
+				'name'    => 'Plugin Name',
+				'version' => 'Version',
+				'author'  => 'Author',
+				'uri'     => 'Plugin URI',
+			);
+		}
+		foreach ( $candidates as $file ) {
+			$data = $wp_filesystem->get_contents( $file );
+			if ( ! is_string( $data ) || '' === $data ) {
+				continue;
+			}
+			// Same header parsing as get_file_data(): the first 8 KB.
+			$data = str_replace( "\r", "\n", substr( $data, 0, 8192 ) );
+			$found = array();
+			foreach ( $headers as $key => $label ) {
+				$found[ $key ] = preg_match( '/^(?:[ \t]*<\?php)?[ \t\/*#@]*' . preg_quote( $label, '/' ) . ':(.*)$/mi', $data, $m ) && $m[1] ? _cleanup_header_comment( $m[1] ) : '';
+			}
+			if ( '' === $found['name'] ) {
+				continue;
+			}
+			foreach ( array( 'name', 'version', 'author', 'uri' ) as $key ) {
+				$info[ $key ] = Upload_Gate::cut( sanitize_text_field( wp_strip_all_tags( (string) $found[ $key ] ) ), 200 );
+			}
+			$info['uri']       = esc_url_raw( $info['uri'] );
+			$info['main_file'] = basename( $file );
+			break;
+		}
+		return $info;
+	}
+
+	/**
+	 * Local path of a path WordPress's filesystem API handed over. With FTP
+	 * or SSH (FS_METHOD ftpext, ftpsockets, ssh2) the upgrader works with the
+	 * server's FTP paths ("/public_html/wp-content/upgrade/x/"), which PHP
+	 * cannot open; they map back through the folders both sides know.
+	 *
+	 * @param string $path Path from the upgrader.
+	 * @return string Local path, or '' when it cannot be mapped.
+	 */
+	public static function local_path( $path ) {
+		$path = wp_normalize_path( (string) $path );
+		if ( '' === $path ) {
+			return '';
+		}
+		if ( Storage::path_allowed( $path ) && @file_exists( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return $path;
+		}
+		global $wp_filesystem;
+		if ( ! is_object( $wp_filesystem ) ) {
+			return '';
+		}
+		$pairs = array();
+		if ( method_exists( $wp_filesystem, 'wp_content_dir' ) ) {
+			$pairs[] = array( (string) $wp_filesystem->wp_content_dir(), WP_CONTENT_DIR );
+		}
+		if ( method_exists( $wp_filesystem, 'wp_plugins_dir' ) ) {
+			$pairs[] = array( (string) $wp_filesystem->wp_plugins_dir(), WP_PLUGIN_DIR );
+		}
+		if ( method_exists( $wp_filesystem, 'abspath' ) ) {
+			$pairs[] = array( (string) $wp_filesystem->abspath(), ABSPATH );
+		}
+		foreach ( $pairs as $pair ) {
+			$remote = trailingslashit( wp_normalize_path( $pair[0] ) );
+			if ( '/' === $remote || 0 !== strpos( trailingslashit( $path ), $remote ) ) {
+				continue;
+			}
+			$local = trailingslashit( wp_normalize_path( $pair[1] ) ) . ltrim( substr( $path, strlen( $remote ) ), '/' );
+			$local = rtrim( $local, '/' ) . ( '/' === substr( $path, -1 ) ? '/' : '' );
+			if ( Storage::path_allowed( $local ) && @file_exists( $local ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				return $local;
+			}
+		}
+		return '';
+	}
+
+	/**
+	 * Whether wp-config.php switches off every install and update
+	 * (DISALLOW_FILE_MODS): the freeze lock then has nothing to unlock.
+	 *
+	 * @return bool
+	 */
+	public static function mods_disallowed() {
+		return defined( 'DISALLOW_FILE_MODS' ) && DISALLOW_FILE_MODS;
+	}
+
+	/**
 	 * Bounded malware check of an unpacked package, so the reviewer sees hits.
 	 *
 	 * @param string $dir Package folder.
@@ -741,6 +870,9 @@ class Install_Gate {
 	 */
 	private function scan_package( $dir ) {
 		$scanner = wpcybersec()->scanner;
+		if ( '' === (string) $dir ) {
+			return array( array(), true ); // Not reachable as a local folder: not checked, shown as partial.
+		}
 		if ( ! $scanner || ! method_exists( $scanner, 'scan_file' ) || ! is_dir( $dir ) ) {
 			return array( array(), false );
 		}
@@ -810,19 +942,21 @@ class Install_Gate {
 	 * @param string $remote_source Working folder.
 	 */
 	private function discard_working_dir( $remote_source ) {
-		$remote_source = untrailingslashit( wp_normalize_path( (string) $remote_source ) );
-		$upgrade_dir   = wp_normalize_path( WP_CONTENT_DIR . '/upgrade' );
-		if ( '' === $remote_source || ! is_dir( $remote_source ) || ! is_dir( $upgrade_dir ) ) {
+		$fs_path     = untrailingslashit( wp_normalize_path( (string) $remote_source ) );
+		$local       = untrailingslashit( self::local_path( $fs_path ) );
+		$upgrade_dir = wp_normalize_path( WP_CONTENT_DIR . '/upgrade' );
+		if ( '' === $fs_path || '' === $local || ! is_dir( $local ) || ! is_dir( $upgrade_dir ) ) {
 			return;
 		}
-		$real_source  = realpath( $remote_source );
+		$real_source  = realpath( $local );
 		$real_upgrade = realpath( $upgrade_dir );
-		if ( ! $real_source || ! $real_upgrade || wp_normalize_path( $real_source ) === wp_normalize_path( $real_upgrade ) || ! Storage::is_within( $remote_source, $upgrade_dir ) ) {
+		if ( ! $real_source || ! $real_upgrade || wp_normalize_path( $real_source ) === wp_normalize_path( $real_upgrade ) || ! Storage::is_within( $local, $upgrade_dir ) ) {
 			return;
 		}
+		// Deleted through the filesystem API with the path it knows (FTP paths on FTP filesystems).
 		global $wp_filesystem;
 		if ( is_object( $wp_filesystem ) && method_exists( $wp_filesystem, 'delete' ) ) {
-			$wp_filesystem->delete( $remote_source, true );
+			$wp_filesystem->delete( $fs_path, true );
 		}
 	}
 

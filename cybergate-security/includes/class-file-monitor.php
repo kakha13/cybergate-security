@@ -23,6 +23,7 @@ class File_Monitor {
 	const SCHEDULED_HOOK = 'wpcybersec_scheduled_scan';
 	const TICK_HOOK      = 'wpcybersec_scan_tick';
 	const TICK_DELAY     = 60;
+	/** Seconds per cron tick; Scan_Job::tick() also keeps it under half of what max_execution_time leaves. */
 	const CRON_BUDGET    = 20.0;
 
 	/** Rebaseline no more than this many files synchronously (e.g. a plugin folder). */
@@ -32,29 +33,19 @@ class File_Monitor {
 	 * Hooks.
 	 */
 	public function register() {
-		add_filter( 'cron_schedules', array( $this, 'cron_schedules' ) );
 		add_action( self::SCHEDULED_HOOK, array( $this, 'run_scheduled_scan' ) );
 		add_action( self::TICK_HOOK, array( $this, 'run_tick' ) );
 		add_action( 'wpcybersec_settings_updated', array( $this, 'maybe_reschedule' ), 10, 2 );
 		add_action( 'wpcybersec_settings_updated', array( $this, 'maybe_reset_baseline' ), 10, 2 );
 
-		$this->ensure_schedule();
-	}
-
-	/**
-	 * Adds a weekly interval (WordPress ships hourly, twicedaily, daily).
-	 *
-	 * @param array $schedules Existing schedules.
-	 * @return array
-	 */
-	public function cron_schedules( $schedules ) {
-		if ( ! isset( $schedules['weekly'] ) ) {
-			$schedules['weekly'] = array(
-				'interval' => WEEK_IN_SECONDS,
-				'display'  => __( 'Once Weekly', 'cybergate-security' ),
-			);
+		// Scheduling runs the cron_schedules filter, where other plugins call
+		// __(): before init that loads translations too early (notice since
+		// WordPress 6.7). The 'weekly' interval ships with core (5.4+).
+		if ( did_action( 'init' ) ) {
+			$this->ensure_schedule();
+		} else {
+			add_action( 'init', array( $this, 'ensure_schedule' ), 20 );
 		}
-		return $schedules;
 	}
 
 	/**
@@ -268,8 +259,9 @@ class File_Monitor {
 			if ( ! @is_dir( $dir ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 				continue;
 			}
-			// Only rebaseline folders inside the scan root.
-			if ( 0 !== strpos( trailingslashit( $dir ), $root ) ) {
+			// Only rebaseline folders the scan covers (the scan root, or a
+			// WordPress folder outside it such as Bedrock's web/app/plugins).
+			if ( 0 !== strpos( trailingslashit( $dir ), $root ) && ! Paths::in_full_scope( $dir ) ) {
 				continue;
 			}
 
@@ -434,8 +426,11 @@ class File_Monitor {
 	/* ------------------------------------------------------------------ */
 
 	/**
-	 * Lists files under a folder (no symlinked dirs, excluded paths skipped),
-	 * stopping once $limit files are collected.
+	 * Lists files under a folder, stopping once $limit files are collected.
+	 * Excluded paths are skipped. Symlinked folders are never walked through
+	 * the link (as in Scan_Job): a target inside the scan set is covered at its
+	 * real path, so it is not listed here twice. Folders that are their own
+	 * entry of the scan set (walked separately) are skipped too.
 	 *
 	 * @param string $dir   Absolute folder.
 	 * @param int    $limit Cap.
@@ -444,6 +439,12 @@ class File_Monitor {
 	private function collect_files( $dir, $limit ) {
 		$files = array();
 		$stack = array( rtrim( $dir, '/' ) );
+		$own   = array();
+		foreach ( Paths::scan_set() as $entry ) {
+			if ( 'all' === $entry['depth'] ) {
+				$own[ $entry['path'] ] = true;
+			}
+		}
 		while ( $stack && count( $files ) < $limit ) {
 			$current = array_pop( $stack );
 			$dh      = @opendir( $current ); // phpcs:ignore
@@ -460,7 +461,7 @@ class File_Monitor {
 				}
 				$rel = Paths::rel( $abs );
 				if ( @is_dir( $abs ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-					if ( ! Paths::is_excluded( $rel . '/' ) ) {
+					if ( ! isset( $own[ trailingslashit( wp_normalize_path( $abs ) ) ] ) && ! Paths::is_excluded( $rel . '/' ) ) {
 						$stack[] = $abs;
 					}
 					continue;

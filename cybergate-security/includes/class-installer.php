@@ -130,7 +130,13 @@ class Installer {
 			add_option( 'wpcybersec_installed_at', time(), '', false );
 		}
 
-		( new Storage() )->ensure();
+		// Where the data can live (a fallback inside uploads when wp-content is
+		// read-only); remembered so the admin notice can explain a problem.
+		$storage = new Storage();
+		$status  = $storage->check();
+		if ( 'unavailable' !== $status['state'] ) {
+			$storage->ensure();
+		}
 
 		// Administrators present now are trusted; later ones wait for review.
 		User_Watch::seed();

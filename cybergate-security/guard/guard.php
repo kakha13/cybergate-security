@@ -33,7 +33,8 @@
  *   enabled, action (block|strip), quarantine_dir, spool_file, allow_file,
  *   exempt (list), max_bytes, max_spool_bytes, max_quarantine_files,
  *   max_quarantine_bytes, min_free_bytes, exec_extensions, exec_filenames,
- *   home_path, login_cookie, message, message_refused, root (WordPress folder).
+ *   home_path, login_cookie, message, message_refused, root (WordPress folder),
+ *   front_root (folder of the front controller index.php when it is not root).
  *
  * @package WPCyberSecurity
  */
@@ -204,6 +205,8 @@ if ( ! defined( 'WPCYBERSEC_GUARD_ACTIVE' ) ) {
 					'message'              => isset( $config['message'] ) && '' !== (string) $config['message'] ? (string) $config['message'] : $message,
 					'message_refused'      => isset( $config['message_refused'] ) && '' !== (string) $config['message_refused'] ? (string) $config['message_refused'] : 'This upload was refused because it could not be checked (CyberGate Security). Please contact the site administrator.',
 					'root'                 => isset( $config['root'] ) && '' !== (string) $config['root'] ? rtrim( str_replace( '\\', '/', (string) $config['root'] ), '/' ) . '/' : '',
+					// Front controller folder when WordPress lives in a sub folder (or Bedrock's web/).
+					'front_root'           => isset( $config['front_root'] ) && '' !== (string) $config['front_root'] ? rtrim( str_replace( '\\', '/', (string) $config['front_root'] ), '/' ) . '/' : '',
 				);
 			}
 
@@ -332,8 +335,13 @@ if ( ! defined( 'WPCYBERSEC_GUARD_ACTIVE' ) ) {
 				$path = false === $qpos ? $uri : substr( $uri, 0, $qpos );
 				$path = (string) preg_replace( '#/+#', '/', str_replace( '\\', '/', rawurldecode( $path ) ) );
 
-				$script        = self::script_file();
-				$is_root_index = '' !== $script && '' !== $config['root'] && $script === $config['root'] . 'index.php';
+				$script = self::script_file();
+				// WordPress's front controller: index.php in the WordPress folder, or the
+				// index.php that loads it from the site root (WordPress in a sub folder, Bedrock).
+				$is_root_index = '' !== $script && (
+					( '' !== $config['root'] && $script === $config['root'] . 'index.php' )
+					|| ( '' !== $config['front_root'] && $script === $config['front_root'] . 'index.php' )
+				);
 
 				$login = null;
 				foreach ( $config['exempt'] as $pattern ) {

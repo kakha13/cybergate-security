@@ -21,6 +21,9 @@ class Scanner {
 	const PLUGIN_TRANSIENT  = 'wpcybersec_plugin_sums_';
 	const OFFLINE_TRANSIENT = 'wpcybersec_sums_offline';
 
+	/** Key in the cached core checksum map that remembers the locale it was downloaded for (never a file path). */
+	const LOCALE_KEY = '?locale';
+
 	const CACHE_TTL      = 12 * HOUR_IN_SECONDS;
 	const MISS_TTL       = 6 * HOUR_IN_SECONDS;
 	const NETWORK_ERR_TTL = HOUR_IN_SECONDS;
@@ -52,6 +55,12 @@ class Scanner {
 	/** @var string[]|null Plugin folder roots (as given and resolved), with trailing slash. */
 	private $self_roots = null;
 
+	/** @var string Locale of the loaded core checksum map ('' before loading). */
+	private $core_locale = '';
+
+	/** @var bool The last scan_file() read less than max_file_mb because memory was short. */
+	private $memory_limited = false;
+
 	/** Lowercase names in wp-admin/ and wp-includes/ that hosts and tools leave behind (never code). */
 	const CORE_JUNK = array( 'error_log', 'php_errorlog', 'php_error.log', '.ds_store', 'thumbs.db', 'desktop.ini' );
 
@@ -70,6 +79,7 @@ class Scanner {
 	 */
 	public function reset_caches() {
 		$this->core_map        = null;
+		$this->core_locale     = '';
 		$this->plugin_versions = null;
 		$this->plugin_names    = array();
 		$this->plugin_maps     = array();
@@ -105,8 +115,22 @@ class Scanner {
 		if ( '' === $rel ) {
 			$rel = Paths::rel( $abs );
 		}
-		$min  = $this->min_severity();
-		$hits = Signatures::inspect_file( $abs, $rel, $min, $this->max_bytes() );
+		$min                  = $this->min_severity();
+		$cap                  = $this->read_cap();
+		$this->memory_limited = false;
+		if ( $cap < $this->max_bytes() ) {
+			$size                 = @filesize( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$this->memory_limited = false !== $size && $size > $cap && $size <= $this->max_bytes() && Signatures::KIND_BINARY !== Signatures::kind_for( $abs ) && Signatures::KIND_IMAGE !== Signatures::kind_for( $abs );
+		}
+		// Path rules and skip_path are written for the usual layout
+		// ("wp-content/uploads/..."): a file outside the scan root is matched by
+		// its name relative to the WordPress folder (Bedrock's app/uploads).
+		$rule_rel = $rel;
+		if ( Paths::is_absolute( $rel ) ) {
+			$alias    = Paths::alias( $abs );
+			$rule_rel = '' !== $alias ? $alias : $rel;
+		}
+		$hits = Signatures::inspect_file( $abs, $rule_rel, $min, $cap );
 
 		// Custom upload folders (UPLOADS constant) are not under wp-content/uploads.
 		if ( $this->in_custom_uploads( $abs ) && $this->is_php_name( $abs ) && 1 >= $min && ! $this->has_sig( $hits, 'path_php_in_uploads' ) && ! $this->is_harmless_stub( $abs ) ) {
@@ -329,7 +353,12 @@ class Scanner {
 			'source'  => '',
 			'reason'  => '',
 		);
-		$rel = ltrim( wp_normalize_path( (string) $rel ), '/' );
+		$rel = wp_normalize_path( (string) $rel );
+		// Files outside the scan root are keyed by their absolute path (Paths::rel()):
+		// keep it. Any other leading slash is dropped as before.
+		if ( '/' === substr( $rel, 0, 1 ) && ! Paths::in_scope( $rel ) ) {
+			$rel = ltrim( $rel, '/' );
+		}
 		$abs = Paths::abs( $rel );
 
 		$self_rel = $this->self_relative( $abs );
@@ -350,6 +379,13 @@ class Scanner {
 						$md5 = (string) @md5_file( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 					}
 					if ( '' !== $md5 && ( hash_equals( strtolower( (string) $map[ $core_rel ] ), strtolower( $md5 ) ) || in_array( strtolower( (string) $map[ $core_rel ] ), $this->line_ending_hashes( $abs, 'md5' ), true ) ) ) {
+						return array(
+							'verdict' => 'match',
+							'source'  => 'core',
+							'reason'  => '',
+						);
+					}
+					if ( 'wp-includes/version.php' === $core_rel && $this->core_locale !== $this->package_locale() && $this->version_file_matches( $abs, (string) $map[ $core_rel ] ) ) {
 						return array(
 							'verdict' => 'match',
 							'source'  => 'core',
@@ -717,6 +753,7 @@ class Scanner {
 		$allowed_chars  = array( '(', ')', '{', '}', ';', ',', '.', '!', ':' );
 		$includes       = 0;
 		$in_include     = false;
+		$from_dir       = false;
 		$target         = '';
 		foreach ( $tokens as $token ) {
 			if ( is_string( $token ) ) {
@@ -724,7 +761,7 @@ class Scanner {
 					return false;
 				}
 				if ( $in_include && ';' === $token ) {
-					if ( ! preg_match( '~/wp-content/plugins/wordfence/waf/bootstrap\.php$~', $target ) ) {
+					if ( ! $this->is_wordfence_bootstrap( $target, $from_dir, $abs ) ) {
 						return false;
 					}
 					$in_include = false;
@@ -744,7 +781,10 @@ class Scanner {
 				}
 				$in_include = true;
 				$target     = '';
+				$from_dir   = false;
 				++$includes;
+			} elseif ( $in_include && T_DIR === $id ) {
+				$from_dir = true;
 			} elseif ( $in_include && T_CONSTANT_ENCAPSED_STRING === $id ) {
 				$target .= wp_normalize_path( substr( $text, 1, -1 ) );
 			} elseif ( $in_include && T_STRING === $id ) {
@@ -752,6 +792,48 @@ class Scanner {
 			}
 		}
 		return $includes > 0 && ! $in_include;
+	}
+
+	/**
+	 * Whether a path included by wordfence-waf.php is Wordfence's firewall
+	 * bootstrap: WP_PLUGIN_DIR/wordfence/waf/bootstrap.php (as configured or
+	 * resolved, so Bedrock's web/app/plugins works), or the classic
+	 * .../wp-content/plugins/wordfence/waf/bootstrap.php path the loader keeps
+	 * after a site moved.
+	 *
+	 * @param string $target   Literal path parts of the include.
+	 * @param bool   $from_dir The include starts with __DIR__.
+	 * @param string $abs      Loader file.
+	 * @return bool
+	 */
+	private function is_wordfence_bootstrap( $target, $from_dir, $abs ) {
+		$target = wp_normalize_path( (string) $target );
+		if ( '/wordfence/waf/bootstrap.php' !== substr( $target, -28 ) ) {
+			return false;
+		}
+		if ( preg_match( '~/wp-content/plugins/wordfence/waf/bootstrap\.php$~', $target ) ) {
+			return true;
+		}
+		$path = $from_dir ? wp_normalize_path( dirname( $abs ) ) . '/' . ltrim( $target, '/' ) : $target;
+		// Resolve "." and ".." segments without touching the disk.
+		$parts = array();
+		foreach ( explode( '/', $path ) as $i => $part ) {
+			if ( '..' === $part ) {
+				array_pop( $parts );
+			} elseif ( '.' !== $part && ( '' !== $part || 0 === $i ) ) {
+				$parts[] = $part;
+			}
+		}
+		$path       = implode( '/', $parts );
+		$candidates = array();
+		foreach ( $this->plugin_roots() as $root ) {
+			$candidates[] = $root . 'wordfence/waf/bootstrap.php';
+		}
+		if ( in_array( $path, $candidates, true ) ) {
+			return true;
+		}
+		$real = realpath( $path );
+		return $real && in_array( wp_normalize_path( $real ), $candidates, true );
 	}
 
 	/**
@@ -922,15 +1004,17 @@ class Scanner {
 		$this->core_map = false;
 
 		$version = $this->wp_version();
-		$locale  = function_exists( 'get_locale' ) ? (string) get_locale() : 'en_US';
+		$locale  = $this->package_locale();
 		if ( '' === $version ) {
 			return false;
 		}
 		$key    = self::CORE_TRANSIENT . md5( $version . '|' . $locale );
 		$cached = get_site_transient( $key );
 		if ( is_array( $cached ) && $cached ) {
-			$this->core_map = $cached;
-			return $cached;
+			$this->core_map    = $cached;
+			$this->core_locale = isset( $cached[ self::LOCALE_KEY ] ) ? (string) $cached[ self::LOCALE_KEY ] : $locale;
+			unset( $this->core_map[ self::LOCALE_KEY ] );
+			return $this->core_map;
 		}
 		if ( 'none' === $cached || $this->offline() ) {
 			return false;
@@ -942,8 +1026,10 @@ class Scanner {
 		if ( ! function_exists( 'get_core_checksums' ) ) {
 			return false;
 		}
+		$used = $locale;
 		$sums = get_core_checksums( $version, $locale );
 		if ( ( ! is_array( $sums ) || ! $sums ) && 'en_US' !== $locale ) {
+			$used = 'en_US';
 			$sums = get_core_checksums( $version, 'en_US' );
 		}
 		if ( is_array( $sums ) && $sums ) {
@@ -954,8 +1040,9 @@ class Scanner {
 				}
 			}
 			if ( $clean ) {
-				set_site_transient( $key, $clean, self::CACHE_TTL );
-				$this->core_map = $clean;
+				set_site_transient( $key, array_merge( $clean, array( self::LOCALE_KEY => $used ) ), self::CACHE_TTL );
+				$this->core_map    = $clean;
+				$this->core_locale = $used;
 				return $clean;
 			}
 		}
@@ -1011,10 +1098,13 @@ class Scanner {
 	 */
 	private function fetch_plugin_map( $slug, $version, $key ) {
 		$url      = 'https://downloads.wordpress.org/plugin-checksums/' . rawurlencode( $slug ) . '/' . rawurlencode( $version ) . '.json';
+		// Never let one download outlast what is left of max_execution_time.
+		$left    = Scan_Job::exec_seconds_left();
+		$timeout = null === $left ? 10 : (int) max( 2, min( 10, floor( ( $left - 5 ) / 2 ) ) );
 		$response = wp_remote_get(
 			$url,
 			array(
-				'timeout'     => 10,
+				'timeout'     => $timeout,
 				'redirection' => 2,
 			)
 		);
@@ -1153,6 +1243,47 @@ class Scanner {
 			return $m[1];
 		}
 		return isset( $GLOBALS['wp_version'] ) ? (string) $GLOBALS['wp_version'] : '';
+	}
+
+	/**
+	 * Locale of the installed WordPress package: $wp_local_package in
+	 * version.php (written by localized downloads and updates), en_US when it
+	 * is not set. This is what the core files were built for, unlike
+	 * get_locale() (the site language, which can be switched without changing
+	 * a single core file). WP-CLI's core verify-checksums does the same.
+	 *
+	 * @return string
+	 */
+	public function package_locale() {
+		$file = ABSPATH . ( defined( 'WPINC' ) ? WPINC : 'wp-includes' ) . '/version.php';
+		$code = @file_get_contents( $file, false, null, 0, 16384 ); // phpcs:ignore
+		if ( $code && preg_match( '~^\s*\$wp_local_package\s*=\s*[\x27"]([A-Za-z]{2,3}(?:_[A-Za-z0-9]{2,8}){0,2})[\x27"]\s*;~m', $code, $m ) ) {
+			return $m[1];
+		}
+		return 'en_US';
+	}
+
+	/**
+	 * wp-includes/version.php of a localized package is the en_US file plus a
+	 * "$wp_local_package = 'xx_XX';" line at the end. When the checksums of
+	 * another locale had to be used (the localized list was not available),
+	 * the file is compared without that line.
+	 *
+	 * @param string $abs      File.
+	 * @param string $expected md5 from the checksum map.
+	 * @return bool
+	 */
+	private function version_file_matches( $abs, $expected ) {
+		$size = @filesize( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( false === $size || $size > 65536 ) {
+			return false;
+		}
+		$code     = (string) @file_get_contents( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$stripped = preg_replace( '~(?:\r?\n)*\$wp_local_package\s*=\s*[\x27"][A-Za-z0-9_@-]{2,20}[\x27"]\s*;[ \t]*(\r?\n)?$~', '$1', $code, 1, $count );
+		if ( ! $count || ! is_string( $stripped ) ) {
+			return false;
+		}
+		return hash_equals( strtolower( (string) $expected ), md5( $stripped ) );
 	}
 
 	/**
@@ -1492,6 +1623,57 @@ class Scanner {
 	}
 
 	/**
+	 * How much of a file scan_file() may read now: max_file_mb, lowered when
+	 * the memory left under memory_limit could not hold it. A file is held
+	 * about four times while it is matched (the content, a lowercase copy and
+	 * the match buffers), and some room is kept for WordPress itself. When the
+	 * room is short the limit is raised first (wp_raise_memory_limit(), only
+	 * where the host allows ini_set).
+	 *
+	 * @return int Bytes (at least 64 KB).
+	 */
+	public function read_cap() {
+		$max  = $this->max_bytes();
+		$room = self::memory_room();
+		if ( null === $room ) {
+			return $max;
+		}
+		if ( $room < 4 * $max + 8 * MB_IN_BYTES && function_exists( 'wp_raise_memory_limit' ) ) {
+			wp_raise_memory_limit( 'admin' );
+			$room = self::memory_room();
+			if ( null === $room ) {
+				return $max;
+			}
+		}
+		$cap = (int) floor( ( $room - 8 * MB_IN_BYTES ) / 4 );
+		return max( 65536, min( $max, $cap ) );
+	}
+
+	/**
+	 * Bytes left under memory_limit, null when there is no limit.
+	 *
+	 * @return int|null
+	 */
+	public static function memory_room() {
+		$limit = (string) ini_get( 'memory_limit' );
+		$bytes = function_exists( 'wp_convert_hr_to_bytes' ) ? (int) wp_convert_hr_to_bytes( $limit ) : (int) $limit;
+		if ( $bytes <= 0 ) {
+			return null;
+		}
+		return $bytes - memory_get_usage();
+	}
+
+	/**
+	 * Whether the last scan_file() skipped the content of a file that
+	 * max_file_mb allows, because the memory left was too small.
+	 *
+	 * @return bool
+	 */
+	public function memory_limited() {
+		return $this->memory_limited;
+	}
+
+	/**
 	 * @param array[] $hits Hits.
 	 * @param string  $sig  Signature id.
 	 * @return bool
@@ -1530,8 +1712,14 @@ class Scanner {
 					$base = trailingslashit( wp_normalize_path( $dirs['basedir'] ) );
 				}
 			}
-			if ( false !== strpos( $base, '/wp-content/uploads/' ) ) {
+			// The scan lists files by their real path (uploads -> ../files on
+			// Pantheon, shared/uploads on Capistrano deployments).
+			$real = '' !== $base ? realpath( $base ) : false;
+			$real = $real ? trailingslashit( wp_normalize_path( $real ) ) : $base;
+			if ( false !== strpos( $base, '/wp-content/uploads/' ) && false !== strpos( $real, '/wp-content/uploads/' ) ) {
 				$base = ''; // Covered by the path rule.
+			} else {
+				$base = $real;
 			}
 		}
 		return '' !== $base && 0 === strpos( $abs, $base );

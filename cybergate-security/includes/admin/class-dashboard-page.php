@@ -767,7 +767,7 @@ class Dashboard_Page {
 			$this->prow( 'sos', $title, implode( ' ', $parts ), $badge, 'ok' );
 			return;
 		}
-		$this->prow( 'sos', $title, implode( ' ', $parts ) . ' ' . __( 'Optional: they know many more existing infections, but do not block attacks.', 'cybergate-security' ), 'blocked' === $clam['state'] ? __( 'Cannot run', 'cybergate-security' ) : __( 'Not installed', 'cybergate-security' ), 'muted', $link );
+		$this->prow( 'sos', $title, implode( ' ', $parts ) . ' ' . __( 'Optional: they know many more existing infections, but do not block attacks.', 'cybergate-security' ), 'blocked' === $clam['state'] ? __( 'Cannot run', 'cybergate-security' ) : ( ! empty( $clam['hidden'] ) ? __( 'Unknown', 'cybergate-security' ) : __( 'Not installed', 'cybergate-security' ) ), 'muted', $link );
 	}
 
 	/**
@@ -799,6 +799,11 @@ class Dashboard_Page {
 		if ( ! $this->opt( 'freeze_mods', false ) ) {
 			$link = '<a href="' . esc_url( Admin::page_url( Admin::PAGE_SETTINGS, array( 'tab' => 'advanced', 'section' => 'freeze' ) ) . '#wpcs-freeze' ) . '">' . esc_html__( 'Set up', 'cybergate-security' ) . '</a>';
 			$this->prow( 'lock', $title, __( 'Optional. Blocks every plugin, theme and core file change until you unlock it for a few minutes.', 'cybergate-security' ), __( 'Off', 'cybergate-security' ), 'muted', $link );
+			return;
+		}
+		if ( \WPCyberSecurity\Install_Gate::mods_disallowed() ) {
+			// DISALLOW_FILE_MODS: WordPress itself refuses every change, so there is nothing to unlock.
+			$this->prow( 'lock', $title, __( 'Installs and updates are disabled by the site config (DISALLOW_FILE_MODS in wp-config.php), so the freeze lock cannot be unlocked here. Remove that line to update from the dashboard.', 'cybergate-security' ), __( 'Disabled by site config', 'cybergate-security' ), 'ok' );
 			return;
 		}
 		$until   = (int) Admin::call( 'install_gate', 'unlocked_until', array(), 0 );

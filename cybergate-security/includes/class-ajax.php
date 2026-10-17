@@ -248,6 +248,10 @@ class Ajax {
 
 	public function unlock() {
 		$this->guard();
+		if ( Install_Gate::mods_disallowed() ) {
+			// DISALLOW_FILE_MODS in wp-config.php blocks installs and updates whatever the lock says.
+			wp_send_json_error( array( 'message' => __( 'File changes cannot be unlocked: wp-config.php sets DISALLOW_FILE_MODS, so WordPress allows no plugin, theme or core installs and updates. Remove that line to install or update.', 'cybergate-security' ) ) );
+		}
 		$minutes = (int) $this->param( 'minutes', (string) wpcybersec()->settings->get( 'unlock_minutes', 15 ) );
 		wpcybersec()->install_gate->unlock( $minutes );
 		wp_send_json_success( array( 'unlocked_until' => wpcybersec()->install_gate->unlocked_until() ) );

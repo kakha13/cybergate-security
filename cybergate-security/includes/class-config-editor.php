@@ -13,7 +13,9 @@ defined( 'ABSPATH' ) || exit;
  * Adds, changes or removes define( 'NAME', value ); lines in wp-config.php.
  *
  * Every write is checked before it lands: the new file must parse as PHP
- * (token_get_all with TOKEN_PARSE), the changed define must be the active one,
+ * (token_get_all with TOKEN_PARSE; without the tokenizer nothing is written),
+ * the changed define must be the active one, a constant already set by a file
+ * that wp-config.php loads is never defined a second time,
  * it is written through a temp file + rename next to the real file (a
  * symlinked wp-config.php stays a symlink), and it keeps the original
  * permissions. A backup of the previous version is kept in the plugin's data
@@ -72,6 +74,25 @@ class Config_Editor {
 	}
 
 	/**
+	 * Whether this PHP can check an edited wp-config.php for syntax errors
+	 * (tokenizer extension with TOKEN_PARSE). Without it nothing is edited.
+	 *
+	 * @return bool
+	 */
+	public static function can_check() {
+		return function_exists( 'token_get_all' ) && defined( 'TOKEN_PARSE' );
+	}
+
+	/**
+	 * Whether a one-click edit of wp-config.php can work here: writable and checkable.
+	 *
+	 * @return bool
+	 */
+	public static function can_edit() {
+		return self::can_check() && self::is_writable();
+	}
+
+	/**
 	 * Whether wp-config.php contains an active define for $name (lines in
 	 * comments are ignored).
 	 *
@@ -101,13 +122,39 @@ class Config_Editor {
 		if ( ! $path ) {
 			return new \WP_Error( 'wpcybersec_config_missing', __( 'wp-config.php was not found.', 'cybergate-security' ) );
 		}
+		$define = 'define( ' . var_export( $name, true ) . ', ' . var_export( $value, true ) . ' );'; // phpcs:ignore WordPress.PHP.DevelopmentFunctions
+		if ( ! self::can_check() ) {
+			return new \WP_Error(
+				'wpcybersec_config_tokenizer',
+				/* translators: %s: PHP line */
+				sprintf( __( 'PHP\'s tokenizer extension is missing on this server, so the edited wp-config.php could not be checked for errors and nothing was changed. Add this line to wp-config.php by hand, above "That\'s all, stop editing!": %s', 'cybergate-security' ), $define )
+			);
+		}
 		if ( ! self::is_writable() ) {
 			return new \WP_Error( 'wpcybersec_config_readonly', __( 'wp-config.php is read-only for WordPress, so the line has to be added by hand.', 'cybergate-security' ) );
 		}
 
-		$code   = (string) file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions
-		$define = 'define( ' . var_export( $name, true ) . ', ' . var_export( $value, true ) . ' );'; // phpcs:ignore WordPress.PHP.DevelopmentFunctions
-		$spans  = self::define_spans( $code, $name );
+		$code  = (string) file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$spans = self::define_spans( $code, $name );
+
+		// Defined, but not in wp-config.php itself: a file it loads sets it
+		// (Bedrock config/*.php, wp-config-local.php). A second define here
+		// would only cause a warning, so say where to change it instead.
+		if ( ! $spans && defined( $name ) ) {
+			$current = constant( $name );
+			if ( $current === $value || ( is_bool( $value ) && is_scalar( $current ) && (bool) $current === $value ) ) {
+				return true;
+			}
+			return new \WP_Error(
+				'wpcybersec_config_elsewhere',
+				sprintf(
+					/* translators: 1: constant name, 2: PHP line */
+					__( '%1$s is already set in another file that wp-config.php loads (for example config/application.php on Bedrock, or a wp-config-local.php), so nothing was changed. Change it in that file to: %2$s', 'cybergate-security' ),
+					$name,
+					$define
+				)
+			);
+		}
 
 		if ( $spans ) {
 			$new = substr( $code, 0, $spans[0][0] ) . $define . substr( $code, $spans[0][1] );
@@ -141,6 +188,9 @@ class Config_Editor {
 	 */
 	public static function remove_constant( $name ) {
 		$path = self::path();
+		if ( ! self::can_check() ) {
+			return new \WP_Error( 'wpcybersec_config_tokenizer', __( 'PHP\'s tokenizer extension is missing on this server, so the edited wp-config.php could not be checked for errors and nothing was changed. Remove the line from wp-config.php by hand.', 'cybergate-security' ) );
+		}
 		if ( ! $path || ! self::is_writable() ) {
 			return new \WP_Error( 'wpcybersec_config_readonly', __( 'wp-config.php is read-only for WordPress.', 'cybergate-security' ) );
 		}
@@ -506,8 +556,8 @@ class Config_Editor {
 	 * @return bool
 	 */
 	public static function parses( $code ) {
-		if ( ! defined( 'TOKEN_PARSE' ) ) {
-			return true; // Tokenizer without TOKEN_PARSE (very old PHP): the regex edits are line-local.
+		if ( ! self::can_check() ) {
+			return false; // Nothing can prove the file still works, so never write it unchecked.
 		}
 		try {
 			token_get_all( $code, TOKEN_PARSE );

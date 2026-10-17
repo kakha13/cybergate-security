@@ -48,6 +48,12 @@ class Upload_Gate {
 	/** @var string[] Routes of the REST requests being dispatched right now (nested requests stack). */
 	private $rest_routes = array();
 
+	/** @var int[] Number of held uploads when each REST request in $rest_routes started. */
+	private $rest_held = array();
+
+	/** @var string[] Messages of the uploads held in this PHP request. */
+	private $held_messages = array();
+
 	/**
 	 * Nothing heavy here; see register().
 	 */
@@ -75,6 +81,7 @@ class Upload_Gate {
 	 */
 	public function rest_before( $response, $handler = null, $request = null ) {
 		$this->rest_routes[] = is_object( $request ) && method_exists( $request, 'get_route' ) ? (string) $request->get_route() : '';
+		$this->rest_held[]   = count( $this->held_messages );
 		return $response;
 	}
 
@@ -88,6 +95,20 @@ class Upload_Gate {
 	 */
 	public function rest_after( $response, $handler = null, $request = null ) {
 		array_pop( $this->rest_routes );
+		$before = (int) array_pop( $this->rest_held );
+		// The gate held an upload of this REST request: WordPress would answer
+		// 500 rest_upload_sideload_error. Say what happened instead.
+		if ( count( $this->held_messages ) > $before && is_wp_error( $response ) ) {
+			$message = (string) end( $this->held_messages );
+			return new \WP_Error(
+				'wpcybersec_upload_held',
+				$message,
+				array(
+					'status' => 403,
+					'held'   => true,
+				)
+			);
+		}
 		return $response;
 	}
 
@@ -216,6 +237,24 @@ class Upload_Gate {
 	}
 
 	/**
+	 * Logs (at most once an hour) that uploads pass unheld because the data
+	 * folder cannot be written.
+	 *
+	 * @param string $name Upload name.
+	 */
+	private function note_storage_bypass( $name ) {
+		if ( get_transient( 'wpcybersec_storage_bypass' ) ) {
+			return;
+		}
+		set_transient( 'wpcybersec_storage_bypass', 1, HOUR_IN_SECONDS );
+		$this->log(
+			'upload_not_held',
+			/* translators: %s: file name */
+			sprintf( __( 'Upload %s was not held because the plugin has no writable data folder. Until that is fixed, only uploads that look malicious are blocked.', 'cybergate-security' ), self::cut( sanitize_file_name( $name ), 200 ) )
+		);
+	}
+
+	/**
 	 * @param string $name File name (used for the temp name only).
 	 * @return string Empty temp file, or '' on failure.
 	 */
@@ -301,6 +340,13 @@ class Upload_Gate {
 		$malicious = $severity >= Store::SEV_HIGH;
 		$reasons   = array();
 
+		// No writable data folder: work like scan_only, so a failure of the
+		// plugin's own storage never blocks the site's uploads.
+		if ( ! $malicious && ! $plugin->storage->available() ) {
+			$this->note_storage_bypass( $name );
+			return $file;
+		}
+
 		if ( $malicious ) {
 			$reasons[] = 'malware';
 		} else {
@@ -382,6 +428,7 @@ class Upload_Gate {
 				)
 			);
 			$file['error'] = $this->hold_message( $safe_name, $context['context'], $malicious );
+		$this->held_messages[] = $file['error'];
 			return $file;
 		}
 
@@ -389,15 +436,25 @@ class Upload_Gate {
 		if ( is_wp_error( $held ) ) {
 			$this->log(
 				'upload_hold_failed',
-				/* translators: 1: file name, 2: error message */
-				sprintf( __( 'Could not hold upload %1$s: %2$s', 'cybergate-security' ), $safe_name, $held->get_error_message() ),
+				$malicious
+					/* translators: 1: file name, 2: error message */
+					? sprintf( __( 'Could not keep a copy of upload %1$s: %2$s It looks malicious, so it was refused without a copy.', 'cybergate-security' ), $safe_name, $held->get_error_message() )
+					/* translators: 1: file name, 2: error message */
+					: sprintf( __( 'Could not hold upload %1$s: %2$s It was let through, because a storage problem of this plugin must not block uploads.', 'cybergate-security' ), $safe_name, $held->get_error_message() ),
 				array(
 					'sha256' => $sha256,
 					'source' => $context['source'],
 				)
 			);
-			$file['error'] = __( 'This upload could not be stored for review (CyberGate Security). Please ask the site administrator to check the plugin settings.', 'cybergate-security' );
-			return $file;
+			if ( ! $malicious ) {
+				return $file; // Scan-only behaviour while the data folder cannot be written.
+			}
+			// Refused without a copy; the item still lets an administrator allow the hash.
+			$held = array(
+				'quarantine_path' => '',
+				'size'            => (int) @filesize( $tmp ), // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				'not_held'        => true,
+			);
 		}
 
 		$details = array(
@@ -409,6 +466,9 @@ class Upload_Gate {
 			'original_name' => self::cut( sanitize_text_field( $name ), 255 ),
 			'executable'    => (bool) $executable,
 		);
+		if ( ! empty( $held['not_held'] ) ) {
+			$details['not_held'] = true; // No copy was kept: approving only allows the hash.
+		}
 		// Remember where this request would have stored the file (plugins such as
 		// WooCommerce change the folder per request), so approval imports it there.
 		$subdir = in_array( $context['context'], array( 'media', 'rest', 'sideload' ), true ) ? self::current_upload_subdir() : null;
@@ -433,7 +493,9 @@ class Upload_Gate {
 		);
 
 		if ( ! $id ) {
-			$plugin->quarantine->purge( array( 'quarantine_path' => $held['quarantine_path'] ) );
+			if ( '' !== $held['quarantine_path'] ) {
+				$plugin->quarantine->purge( array( 'quarantine_path' => $held['quarantine_path'] ) );
+			}
 			// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 			error_log( 'CyberGate Security: could not record a held upload in the database.' );
 			$file['error'] = __( 'This upload could not be stored for review (CyberGate Security). Please ask the site administrator to check the plugin settings.', 'cybergate-security' );
@@ -465,6 +527,7 @@ class Upload_Gate {
 		}
 
 		$file['error'] = $this->hold_message( $safe_name, $context['context'], $malicious );
+		$this->held_messages[] = $file['error'];
 		return $file;
 	}
 
@@ -1176,21 +1239,16 @@ class Upload_Gate {
 	 * @return string Folder name, or '' when there is not exactly one top-level folder.
 	 */
 	public static function zip_top_folder( $zip_path ) {
-		if ( ! class_exists( '\ZipArchive' ) || ! is_file( $zip_path ) ) {
+		if ( ! is_file( $zip_path ) ) {
 			return '';
 		}
-		$zip = new \ZipArchive();
-		if ( true !== $zip->open( $zip_path ) ) {
+		$names = self::zip_entry_names( $zip_path );
+		if ( ! $names ) {
 			return '';
 		}
 		$top    = array();
 		$is_dir = array();
-		$count  = min( (int) $zip->numFiles, 100000 );
-		for ( $i = 0; $i < $count; $i++ ) {
-			$entry = $zip->getNameIndex( $i );
-			if ( false === $entry ) {
-				continue;
-			}
+		foreach ( $names as $entry ) {
 			$entry = ltrim( str_replace( '\\', '/', (string) $entry ), '/' );
 			if ( '' === $entry || 0 === strpos( $entry, '__MACOSX/' ) ) {
 				continue; // WordPress skips the macOS metadata folder too.
@@ -1208,12 +1266,63 @@ class Upload_Gate {
 				break;
 			}
 		}
-		$zip->close();
 		if ( 1 !== count( $top ) ) {
 			return '';
 		}
 		$folder = (string) key( $top );
 		return isset( $is_dir[ $folder ] ) ? $folder : '';
+	}
+
+	/**
+	 * Entry names of a ZIP (at most 100000): ZipArchive, or PclZip (bundled
+	 * with WordPress) on servers without the zip extension.
+	 *
+	 * @param string $zip_path Path to the ZIP (any extension).
+	 * @return string[] Empty when the archive cannot be read.
+	 */
+	private static function zip_entry_names( $zip_path ) {
+		$names = array();
+		if ( class_exists( '\ZipArchive' ) ) {
+			$zip = new \ZipArchive();
+			if ( true === $zip->open( $zip_path ) ) {
+				$count = min( (int) $zip->numFiles, 100000 );
+				for ( $i = 0; $i < $count; $i++ ) {
+					$entry = $zip->getNameIndex( $i );
+					if ( false !== $entry ) {
+						$names[] = (string) $entry;
+					}
+				}
+				$zip->close();
+				return $names;
+			}
+		}
+		// PclZip stops the whole request without zlib, so check that first.
+		if ( ! function_exists( 'gzopen' ) ) {
+			return array();
+		}
+		if ( ! class_exists( 'PclZip', false ) ) {
+			$file = ABSPATH . 'wp-admin/includes/class-pclzip.php';
+			if ( ! is_readable( $file ) ) {
+				return array();
+			}
+			require_once $file;
+		}
+		try {
+			$archive = new \PclZip( $zip_path );
+			$list    = $archive->listContent();
+		} catch ( \Throwable $e ) {
+			return array();
+		}
+		if ( ! is_array( $list ) ) {
+			return array();
+		}
+		foreach ( array_slice( $list, 0, 100000 ) as $entry ) {
+			if ( is_array( $entry ) && isset( $entry['filename'] ) ) {
+				// PclZip reports folders without the trailing slash ZipArchive keeps.
+				$names[] = (string) $entry['filename'] . ( ! empty( $entry['folder'] ) ? '/' : '' );
+			}
+		}
+		return $names;
 	}
 
 	/**

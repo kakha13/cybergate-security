@@ -411,33 +411,71 @@ class Sysadmin_Tools {
 
 	/**
 	 * PHP CLI binary for cron snippets: PHP_BINARY when it looks like a CLI
-	 * binary, a CLI binary next to php-fpm when one exists, else "php".
+	 * binary, a CLI binary next to php-fpm, lsphp (LiteSpeed, CyberPanel:
+	 * /usr/local/lsws/lsphpXX/bin/lsphp next to bin/php) or php-cgi when one
+	 * exists, php-cgi itself when that is all there is, else "php".
 	 *
+	 * @param string|null $bin Binary to map (default: PHP_BINARY).
 	 * @return string
 	 */
-	public static function php_binary() {
-		$bin  = defined( 'PHP_BINARY' ) ? wp_normalize_path( (string) PHP_BINARY ) : '';
+	public static function php_binary( $bin = null ) {
+		$bin  = null !== $bin ? wp_normalize_path( (string) $bin ) : ( defined( 'PHP_BINARY' ) ? wp_normalize_path( (string) PHP_BINARY ) : '' );
 		$base = strtolower( basename( $bin ) );
 		if ( '' !== $bin && preg_match( '/^php(\d+(\.\d+)*)?(-cli)?(\.exe)?$/', $base ) ) {
 			return self::stable_binary( $bin );
 		}
-		if ( '' !== $bin && preg_match( '/^php-?fpm([\d.]*)$/', $base, $m ) ) {
+		if ( '' !== $bin && preg_match( '/^(?:php-?fpm|lsphp|php-?cgi)([\d.]*)(\.exe)?$/', $base, $m ) ) {
 			$ver        = $m[1];
 			$candidates = array(
+				dirname( $bin ) . '/php' . $ver,
+				dirname( $bin ) . '/php',
 				dirname( dirname( $bin ) ) . '/bin/php' . $ver,
 				dirname( dirname( $bin ) ) . '/bin/php',
 				'/usr/bin/php' . $ver,
 				'/usr/local/bin/php' . $ver,
-				'/usr/bin/php',
-				'/usr/local/bin/php',
 			);
-			foreach ( $candidates as $candidate ) {
-				if ( @is_file( $candidate ) && @is_executable( $candidate ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			// lsphp74 / lsphp81 folders: the matching CLI version.
+			if ( preg_match( '#/lsphp(\d)(\d+)/#', $bin, $v ) ) {
+				$candidates[] = '/usr/bin/php' . $v[1] . '.' . $v[2];
+			}
+			$candidates[] = '/usr/bin/php';
+			$candidates[] = '/usr/local/bin/php';
+			foreach ( array_unique( $candidates ) as $candidate ) {
+				if ( self::path_allowed( $candidate ) && @is_file( $candidate ) && @is_executable( $candidate ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 					return self::stable_binary( $candidate );
 				}
 			}
+			// php-cgi works too (bin/cron.php accepts it from a shell): better than a "php" that may not exist.
+			if ( 0 === strpos( $base, 'php-cgi' ) || 0 === strpos( $base, 'phpcgi' ) ) {
+				return self::stable_binary( $bin );
+			}
 		}
 		return 'php';
+	}
+
+	/**
+	 * Shell command that starts PHP for bin/cron.php: the binary, plus -q for
+	 * php-cgi (hides the HTTP headers it prints).
+	 *
+	 * @return string Shell-quoted.
+	 */
+	public static function php_command() {
+		$bin = self::php_binary();
+		$cmd = self::shell_arg( $bin );
+		if ( preg_match( '/^php-?cgi/i', basename( $bin ) ) ) {
+			$cmd .= ' -q';
+		}
+		return $cmd;
+	}
+
+	/**
+	 * " --url=<network address>" for bin/cron.php on multisite (WordPress cannot
+	 * pick the site without it), '' on single sites.
+	 *
+	 * @return string Leading space included.
+	 */
+	public static function cron_url_arg() {
+		return is_multisite() ? ' --url=' . self::shell_arg( network_home_url( '/' ) ) : '';
 	}
 
 	/**
@@ -627,6 +665,17 @@ class Sysadmin_Tools {
 			'id'    => 'data_dir',
 			'label' => __( 'Data folder', 'cybergate-security' ),
 		);
+		$problem = method_exists( $storage, 'check' ) ? $storage->problem( $storage->check() ) : null;
+		$dir     = $storage->data_dir();
+		if ( $problem ) {
+			$check['status'] = 'error' === $problem['level'] ? 'fail' : 'warn';
+			$check['detail'] = $problem['text'];
+			$check['fix']    = $problem['fix'];
+			if ( '' !== $problem['code'] ) {
+				$check['code'] = $problem['code'];
+			}
+			return $check;
+		}
 		if ( ! is_dir( $dir ) ) {
 			$storage->ensure();
 		}
@@ -723,6 +772,14 @@ class Sysadmin_Tools {
 		}
 
 		$status = $this->uploads_htaccess_status();
+		if ( 'litespeed' === $server && 'openlitespeed' === Guard_Manager::litespeed_edition() ) {
+			// OpenLiteSpeed only reads rewrite rules from .htaccess: a deny block proves nothing there.
+			$check['status']  = 'info';
+			$check['detail']  = __( 'This server runs OpenLiteSpeed, which reads only rewrite rules from .htaccess files, so a rule in uploads/.htaccess may not stop PHP. Run the live test to see whether PHP runs in uploads.', 'cybergate-security' );
+			$check['fix']     = __( 'If it does: in WebAdmin open Virtual Hosts > this site > Context and add a context that denies access to .php files in the uploads folder, or ask your host.', 'cybergate-security' );
+			$check['actions'] = array( 'probe' );
+			return $check;
+		}
 		if ( in_array( $server, array( 'apache', 'litespeed' ), true ) ) {
 			if ( 'ours' === $status ) {
 				$check['status'] = 'pass';
@@ -872,7 +929,7 @@ class Sysadmin_Tools {
 			}
 		}
 		foreach ( array_unique( $candidates ) as $bin ) {
-			if ( @is_file( $bin ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( self::path_allowed( $bin ) && @is_file( $bin ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 				return wp_normalize_path( $bin );
 			}
 		}
@@ -901,10 +958,12 @@ class Sysadmin_Tools {
 		$settings = self::service( 'settings' );
 		$enabled  = $settings ? (bool) $settings->get( 'clamav_enabled', false ) : false;
 
+		$hidden = false;
 		if ( '' === $binary && ! $ready ) {
-			$state = 'missing';
-			$label = __( 'Not installed', 'cybergate-security' );
-			$tone  = 'muted';
+			$state  = 'missing';
+			$hidden = self::clamav_hidden();
+			$label  = $hidden ? __( 'Unknown (hosting hides it)', 'cybergate-security' ) : __( 'Not installed', 'cybergate-security' );
+			$tone   = 'muted';
 		} elseif ( ! $ready ) {
 			$state = 'blocked';
 			$label = $exec ? __( 'Installed, cannot run', 'cybergate-security' ) : __( 'Installed, PHP cannot run it', 'cybergate-security' );
@@ -977,6 +1036,8 @@ class Sysadmin_Tools {
 				'exec'    => $exec,
 				'daemon'  => $daemon,
 				'enabled' => $enabled,
+				// state "missing" while open_basedir or disabled exec() hides the answer.
+				'hidden'  => $hidden,
 			),
 			'maldet' => array(
 				'supported' => $supported,
@@ -1214,11 +1275,30 @@ class Sysadmin_Tools {
 		$configured = $settings ? (string) $settings->get( 'clamav_binary', '' ) : '';
 		$candidates = array_filter( array_merge( array( $configured ), Scanner::clamav_candidates() ) );
 		foreach ( $candidates as $candidate ) {
-			if ( @is_file( $candidate ) && @is_executable( $candidate ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( self::path_allowed( $candidate ) && @is_file( $candidate ) && @is_executable( $candidate ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 				return wp_normalize_path( $candidate );
 			}
 		}
 		return '';
+	}
+
+	/**
+	 * Whether PHP cannot tell if ClamAV is installed: open_basedir hides the
+	 * folders it is installed in, or PHP may not run programs (so it cannot
+	 * look it up in PATH either).
+	 *
+	 * @return bool
+	 */
+	public static function clamav_hidden() {
+		if ( ! self::function_available( 'exec' ) && ! self::function_available( 'proc_open' ) ) {
+			return true;
+		}
+		foreach ( Scanner::clamav_candidates() as $candidate ) {
+			if ( ! self::path_allowed( $candidate ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -1307,6 +1387,32 @@ class Sysadmin_Tools {
 	}
 
 	/**
+	 * Control request for the live probes: a static file of this plugin that
+	 * every server serves. When it does not load either, a refused test file
+	 * proves nothing (HTTP password on staging, a firewall answering 403 to
+	 * the site's own requests, a blocked loopback).
+	 *
+	 * @return bool True when the control file answered 200.
+	 */
+	private function control_reachable() {
+		static $ok = null;
+		if ( null !== $ok ) {
+			return $ok;
+		}
+		$response = wp_remote_get(
+			add_query_arg( 'wpcs', strtolower( wp_generate_password( 8, false, false ) ), WPCYBERSEC_URL . 'assets/css/base.css' ),
+			array(
+				'timeout'     => 4,
+				'redirection' => 0,
+				'sslverify'   => apply_filters( 'https_local_ssl_verify', false ), // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- WordPress core filter, same as wp-cron uses for loopback requests.
+				'headers'     => array( 'Cache-Control' => 'no-cache' ),
+			)
+		);
+		$ok = ! is_wp_error( $response ) && 200 === (int) wp_remote_retrieve_response_code( $response );
+		return $ok;
+	}
+
+	/**
 	 * Tests whether files in the quarantine folder can be downloaded.
 	 *
 	 * @param bool $fresh Ignore the cached result.
@@ -1349,9 +1455,15 @@ class Sysadmin_Tools {
 		} elseif ( 200 === $probe['code'] && false !== strpos( $probe['body'], $token ) ) {
 			$result['result'] = 'reachable';
 			$result['code']   = 200;
-		} elseif ( $probe['code'] >= 400 ) {
+		} elseif ( $probe['code'] >= 400 && $this->control_reachable() ) {
 			$result['result'] = 'blocked';
 			$result['code']   = $probe['code'];
+		} elseif ( $probe['code'] >= 400 ) {
+			// A public file is refused too: an HTTP password, a firewall or a
+			// blocked loopback answered, not the deny rules. Nothing was proven.
+			$result['code'] = $probe['code'];
+			/* translators: %d: HTTP status code */
+			$result['message'] = sprintf( __( 'Could not test web access: the test file was refused (HTTP %d), but so was a file that is always public, so an HTTP password, a firewall or the host blocks the site\'s requests to itself.', 'cybergate-security' ), $probe['code'] );
 		} else {
 			/* translators: %d: HTTP status code */
 			$result['message'] = sprintf( __( 'Web access test was inconclusive (HTTP %d).', 'cybergate-security' ), $probe['code'] );
@@ -1398,9 +1510,13 @@ class Sysadmin_Tools {
 		} elseif ( 200 === $probe['code'] && $token === trim( $probe['body'] ) ) {
 			$result['result'] = 'executed';
 			$result['code']   = 200;
-		} else {
-			$result['result'] = 'blocked';
+		} elseif ( 200 === $probe['code'] || $this->control_reachable() ) {
+			$result['result'] = 'blocked'; // Served without running, or refused while public files load.
 			$result['code']   = $probe['code'];
+		} else {
+			$result['code'] = $probe['code'];
+			/* translators: %d: HTTP status code */
+			$result['message'] = sprintf( __( 'The live test could not run: the test file was refused (HTTP %d), but so was a file that is always public, so an HTTP password, a firewall or the host blocks the site\'s requests to itself.', 'cybergate-security' ), $probe['code'] );
 		}
 		$this->cache_probe( 'uploads_php', $result );
 		return $result;
@@ -1506,6 +1622,14 @@ class Sysadmin_Tools {
 	 * @return string|\WP_Error "written" or "unchanged".
 	 */
 	public function write_uploads_htaccess() {
+		if ( 'nginx' === self::server_type() ) {
+			// nginx never reads .htaccess: writing one would only look like a fix.
+			return new \WP_Error(
+				'wpcybersec_htaccess_nginx',
+				/* translators: %s: nginx rule */
+				sprintf( __( 'This server runs nginx, which ignores .htaccess files, so nothing was written. Add this rule to the site\'s nginx server block and reload nginx (or ask your host): %s', 'cybergate-security' ), $this->nginx_uploads_rule() )
+			);
+		}
 		$dir = self::uploads_dir();
 		if ( '' === $dir ) {
 			return new \WP_Error( 'wpcybersec_uploads', __( 'The uploads folder could not be found.', 'cybergate-security' ) );
@@ -1524,7 +1648,7 @@ class Sysadmin_Tools {
 		}
 		$new = self::replace_marked_block( (string) $old, $this->apache_uploads_rules() );
 		if ( $new === $old ) {
-			return 'unchanged';
+			return $this->verify_uploads_block( null );
 		}
 		/*
 		 * .htaccess is an executable name, so the file monitor reports (or, in
@@ -1594,8 +1718,46 @@ class Sysadmin_Tools {
 		if ( $trust_new ) {
 			self::call( 'file_monitor', 'trust_file', array( $file ) );
 		}
+		$verified = $this->verify_uploads_block(
+			static function () use ( $exists, $file, $old, $old_trusted ) {
+				if ( $exists ) {
+					@file_put_contents( $file, $old, LOCK_EX ); // phpcs:ignore
+					if ( $old_trusted ) {
+						self::call( 'file_monitor', 'trust_file', array( $file ) );
+					}
+				} else {
+					Fs::delete( $file );
+				}
+			}
+		);
+		if ( is_wp_error( $verified ) ) {
+			return $verified;
+		}
 		self::log( 'htaccess_written', __( 'Added the PHP blocking rules to uploads/.htaccess.', 'cybergate-security' ), array( 'file' => $file ) );
-		return 'written';
+		return 'unchanged' === $verified ? 'written' : $verified;
+	}
+
+	/**
+	 * Live test after the rules are in place: does a PHP file in uploads still
+	 * run? Only a test that shows PHP no longer runs counts as fixed.
+	 *
+	 * @param callable|null $rollback Undoes the write (null when nothing was written).
+	 * @return string|\WP_Error unchanged (verified) | unverified (the test could not run) | WP_Error (PHP still runs).
+	 */
+	private function verify_uploads_block( $rollback ) {
+		$probe = $this->probe_uploads_php();
+		if ( 'executed' === $probe['result'] ) {
+			if ( is_callable( $rollback ) ) {
+				call_user_func( $rollback );
+			}
+			$message = 'litespeed' === self::server_type() && 'openlitespeed' === Guard_Manager::litespeed_edition()
+				? __( 'PHP files in the uploads folder still run: OpenLiteSpeed reads only rewrite rules from .htaccess, so the change was undone. In WebAdmin add a context that denies access to .php files in the uploads folder, or ask your host.', 'cybergate-security' )
+				: ( 'iis' === self::server_type()
+				? __( 'PHP files in the uploads folder still run: IIS ignores .htaccess files. Block PHP in uploads with a web.config rule or in the IIS handler mappings.', 'cybergate-security' )
+				: __( 'PHP files in the uploads folder still run although the rules are in uploads/.htaccess: the server ignores them (AllowOverride, or a proxy in front that runs PHP itself). The change was undone. Ask your host to block PHP in the uploads folder.', 'cybergate-security' ) );
+			return new \WP_Error( 'wpcybersec_htaccess_ineffective', $message );
+		}
+		return 'blocked' === $probe['result'] ? 'unchanged' : 'unverified';
 	}
 
 	/**
@@ -1623,9 +1785,9 @@ class Sysadmin_Tools {
 	 * @return array[] Each { id, label, file, code, help }.
 	 */
 	public function cron_snippets() {
-		$php     = self::shell_arg( self::php_binary() );
+		$php     = self::php_command();
 		$cron    = self::shell_arg( wp_normalize_path( WPCYBERSEC_DIR ) . 'bin/cron.php' );
-		$wp      = self::shell_arg( self::abspath() );
+		$wp      = self::shell_arg( self::abspath() ) . self::cron_url_arg();
 		$wp_cron = self::shell_arg( self::abspath() . '/wp-cron.php' );
 
 		return array(
@@ -1844,6 +2006,8 @@ class Sysadmin_Tools {
 			'',
 			'SITE=' . self::shell_arg( $root ),
 			'PHP=' . self::shell_arg( self::php_binary() ),
+			'PHPARGS=' . ( preg_match( '/^php-?cgi/i', basename( self::php_binary() ) ) ? '-q' : '' ),
+			'URLARG=' . ( is_multisite() ? self::shell_arg( '--url=' . network_home_url( '/' ) ) : '' ),
 			'CRON=' . self::shell_arg( wp_normalize_path( WPCYBERSEC_DIR ) . 'bin/cron.php' ),
 			'WP=' . self::shell_arg( self::abspath() ),
 			'DEBOUNCE=20',
@@ -1860,7 +2024,7 @@ class Sysadmin_Tools {
 			'    [ "$rc" -le 128 ] && exit 1',
 			'    if [ "${pending:-0}" = 1 ]; then',
 			'        pending=0',
-			'        "$PHP" "$CRON" --wp="$WP" > /dev/null 2>&1',
+			'        "$PHP" $PHPARGS "$CRON" --wp="$WP" $URLARG > /dev/null 2>&1',
 			'    fi',
 			'done',
 		);
@@ -2022,18 +2186,8 @@ class Sysadmin_Tools {
 	 * @param string $path Absolute path.
 	 * @return bool
 	 */
-	private static function path_allowed( $path ) {
-		$limit = trim( (string) ini_get( 'open_basedir' ) );
-		if ( '' === $limit ) {
-			return true;
-		}
-		foreach ( explode( PATH_SEPARATOR, $limit ) as $dir ) {
-			$dir = rtrim( trim( $dir ), '/' );
-			if ( '' !== $dir && ( $path === $dir || 0 === strpos( $path, $dir . '/' ) ) ) {
-				return true;
-			}
-		}
-		return false;
+	public static function path_allowed( $path ) {
+		return Storage::path_allowed( $path );
 	}
 
 	/**
@@ -2067,7 +2221,9 @@ class Sysadmin_Tools {
 		$site   = untrailingslashit( wp_normalize_path( ABSPATH ) );
 
 		// ClamAV daemon (the same check the scanner uses).
-		if ( 'missing' === $av['clamav']['state'] ) {
+		if ( 'missing' === $av['clamav']['state'] && ! empty( $av['clamav']['hidden'] ) ) {
+			$rows[] = array( __( 'ClamAV scanner service (clamd)', 'cybergate-security' ), 'unknown', $hidden );
+		} elseif ( 'missing' === $av['clamav']['state'] ) {
 			$rows[] = array( __( 'ClamAV scanner service (clamd)', 'cybergate-security' ), 'na', __( 'ClamAV is not installed', 'cybergate-security' ) );
 		} elseif ( ! $av['clamav']['exec'] ) {
 			$rows[] = array( __( 'ClamAV scanner service (clamd)', 'cybergate-security' ), 'unknown', $hidden );
@@ -3041,13 +3197,11 @@ class Sysadmin_Tools {
 		}
 		Developer_Instructions::clear_failure( 'uploads_htaccess' );
 		if ( 'unchanged' === $result ) {
-			self::flash( __( 'uploads/.htaccess already contains the current rules.', 'cybergate-security' ), 'info' );
+			self::flash( __( 'uploads/.htaccess already contains the current rules, and a live test confirmed that PHP does not run in uploads.', 'cybergate-security' ), 'info' );
+		} elseif ( 'unverified' === $result ) {
+			self::flash( __( 'The rules are in uploads/.htaccess, but the site could not test itself, so it is not confirmed that PHP no longer runs there. Run the live test again later.', 'cybergate-security' ), 'info' );
 		} else {
-			$message = __( 'Added the PHP blocking rules to uploads/.htaccess. Other content in the file was kept.', 'cybergate-security' );
-			if ( 'nginx' === self::server_type() ) {
-				$message .= ' ' . __( 'This server runs nginx, which ignores .htaccess: add the nginx rule as well.', 'cybergate-security' );
-			}
-			self::flash( $message, 'ok' );
+			self::flash( __( 'Added the PHP blocking rules to uploads/.htaccess, and a live test confirmed that PHP no longer runs there. Other content in the file was kept.', 'cybergate-security' ), 'ok' );
 		}
 	}
 

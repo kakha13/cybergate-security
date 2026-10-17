@@ -27,11 +27,22 @@ if ( defined( 'WPCYBERSEC_DATA_DIR' ) && WPCYBERSEC_DATA_DIR ) {
 }
 
 /*
+ * Fallback folder inside uploads, used while no configured folder was
+ * writable (Storage::FALLBACK_OPTION, a site option on multisite).
+ */
+$wpcybersec_fallback = is_multisite() ? get_site_option( 'wpcybersec_data_fallback', '' ) : get_option( 'wpcybersec_data_fallback', '' );
+$wpcybersec_fallback = is_string( $wpcybersec_fallback ) && '' !== $wpcybersec_fallback ? untrailingslashit( wp_normalize_path( $wpcybersec_fallback ) ) : '';
+
+// Front controller folder (WordPress in a sub folder, Bedrock), where the guard may be wired in too.
+$wpcybersec_front = get_option( 'wpcybersec_front_root', '' );
+$wpcybersec_front = is_string( $wpcybersec_front ) && '' !== $wpcybersec_front ? trailingslashit( wp_normalize_path( $wpcybersec_front ) ) : '';
+
+/*
  * Backups of wp-config.php hold the database password and the salts: remove
  * them even when the rest of the data is kept. Only the plugin's own backup
  * files and deny files are deleted, so a folder set by hand stays intact.
  */
-foreach ( array_unique( array( $wpcybersec_data, $wpcybersec_default ) ) as $wpcybersec_base ) {
+foreach ( array_unique( array_filter( array( $wpcybersec_data, $wpcybersec_default, $wpcybersec_fallback ) ) ) as $wpcybersec_base ) {
 	$wpcybersec_backups = $wpcybersec_base . '/backups';
 	if ( ! is_dir( $wpcybersec_backups ) || is_link( $wpcybersec_backups ) ) {
 		continue;
@@ -55,6 +66,9 @@ foreach ( array( 'items', 'manifest', 'allowlist', 'log' ) as $wpcybersec_table 
 }
 
 $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'wpcybersec\\_%' OR option_name LIKE '\\_transient\\_wpcybersec\\_%' OR option_name LIKE '\\_transient\\_timeout\\_wpcybersec\\_%'" ); // phpcs:ignore WordPress.DB
+if ( is_multisite() ) {
+	delete_site_option( 'wpcybersec_data_fallback' );
+}
 
 foreach ( array( 'wpcybersec_scheduled_scan', 'wpcybersec_scan_tick', 'wpcybersec_digest', 'wpcybersec_maintenance', 'wpcybersec_guard_import', 'wpcybersec_notify_flush' ) as $wpcybersec_hook ) {
 	wp_clear_scheduled_hook( $wpcybersec_hook );
@@ -62,6 +76,7 @@ foreach ( array( 'wpcybersec_scheduled_scan', 'wpcybersec_scan_tick', 'wpcyberse
 
 delete_metadata( 'user', 0, 'wpcybersec_dismiss_setup', '', true );
 delete_metadata( 'user', 0, 'wpcybersec_dismiss_pending', '', true );
+delete_metadata( 'user', 0, 'wpcybersec_dismiss_storage', '', true );
 delete_metadata( 'user', 0, 'wpcybersec_diff_layout', '', true );
 
 /*
@@ -87,6 +102,9 @@ if ( ! defined( 'WPCYBERSEC_DATA_DIR' ) ) {
 	if ( '' !== $wpcybersec_moved && $wpcybersec_moved !== $wpcybersec_default && 0 === strpos( basename( $wpcybersec_moved ), 'wpcybersec-' ) && is_dir( $wpcybersec_moved ) && ! is_link( $wpcybersec_moved ) && $wpcybersec_marker_ok( $wpcybersec_moved ) ) {
 		$wpcybersec_dirs[] = $wpcybersec_moved;
 	}
+}
+if ( '' !== $wpcybersec_fallback && 0 === strpos( basename( $wpcybersec_fallback ), 'wpcybersec-' ) && is_dir( $wpcybersec_fallback ) && ! is_link( $wpcybersec_fallback ) && $wpcybersec_marker_ok( $wpcybersec_fallback ) ) {
+	$wpcybersec_dirs[] = $wpcybersec_fallback;
 }
 foreach ( $wpcybersec_dirs as $wpcybersec_dir ) {
 	if ( ! is_dir( $wpcybersec_dir ) || is_link( $wpcybersec_dir ) ) {
@@ -135,6 +153,11 @@ if ( is_file( $wpcybersec_bootstrap ) && ! is_link( $wpcybersec_bootstrap ) && '
 			dirname( ABSPATH ) . '/.user.ini',
 		)
 	);
+	if ( '' !== $wpcybersec_front ) {
+		$wpcybersec_configs[] = $wpcybersec_front . '.htaccess';
+		$wpcybersec_configs[] = $wpcybersec_front . $wpcybersec_ini_name;
+		$wpcybersec_configs[] = $wpcybersec_front . '.user.ini';
+	}
 	foreach ( $wpcybersec_configs as $wpcybersec_config ) {
 		if ( $wpcybersec_referenced ) {
 			break;

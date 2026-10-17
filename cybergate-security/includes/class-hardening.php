@@ -42,6 +42,10 @@ class Hardening {
 		// Loopback check used right after installing the early guard.
 		add_action( 'wp_ajax_wpcybersec_guard_ping', array( $this, 'ajax_guard_ping' ) );
 		add_action( 'wp_ajax_nopriv_wpcybersec_guard_ping', array( $this, 'ajax_guard_ping' ) );
+		// The same check through the front controller (only hooked for that request).
+		if ( isset( $_GET['wpcybersec_guard_ping'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- only decides whether to hook; the token is checked in front_guard_ping().
+			add_action( 'init', array( $this, 'front_guard_ping' ), 0 );
+		}
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue' ), 20 );
 		add_action( 'admin_init', array( $this, 'admin_upkeep' ) );
 	}
@@ -145,7 +149,7 @@ class Hardening {
 				);
 
 			case 'file_edit':
-				if ( defined( 'DISALLOW_FILE_EDIT' ) && ! DISALLOW_FILE_EDIT && ! Config_Editor::is_writable() ) {
+				if ( defined( 'DISALLOW_FILE_EDIT' ) && ! DISALLOW_FILE_EDIT && ! Config_Editor::can_edit() ) {
 					return null; // Explicitly enabled in a read-only wp-config.php.
 				}
 				return array(
@@ -163,6 +167,9 @@ class Hardening {
 				$storage = wpcybersec()->storage;
 				$target  = $storage->suggested_outside_dir();
 				$parent  = dirname( $target );
+				if ( ! Storage::path_allowed( $target ) || ! Storage::path_allowed( $parent ) ) {
+					return null; // open_basedir hides it: see the manual steps.
+				}
 				if ( ! ( is_dir( $target ) ? Fs::is_writable( $target ) : Fs::is_writable( $parent ) ) || $storage->is_in_webroot( $target ) || Storage::looks_served( $parent ) || ! $storage->dir_usable( $target ) ) {
 					return null;
 				}
@@ -174,7 +181,7 @@ class Hardening {
 				);
 
 			case 'hmac_key':
-				if ( defined( 'WPCYBERSEC_HMAC_KEY' ) || ! Config_Editor::is_writable() ) {
+				if ( defined( 'WPCYBERSEC_HMAC_KEY' ) || ! Config_Editor::can_edit() ) {
 					return null;
 				}
 				return array(
@@ -192,14 +199,15 @@ class Hardening {
 				return array(
 					'id'          => 'guard',
 					'label'       => __( 'Install the guard', 'cybergate-security' ),
-					'description' => 'htaccess' === $method
+					'description' => ( 'htaccess' === $method
 						? __( 'Adds the guard to the .htaccess file in the WordPress folder, then checks that the site still loads. Everything is undone automatically if it does not.', 'cybergate-security' )
-						: __( 'Adds the guard to a .user.ini file in the WordPress folder (this server runs PHP through FastCGI), then checks that the site still loads. PHP picks up .user.ini within a few minutes.', 'cybergate-security' ),
+						: __( 'Adds the guard to a .user.ini file in the WordPress folder (this server runs PHP through FastCGI or LiteSpeed), then checks that the site still loads. PHP picks up .user.ini within a few minutes.', 'cybergate-security' ) )
+						. ( method_exists( $gm, 'front_root' ) && '' !== $gm->front_root() ? ' ' . __( 'The site\'s front controller (index.php) is in another folder, so that folder gets the same line.', 'cybergate-security' ) : '' ),
 				);
 
 			case 'disable_wp_cron':
 				$last = (int) get_option( 'wpcybersec_cli_cron_at', 0 );
-				if ( ( defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON ) || $last < time() - 2 * HOUR_IN_SECONDS || ! Config_Editor::is_writable() ) {
+				if ( ( defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON ) || $last < time() - 2 * HOUR_IN_SECONDS || ! Config_Editor::can_edit() ) {
 					return null;
 				}
 				return array(
@@ -286,13 +294,26 @@ class Hardening {
 				);
 
 			case 'guard':
-				$boot = wp_normalize_path( ABSPATH . 'wpcybersec-guard.php' );
-				return array(
+				$boot  = wp_normalize_path( ABSPATH . 'wpcybersec-guard.php' );
+				$gm    = wpcybersec()->guard_manager;
+				$front = is_object( $gm ) && method_exists( $gm, 'front_root' ) ? $gm->front_root() : '';
+				$extra = array();
+				if ( '' !== $front ) {
+					/* translators: %s: folder path */
+					$extra[] = array( 'text' => sprintf( __( 'The site\'s front controller (index.php) is in %s, not in the WordPress folder. Put the same .user.ini or .htaccess line in that folder too, or pages and REST requests run without the guard.', 'cybergate-security' ), $front ) );
+				}
+				if ( 'litespeed' === PHP_SAPI || 'openlitespeed' === Guard_Manager::litespeed_edition() ) {
+					$extra[] = array(
+						'text' => __( 'On OpenLiteSpeed (CyberPanel) .htaccess php_value lines are ignored. In WebAdmin open Virtual Hosts > this site > General > php.ini Override, add this line, then restart OpenLiteSpeed (and run killall lsphp when PHP runs in detached mode):', 'cybergate-security' ),
+						'code' => 'php_value auto_prepend_file ' . $boot,
+					);
+				}
+				return array_merge( array(
 					array( 'text' => __( 'Install the guard files first: Settings > Advanced > Early upload guard > Install.', 'cybergate-security' ) ),
 					array( 'text' => __( 'If PHP runs through PHP-FPM or CGI, create a file named .user.ini in the WordPress folder with:', 'cybergate-security' ), 'code' => "auto_prepend_file = '" . $boot . "'" ),
 					array( 'text' => __( 'If PHP runs as an Apache module, add to the .htaccess file in the WordPress folder:', 'cybergate-security' ), 'code' => "<IfModule php_module>\n    php_value auto_prepend_file \"" . $boot . "\"\n</IfModule>" ),
 					array( 'text' => __( 'On nginx with PHP-FPM, ask your host to add this to the PHP location block and reload nginx:', 'cybergate-security' ), 'code' => 'fastcgi_param PHP_VALUE "auto_prepend_file=' . $boot . '";' ),
-				);
+				), $extra );
 
 			case 'disable_wp_cron':
 				return array(
@@ -302,7 +323,7 @@ class Hardening {
 				);
 
 			case 'wp_cron':
-				$cron = 'php ' . wp_normalize_path( WPCYBERSEC_DIR ) . 'bin/cron.php --quiet';
+				$cron = Sysadmin_Tools::php_command() . ' ' . Sysadmin_Tools::shell_arg( wp_normalize_path( WPCYBERSEC_DIR ) . 'bin/cron.php' ) . ' --quiet' . Sysadmin_Tools::cron_url_arg();
 				return array(
 					array( 'text' => __( 'In your hosting control panel open "Cron Jobs" (cPanel, Plesk "Scheduled Tasks", or your host\'s equivalent).', 'cybergate-security' ) ),
 					array( 'text' => __( 'Add a new job that runs every 15 minutes (*/15 * * * *) with this command:', 'cybergate-security' ), 'code' => $cron ),
@@ -332,6 +353,12 @@ class Hardening {
 		$steps[] = array( 'text' => sprintf( __( 'By hand, first open the Reports page and approve or delete everything that is held. The copies of items still held when you switch stay in the old folder (%s), and those items can then no longer be approved or restored.', 'cybergate-security' ), $current ) );
 		/* translators: %s: folder path */
 		$steps[] = array( 'text' => sprintf( __( 'Create a folder outside the public website folder, for example %s, and make it writable for the web server (permissions 750 or 770).', 'cybergate-security' ), $target ) );
+		if ( ! Storage::path_allowed( $target ) ) {
+			$steps[] = array(
+				/* translators: 1: folder path, 2: open_basedir value */
+				'text' => sprintf( __( 'PHP on this site is limited to these folders (open_basedir): %2$s. Add %1$s to open_basedir in the PHP settings of the site (hosting panel or PHP-FPM pool), or create the folder inside one of the allowed folders that the web server does not serve.', 'cybergate-security' ), $target, (string) ini_get( 'open_basedir' ) ),
+			);
+		}
 		$steps[] = array(
 			'text' => __( 'Open wp-config.php and add this line:', 'cybergate-security' ),
 			'code' => "define( 'WPCYBERSEC_DATA_DIR', '" . addcslashes( $target, "\\'" ) . "' );",
@@ -437,8 +464,22 @@ class Hardening {
 	 * @return string|\WP_Error String = success with a note for the admin.
 	 */
 	private function fix_data_dir() {
+		return $this->move_data_dir( wpcybersec()->storage->suggested_outside_dir(), true );
+	}
+
+	/**
+	 * Moves the data folder to $target (Storage::relocate()), with the guard
+	 * following it. Also used to bring the data back from the fallback folder
+	 * inside uploads once the configured folder is writable again.
+	 *
+	 * @param string $target       Absolute folder.
+	 * @param bool   $outside_only Refuse a folder the web server serves.
+	 * @return string|\WP_Error String = success with a note for the admin.
+	 */
+	public function move_data_dir( $target, $outside_only = false ) {
 		$plugin  = wpcybersec();
 		$storage = $plugin->storage;
+		$target  = untrailingslashit( wp_normalize_path( (string) $target ) );
 		if ( is_multisite() ) {
 			return new \WP_Error( 'wpcybersec_fix', __( 'On a multisite network the data folder is shared by all sites. Follow the steps below to move it for the whole network.', 'cybergate-security' ) );
 		}
@@ -446,8 +487,7 @@ class Hardening {
 		if ( isset( $job['state'] ) && in_array( $job['state'], array( 'enumerating', 'processing', 'finishing' ), true ) ) {
 			return new \WP_Error( 'wpcybersec_fix', __( 'A scan is running. Try again when it has finished.', 'cybergate-security' ) );
 		}
-		$target = $storage->suggested_outside_dir();
-		if ( $storage->is_in_webroot( $target ) ) {
+		if ( $outside_only && $storage->is_in_webroot( $target ) ) {
 			return new \WP_Error( 'wpcybersec_fix', __( 'The folder next to WordPress is still served by the web server here, so the move would not help.', 'cybergate-security' ) );
 		}
 		if ( ! $storage->dir_usable( $target ) ) {
@@ -530,69 +570,133 @@ class Hardening {
 
 	/**
 	 * How the guard can be wired in on this server: htaccess (mod_php,
-	 * LiteSpeed), user_ini (PHP-FPM / CGI) or '' (needs the server config).
+	 * LiteSpeed Enterprise), user_ini (PHP-FPM / CGI, OpenLiteSpeed) or ''
+	 * (needs the server config).
 	 *
 	 * @return string
 	 */
 	public function guard_method() {
-		$sapi = PHP_SAPI;
-		if ( in_array( $sapi, array( 'apache2handler', 'litespeed' ), true ) ) {
-			return Fs::is_writable( ABSPATH ) || Fs::is_writable( ABSPATH . '.htaccess' ) ? 'htaccess' : '';
-		}
-		if ( in_array( $sapi, array( 'fpm-fcgi', 'cgi-fcgi', 'cgi' ), true ) && '' !== (string) ini_get( 'user_ini.filename' ) ) {
-			return Fs::is_writable( ABSPATH ) || Fs::is_writable( ABSPATH . '.user.ini' ) ? 'user_ini' : '';
-		}
-		return '';
+		$methods = $this->guard_methods();
+		return $methods ? $methods[0] : '';
 	}
 
 	/**
-	 * Installs the early guard end to end, then makes a real request to the site
-	 * to confirm it still answers. Any failure undoes every step.
+	 * Every way to wire the guard in that fits this server, in the order the
+	 * one-click install tries them. LiteSpeed of unknown edition gets both:
+	 * Enterprise reads php_value in .htaccess, OpenLiteSpeed does not (it
+	 * reads .user.ini when lsphp is set up for it).
+	 *
+	 * @return string[]
+	 */
+	public function guard_methods() {
+		$sapi    = PHP_SAPI;
+		$ini_on  = '' !== (string) ini_get( 'user_ini.filename' );
+		$methods = array();
+		if ( 'apache2handler' === $sapi ) {
+			$methods[] = 'htaccess';
+		} elseif ( 'litespeed' === $sapi ) {
+			$edition = Guard_Manager::litespeed_edition();
+			if ( 'openlitespeed' !== $edition ) {
+				$methods[] = 'htaccess';
+			}
+			if ( 'enterprise' !== $edition && $ini_on ) {
+				$methods[] = 'user_ini';
+			}
+		} elseif ( in_array( $sapi, array( 'fpm-fcgi', 'cgi-fcgi', 'cgi' ), true ) && $ini_on ) {
+			$methods[] = 'user_ini';
+		}
+		return array_values( array_filter( $methods, array( $this, 'can_wire' ) ) );
+	}
+
+	/**
+	 * Whether the file of a method can be written in every folder that needs it
+	 * (the WordPress folder and the front controller folder).
+	 *
+	 * @param string $method htaccess | user_ini.
+	 * @return bool
+	 */
+	private function can_wire( $method ) {
+		$gm = wpcybersec()->guard_manager;
+		if ( ! is_object( $gm ) ) {
+			return false;
+		}
+		$name = 'htaccess' === $method ? '.htaccess' : (string) ini_get( 'user_ini.filename' );
+		$dirs = method_exists( $gm, 'wiring_dirs' ) ? $gm->wiring_dirs() : array( ABSPATH );
+		foreach ( $dirs as $dir ) {
+			if ( ! Fs::is_writable( $dir ) && ! Fs::is_writable( $dir . $name ) ) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Installs the early guard end to end, then makes real requests to the site
+	 * (wp-admin and the front controller) to confirm it still answers. Any
+	 * failure undoes every step. On LiteSpeed of unknown edition a .htaccess
+	 * line PHP ignores is replaced by .user.ini.
 	 *
 	 * @return true|string|\WP_Error String = success with a note for the admin.
 	 */
 	private function fix_guard() {
-		$gm     = wpcybersec()->guard_manager;
-		$method = $this->guard_method();
-		if ( '' === $method || ! is_object( $gm ) ) {
+		$gm      = wpcybersec()->guard_manager;
+		$methods = $this->guard_methods();
+		if ( ! $methods || ! is_object( $gm ) ) {
 			return new \WP_Error( 'wpcybersec_fix', __( 'This server needs the PHP setting changed in its own configuration. Follow the steps below.', 'cybergate-security' ) );
 		}
 		$installed = $gm->install();
 		if ( is_wp_error( $installed ) ) {
 			return $installed;
 		}
-		$wired = 'htaccess' === $method ? $gm->write_htaccess() : $gm->write_user_ini();
-		if ( is_wp_error( $wired ) ) {
-			$gm->uninstall();
-			return $wired;
-		}
-
-		$check = $this->ping_guard();
-		if ( 'down' === $check ) {
-			$this->roll_back_guard( $gm, $method );
-			return new \WP_Error( 'wpcybersec_fix', __( 'The site stopped answering after the change, so it was undone. Follow the steps below or ask your host.', 'cybergate-security' ) );
-		}
-		if ( 'active' === $check ) {
-			return __( 'The early guard is installed and active.', 'cybergate-security' );
-		}
 		$minutes = max( 1, (int) ceil( max( 0, (int) ini_get( 'user_ini.cache_ttl' ) ) / 60 ) );
-		if ( 'unknown' === $check ) {
-			// A timeout, a blocked loopback, an HTTP password or a firewall page: nothing is known about the change, so keep it.
-			$parts = array( __( 'Installed, but it could not be verified from here because the site did not answer its own test request (a firewall, an HTTP password or a slow server can cause this).', 'cybergate-security' ) );
+		$ols     = 'litespeed' === PHP_SAPI
+			? ' ' . __( 'On OpenLiteSpeed, .user.ini is only read when lsphp has user ini files switched on, and only after PHP restarts. If the Dashboard does not show the guard as active soon, use the OpenLiteSpeed snippet under Settings > Advanced > Early guard (WebAdmin php.ini Override) instead.', 'cybergate-security' )
+			: '';
+		$count   = count( $methods );
+		foreach ( $methods as $i => $method ) {
+			$more  = $i < $count - 1;
+			$wired = 'htaccess' === $method ? $gm->write_htaccess() : $gm->write_user_ini();
+			if ( is_wp_error( $wired ) ) {
+				if ( $more ) {
+					continue;
+				}
+				$gm->uninstall();
+				return $wired;
+			}
+
+			$check = $this->ping_guard();
+			if ( 'down' === $check ) {
+				$this->roll_back_guard( $gm, $method );
+				return new \WP_Error( 'wpcybersec_fix', __( 'The site stopped answering after the change, so it was undone. Follow the steps below or ask your host.', 'cybergate-security' ) );
+			}
+			if ( 'active' === $check ) {
+				return __( 'The early guard is installed and active.', 'cybergate-security' );
+			}
+			if ( 'unknown' === $check ) {
+				// A timeout, a blocked loopback, an HTTP password or a firewall page: nothing is known about the change, so keep it.
+				$parts = array( __( 'Installed, but it could not be verified from here because the site did not answer its own test request (a firewall, an HTTP password or a slow server can cause this).', 'cybergate-security' ) );
+				if ( 'user_ini' === $method ) {
+					/* translators: %d: minutes */
+					$parts[] = sprintf( __( 'PHP reads .user.ini every %d minutes, so the guard becomes active within that time.', 'cybergate-security' ), $minutes ) . $ols;
+				}
+				$parts[] = __( 'The Dashboard shows when the guard is active.', 'cybergate-security' );
+				return implode( ' ', $parts );
+			}
 			if ( 'user_ini' === $method ) {
 				/* translators: %d: minutes */
-				$parts[] = sprintf( __( 'PHP reads .user.ini every %d minutes, so the guard becomes active within that time.', 'cybergate-security' ), $minutes );
+				return sprintf( __( 'Installed. PHP reads .user.ini every %d minutes, so the guard becomes active within that time. The Dashboard shows when it is.', 'cybergate-security' ), $minutes ) . $ols;
 			}
-			$parts[] = __( 'The Dashboard shows when the guard is active.', 'cybergate-security' );
-			return implode( ' ', $parts );
+			if ( $more ) {
+				// The server ignored php_value (OpenLiteSpeed does): try the next way.
+				$gm->remove_htaccess();
+				continue;
+			}
+			// WordPress answered that the guard did not run although the server accepted the line: undo rather than leave a half setup.
+			$this->roll_back_guard( $gm, $method );
+			return new \WP_Error( 'wpcybersec_fix', __( 'The server accepted the setting but PHP did not load the guard, so the change was undone. Follow the steps below.', 'cybergate-security' ) );
 		}
-		if ( 'user_ini' === $method ) {
-			/* translators: %d: minutes */
-			return sprintf( __( 'Installed. PHP reads .user.ini every %d minutes, so the guard becomes active within that time. The Dashboard shows when it is.', 'cybergate-security' ), $minutes );
-		}
-		// WordPress answered that the guard did not run although mod_php accepted the line: undo rather than leave a half setup.
-		$this->roll_back_guard( $gm, $method );
-		return new \WP_Error( 'wpcybersec_fix', __( 'The server accepted the setting but PHP did not load the guard, so the change was undone. Follow the steps below.', 'cybergate-security' ) );
+		$gm->uninstall( true );
+		return new \WP_Error( 'wpcybersec_fix', __( 'The guard could not be wired in on this server. Follow the steps below.', 'cybergate-security' ) );
 	}
 
 	/**
@@ -614,27 +718,61 @@ class Hardening {
 	}
 
 	/**
-	 * Requests the site and asks whether the guard ran in that request.
+	 * Requests the site twice, through wp-admin (admin-ajax.php) and through
+	 * the front controller (the home URL, where pages and /wp-json/ run, which
+	 * is another folder when WordPress lives in a sub folder or on Bedrock),
+	 * and asks whether the guard ran in those requests.
 	 *
 	 * @return string active | inactive | down | unknown
 	 */
 	private function ping_guard() {
 		$token = wp_generate_password( 24, false );
 		set_transient( 'wpcybersec_guard_ping', $token, 5 * MINUTE_IN_SECONDS );
-		$response = wp_remote_get(
+		$admin = $this->ping_url(
 			add_query_arg(
 				array(
 					'action' => 'wpcybersec_guard_ping',
 					'token'  => $token,
 				),
 				admin_url( 'admin-ajax.php' )
-			),
+			)
+		);
+		$front = 'down' === $admin ? 'unknown' : $this->ping_url( add_query_arg( 'wpcybersec_guard_ping', $token, home_url( '/' ) ) );
+		delete_transient( 'wpcybersec_guard_ping' );
+		return self::combine_pings( $admin, $front );
+	}
+
+	/**
+	 * One answer out of the two pings: a broken request wins, then a request
+	 * that ran without the guard; "unknown" only when nothing was learned.
+	 *
+	 * @param string $admin Result through wp-admin.
+	 * @param string $front Result through the front controller.
+	 * @return string active | inactive | down | unknown
+	 */
+	public static function combine_pings( $admin, $front ) {
+		$both = array( $admin, $front );
+		foreach ( array( 'down', 'inactive', 'active' ) as $state ) {
+			if ( in_array( $state, $both, true ) ) {
+				return $state;
+			}
+		}
+		return 'unknown';
+	}
+
+	/**
+	 * @param string $url Ping URL.
+	 * @return string active | inactive | down | unknown
+	 */
+	private function ping_url( $url ) {
+		$response = wp_remote_get(
+			$url,
 			array(
 				'timeout'   => 20,
 				'sslverify' => apply_filters( 'https_local_ssl_verify', false ), // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- WordPress core filter, same as wp-cron uses for loopback requests.
+				'headers'   => array( 'Cache-Control' => 'no-cache' ),
 			)
 		);
-		delete_transient( 'wpcybersec_guard_ping' );
 		if ( is_wp_error( $response ) ) {
 			return 'unknown'; // Timeout or blocked loopback: that says nothing about the change.
 		}
@@ -644,7 +782,7 @@ class Hardening {
 		}
 		$body = json_decode( (string) wp_remote_retrieve_body( $response ), true );
 		if ( 200 !== $code || ! is_array( $body ) || ! array_key_exists( 'active', $body ) ) {
-			return 'unknown'; // A login page, an HTTP password prompt or a firewall answered instead of WordPress.
+			return 'unknown'; // A login page, an HTTP password prompt, a cached page or a firewall answered instead of WordPress.
 		}
 		return ! empty( $body['active'] ) ? 'active' : 'inactive';
 	}
@@ -653,14 +791,34 @@ class Hardening {
 	 * Answers the loopback check (only with the one-time token).
 	 */
 	public function ajax_guard_ping() {
+		$given = isset( $_GET['token'] ) ? sanitize_text_field( wp_unslash( $_GET['token'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		self::answer_ping( $given );
+	}
+
+	/**
+	 * Answers the loopback check sent to the front controller (init, early).
+	 */
+	public function front_guard_ping() {
+		$given = isset( $_GET['wpcybersec_guard_ping'] ) ? sanitize_text_field( wp_unslash( $_GET['wpcybersec_guard_ping'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- one-time token, checked below.
+		$token = (string) get_transient( 'wpcybersec_guard_ping' );
+		if ( '' === $token || ! hash_equals( $token, $given ) ) {
+			return; // Not our test request: the page loads as usual.
+		}
+		self::answer_ping( $given );
+	}
+
+	/**
+	 * @param string $given Token from the request.
+	 */
+	private static function answer_ping( $given ) {
 		$token  = (string) get_transient( 'wpcybersec_guard_ping' );
-		$given  = isset( $_GET['token'] ) ? sanitize_text_field( wp_unslash( $_GET['token'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-		$active = '' !== $token && hash_equals( $token, $given ) && defined( 'WPCYBERSEC_GUARD_ACTIVE' );
+		$active = '' !== $token && hash_equals( $token, (string) $given ) && defined( 'WPCYBERSEC_GUARD_ACTIVE' );
+		nocache_headers();
 		wp_send_json( array( 'active' => $active ) );
 	}
 
 	/**
-	 * @return true|\WP_Error
+	 * @return string|\WP_Error String = applied, with what the live test showed.
 	 */
 	private function fix_uploads_php() {
 		$sysadmin = wpcybersec()->sysadmin;
@@ -668,7 +826,14 @@ class Hardening {
 			return new \WP_Error( 'wpcybersec_fix', __( 'This fix is not available.', 'cybergate-security' ) );
 		}
 		$result = $sysadmin->write_uploads_htaccess();
-		return is_wp_error( $result ) ? $result : true;
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+		if ( 'unverified' === $result ) {
+			// Not "Fixed": nothing proved that PHP stopped running there.
+			return __( 'The rules are in uploads/.htaccess, but the site could not test itself, so it is not confirmed that PHP no longer runs in uploads. Run the live test under Settings > Advanced > Web server later.', 'cybergate-security' );
+		}
+		return __( 'PHP no longer runs in the uploads folder (checked with a live test).', 'cybergate-security' );
 	}
 
 	/* ------------------------------------------------------------------ */

@@ -127,10 +127,36 @@ class Db_Scanner {
 	/** @var string[]|null Trusted script hosts after the filter. */
 	private $trusted_hosts = null;
 
+	/** @var int|null Rows per query for this request (see rows_limit()). */
+	private $rows_limit = null;
+
 	/**
 	 * Nothing to hook: Scan_Job drives the scan.
 	 */
 	public function register() {}
+
+	/**
+	 * Matching rows fetched per query: ROWS_LIMIT, lowered when PHP has little
+	 * memory left, because every row can carry MAX_VALUE bytes and inspecting
+	 * it makes a few more copies (50 rows of 1 MB do not fit a 64 MB limit).
+	 *
+	 * @return int Between 2 and ROWS_LIMIT.
+	 */
+	private function rows_limit() {
+		if ( null !== $this->rows_limit ) {
+			return $this->rows_limit;
+		}
+		$limit = function_exists( 'wp_convert_hr_to_bytes' ) ? wp_convert_hr_to_bytes( (string) ini_get( 'memory_limit' ) ) : -1;
+		if ( $limit <= 0 ) {
+			$this->rows_limit = self::ROWS_LIMIT; // No limit.
+			return $this->rows_limit;
+		}
+		$free = $limit - memory_get_usage( true );
+		// Half the free memory for the result set, about 4 copies of each value while inspecting it.
+		$rows             = (int) floor( max( 0, $free ) / 2 / ( 4 * self::MAX_VALUE ) );
+		$this->rows_limit = max( 2, min( self::ROWS_LIMIT, $rows ) );
+		return $this->rows_limit;
+	}
 
 	/* ------------------------------------------------------------------ */
 	/* Run lifecycle                                                       */
@@ -282,7 +308,7 @@ class Db_Scanner {
 			'%u003cscript%',
 			'%<iframe%',
 			'%u003ciframe%',
-			self::ROWS_LIMIT,
+			$this->rows_limit(),
 		);
 		// phpcs:disable WordPress.DB, PluginCheck.Security.DirectDB.UnescapedDBParameter -- core table from $wpdb, every value is a placeholder.
 		$sql  = "SELECT option_id, option_name, LENGTH(option_value) AS len, SUBSTRING(option_value, 1, %d) AS val FROM {$wpdb->options}"
@@ -317,7 +343,7 @@ class Db_Scanner {
 			}
 		}
 
-		if ( count( $rows ) >= self::ROWS_LIMIT ) {
+		if ( count( $rows ) >= $this->rows_limit() ) {
 			$last           = end( $rows );
 			$cursor['last'] = (int) $last['option_id']; // The rest of this range comes next.
 			return;
@@ -348,7 +374,7 @@ class Db_Scanner {
 			$types,
 			$statuses,
 			array_keys( self::CODE_POST_TYPES ),
-			array( '%<script%', '%<iframe%', '%eval%', '%document.write%', self::ROWS_LIMIT )
+			array( '%<script%', '%<iframe%', '%eval%', '%document.write%', $this->rows_limit() )
 		);
 		// phpcs:disable WordPress.DB, PluginCheck.Security.DirectDB.UnescapedDBParameter -- core table from $wpdb; the IN lists are placeholders from array_fill().
 		$sql  = "SELECT ID, post_type, post_status, post_title, LENGTH(post_content) AS len, SUBSTRING(post_content, 1, %d) AS val FROM {$wpdb->posts}"
@@ -390,7 +416,7 @@ class Db_Scanner {
 			}
 		}
 
-		if ( count( $rows ) >= self::ROWS_LIMIT ) {
+		if ( count( $rows ) >= $this->rows_limit() ) {
 			$last           = end( $rows );
 			$cursor['last'] = (int) $last['ID'];
 			return;
@@ -439,7 +465,7 @@ class Db_Scanner {
 		// phpcs:disable WordPress.DB, PluginCheck.Security.DirectDB.UnescapedDBParameter -- table and column names come from the CODE_TABLES constant.
 		$sql  = "SELECT `{$def['id']}` AS id, `{$def['name']}` AS name, LENGTH(`{$def['code']}`) AS len, SUBSTRING(`{$def['code']}`, 1, %d) AS val FROM `{$table}`"
 			. " WHERE `{$def['id']}` > %d AND `{$def['id']}` <= %d ORDER BY `{$def['id']}` LIMIT %d";
-		$rows = (array) $wpdb->get_results( $wpdb->prepare( $sql, self::MAX_VALUE, $from, $to, self::ROWS_LIMIT ), ARRAY_A );
+		$rows = (array) $wpdb->get_results( $wpdb->prepare( $sql, self::MAX_VALUE, $from, $to, $this->rows_limit() ), ARRAY_A );
 		// phpcs:enable
 		foreach ( $rows as $row ) {
 			if ( ! isset( $cursor['code_rows'] ) ) {
@@ -471,7 +497,7 @@ class Db_Scanner {
 				$cursor
 			);
 		}
-		if ( count( $rows ) >= self::ROWS_LIMIT ) {
+		if ( count( $rows ) >= $this->rows_limit() ) {
 			$last           = end( $rows );
 			$cursor['last'] = (int) $last['id'];
 			return;
@@ -836,7 +862,7 @@ class Db_Scanner {
 		$pos    = 0;
 		while ( count( $out ) < self::MAX_TAGS && false !== ( $start = strpos( $lower, $needle, $pos ) ) ) { // phpcs:ignore WordPress.CodeAnalysis.AssignmentInCondition
 			$after = $start + strlen( $needle );
-			if ( $after < $len && ( ctype_alnum( $lower[ $after ] ) || '-' === $lower[ $after ] ) ) {
+			if ( $after < $len && ( preg_match( '/[a-z0-9]/', $lower[ $after ] ) || '-' === $lower[ $after ] ) ) {
 				$pos = $after; // <scripts>, <iframe-x>: another tag.
 				continue;
 			}

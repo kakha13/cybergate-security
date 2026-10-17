@@ -242,7 +242,7 @@ class Cli {
 				sprintf(
 					/* translators: %s: command */
 					__( 'WP-CLI has already loaded the active plugins and the theme, so this scan cannot isolate them. Run the isolated scan with the standalone runner: %s', 'cybergate-security' ),
-					'php ' . WPCYBERSEC_DIR . 'bin/cron.php --isolated --full --wp=' . untrailingslashit( ABSPATH )
+					'php ' . WPCYBERSEC_DIR . 'bin/cron.php --isolated --full --wp=' . untrailingslashit( ABSPATH ) . ( is_multisite() ? ' --url=' . network_home_url( '/' ) : '' )
 				)
 			);
 		}
@@ -832,6 +832,9 @@ class Cli {
 		$settings = $this->service( 'settings' );
 		$minutes  = (int) $this->flag( $assoc_args, 'minutes', $settings->get( 'unlock_minutes', 15 ) );
 		$minutes  = max( 1, min( 1440, $minutes ) );
+		if ( Install_Gate::mods_disallowed() ) {
+			\WP_CLI::error( __( 'Installs and updates are disabled by the site config (DISALLOW_FILE_MODS in wp-config.php), so there is nothing to unlock.', 'cybergate-security' ) );
+		}
 		$gate->unlock( $minutes );
 		$until = method_exists( $gate, 'unlocked_until' ) ? (int) $gate->unlocked_until() : time() + $minutes * MINUTE_IN_SECONDS;
 		if ( ! $settings->get( 'freeze_mods', false ) ) {

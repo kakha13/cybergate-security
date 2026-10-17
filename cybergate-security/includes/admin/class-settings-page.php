@@ -1142,7 +1142,7 @@ class Settings_Page {
 		echo '<div class="wpcs-engines">';
 		// ClamAV.
 		$used = array(
-			'missing'       => __( 'Nothing (not installed)', 'cybergate-security' ),
+			'missing'       => ! empty( $clam['hidden'] ) ? __( 'Nothing (not found)', 'cybergate-security' ) : __( 'Nothing (not installed)', 'cybergate-security' ),
 			'blocked'       => __( 'Nothing (PHP cannot run it)', 'cybergate-security' ),
 			'ready_off'     => __( 'Nothing yet', 'cybergate-security' ),
 			'uploads'       => __( 'Uploads', 'cybergate-security' ),
@@ -1150,7 +1150,7 @@ class Settings_Page {
 		);
 		$rows = array(
 			__( 'Program', 'cybergate-security' )            => '' !== $clam['binary'] ? '<code class="wpcs-path">' . esc_html( $clam['binary'] ) . '</code>' : esc_html__( 'Not found', 'cybergate-security' ),
-			__( 'Background service (clamd)', 'cybergate-security' ) => 'missing' === $clam['state'] ? esc_html__( 'Not installed', 'cybergate-security' ) : ( $clam['daemon'] ? $this->badge( __( 'Running', 'cybergate-security' ), 'ok' ) : $this->badge( __( 'Not running', 'cybergate-security' ), 'muted' ) ),
+			__( 'Background service (clamd)', 'cybergate-security' ) => 'missing' === $clam['state'] ? ( ! empty( $clam['hidden'] ) ? esc_html__( 'Unknown (hosting hides it)', 'cybergate-security' ) : esc_html__( 'Not installed', 'cybergate-security' ) ) : ( $clam['daemon'] ? $this->badge( __( 'Running', 'cybergate-security' ), 'ok' ) : $this->badge( __( 'Not running', 'cybergate-security' ), 'muted' ) ),
 			__( 'PHP may run it', 'cybergate-security' )     => $clam['exec'] ? $this->badge( $yes, 'ok' ) : $this->badge( __( 'No: exec() and proc_open() are disabled', 'cybergate-security' ), 'high' ),
 			__( 'Used for', 'cybergate-security' )           => esc_html( $used[ $clam['state'] ] ),
 		);
@@ -1337,7 +1337,13 @@ class Settings_Page {
 		if ( defined( 'WPCYBERSEC_DATA_DIR' ) && WPCYBERSEC_DATA_DIR ) {
 			$badges .= ' ' . $this->badge( __( 'Set by WPCYBERSEC_DATA_DIR', 'cybergate-security' ), 'info' );
 		}
-		$this->field( __( 'Data folder', 'cybergate-security' ), '<code class="wpcs-path">' . esc_html( $dir ) . '</code><div class="wpcs-badges">' . $badges . '</div>' );
+		$status  = method_exists( $storage, 'check' ) ? $storage->check() : array( 'state' => 'ok' );
+		$problem = 'ok' !== $status['state'] ? $storage->problem( $status ) : null;
+		if ( 'fallback' === $status['state'] ) {
+			$badges .= ' ' . $this->badge( __( 'Fallback folder', 'cybergate-security' ), 'medium' );
+		}
+		$note = $problem ? '<p class="wpcs-sub">' . esc_html( $problem['text'] . ' ' . $problem['fix'] ) . '</p>' . ( '' !== $problem['code'] ? '<code class="wpcs-path">' . esc_html( $problem['code'] ) . '</code>' : '' ) : '';
+		$this->field( __( 'Data folder', 'cybergate-security' ), '<code class="wpcs-path">' . esc_html( $dir ) . '</code><div class="wpcs-badges">' . $badges . '</div>' . $note );
 
 		$probe = $tools->probe_quarantine_web( false );
 		switch ( $probe['result'] ) {
@@ -1389,6 +1395,15 @@ class Settings_Page {
 			$s['scan_root']
 		);
 		$root .= '<div class="wpcs-indent' . ( 'custom' === $s['scan_root'] ? '' : ' wpcs-hidden' ) . '" data-wpcs-scan-root-custom><input type="text" name="scan_root_custom" value="' . esc_attr( $s['scan_root_custom'] ) . '" placeholder="' . esc_attr( $parent ) . '" class="wpcs-mono" aria-label="' . esc_attr__( 'Custom scan folder', 'cybergate-security' ) . '"></div>';
+		$outside = method_exists( '\WPCyberSecurity\Paths', 'outside_root' ) ? \WPCyberSecurity\Paths::outside_root() : array();
+		if ( $outside ) {
+			// WordPress folders outside the scan folder (Bedrock, WordPress in a subfolder, linked uploads) are scanned too.
+			$paths = array();
+			foreach ( $outside as $entry ) {
+				$paths[] = '<code>' . esc_html( $entry['path'] ) . '</code>' . ( 'top' === $entry['depth'] ? ' ' . esc_html__( '(files at its top only)', 'cybergate-security' ) : '' );
+			}
+			$root .= '<div class="wpcs-notice wpcs-notice--info wpcs-notice--compact"><span class="dashicons dashicons-info" aria-hidden="true"></span><p>' . esc_html__( 'Some WordPress folders lie outside the scan folder and are scanned as well:', 'cybergate-security' ) . ' ' . implode( ', ', $paths ) . '</p></div>';
+		}
 		$this->field( __( 'Scan folder', 'cybergate-security' ), $root, __( 'After changing the folder, rebuild the baseline from the Dashboard, otherwise every file is reported as new.', 'cybergate-security' ) );
 
 		$this->field(
@@ -1605,6 +1620,9 @@ class Settings_Page {
 
 		if ( ! $gate || ! method_exists( $gate, 'unlocked_until' ) ) {
 			$this->field( __( 'Current state', 'cybergate-security' ), '<span class="wpcs-muted">' . esc_html__( 'The install gate module is not available.', 'cybergate-security' ) . '</span>' );
+		} elseif ( \WPCyberSecurity\Install_Gate::mods_disallowed() ) {
+			$html = '<div class="wpcs-row">' . $this->badge( __( 'Disabled by site config', 'cybergate-security' ), 'ok' ) . '</div>';
+			$this->field( __( 'Current state', 'cybergate-security' ), $html, __( 'Installs and updates are disabled by the site config (DISALLOW_FILE_MODS in wp-config.php), so there is nothing to unlock here. Remove that line from wp-config.php to install or update from the dashboard again.', 'cybergate-security' ) );
 		} elseif ( empty( $s['freeze_mods'] ) ) {
 			$html = '<div class="wpcs-row">' . $this->badge( __( 'Off - changes allowed', 'cybergate-security' ), 'muted' ) . '</div>';
 			$this->field( __( 'Current state', 'cybergate-security' ), $html, __( 'Plugins, themes and core can be changed as usual. Turn on Freeze mode and save to lock them.', 'cybergate-security' ) );
@@ -1643,10 +1661,15 @@ class Settings_Page {
 			'none'  => $this->badge( __( 'No blocking rule', 'cybergate-security' ), 'medium' ),
 		);
 		echo '<h3 class="wpcs-subhead">' . esc_html__( 'Apache and LiteSpeed', 'cybergate-security' ) . ' ' . $labels[ $status ] . '</h3>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- badge is escaped.
-		echo '<div class="wpcs-row wpcs-card__actions">';
-		echo '<a class="button" href="' . esc_url( $this->action_url( 'write_htaccess' ) ) . '"><span class="dashicons dashicons-media-text" aria-hidden="true"></span>' . esc_html( 'ours' === $status ? __( 'Refresh uploads/.htaccess rules', 'cybergate-security' ) : __( 'Write uploads/.htaccess for me', 'cybergate-security' ) ) . '</a>';
-		echo '<span class="wpcs-muted wpcs-inline-help">' . esc_html__( 'Adds the block between markers and keeps everything else. If the server answers with an error afterwards, the change is undone.', 'cybergate-security' ) . '</span>';
-		echo '</div>';
+		if ( 'nginx' === $server ) {
+			// nginx never reads .htaccess: no button that would only look like a fix.
+			echo '<p class="wpcs-muted">' . esc_html__( 'This server runs nginx, which ignores .htaccess files. Use the nginx rule below instead.', 'cybergate-security' ) . '</p>';
+		} else {
+			echo '<div class="wpcs-row wpcs-card__actions">';
+			echo '<a class="button" href="' . esc_url( $this->action_url( 'write_htaccess' ) ) . '"><span class="dashicons dashicons-media-text" aria-hidden="true"></span>' . esc_html( 'ours' === $status ? __( 'Refresh uploads/.htaccess rules', 'cybergate-security' ) : __( 'Write uploads/.htaccess for me', 'cybergate-security' ) ) . '</a>';
+			echo '<span class="wpcs-muted wpcs-inline-help">' . esc_html__( 'Adds the block between markers and keeps everything else, then tests that PHP no longer runs in uploads. If the server answers with an error, or PHP still runs, the change is undone.', 'cybergate-security' ) . '</span>';
+			echo '</div>';
+		}
 		echo self::commands( $tools->apache_uploads_rules(), 'wp-content/uploads/.htaccess', '', 'none' === $status && 'nginx' !== $server ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
 
 		echo '<h3 class="wpcs-subhead">nginx' . ( 'nginx' === $server ? ' ' . $this->badge( __( 'This server', 'cybergate-security' ), 'info' ) : '' ) . '</h3>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- badge is escaped.
@@ -1739,6 +1762,24 @@ class Settings_Page {
 				)
 				: __( 'No stored copies', 'cybergate-security' );
 			$copies_html = '<div class="wpcs-inline-status">' . $this->badge( $copies, $stats['files'] ? 'info' : 'muted' ) . '</div>';
+			if ( method_exists( $snapshots, 'usage' ) ) {
+				$usage = $snapshots->usage();
+				$line  = sprintf(
+					/* translators: 1: percent used, 2: copy limit, 3: size limit */
+					__( '%1$s%% of the limits used (%2$s copies, %3$s).', 'cybergate-security' ),
+					number_format_i18n( $usage['percent'], 0 ),
+					number_format_i18n( $usage['max_files'] ),
+					size_format( $usage['max_bytes'] )
+				);
+				if ( $usage['full'] ) {
+					$line .= ' ' . __( 'The store is full: new copies are skipped until the oldest are deleted after the next scan.', 'cybergate-security' );
+				}
+				if ( $usage['failures'] ) {
+					/* translators: %s: number of copies */
+					$line .= ' ' . sprintf( __( 'Copies that could not be written: %s (check free disk space and the data folder permissions).', 'cybergate-security' ), number_format_i18n( $usage['failures'] ) );
+				}
+				$copies_html .= '<p class="description">' . esc_html( $line ) . '</p>';
+			}
 			if ( $stats['files'] ) {
 				$copies_html .= '<p class="wpcs-inline-actions"><a class="button wpcs-btn-danger" href="' . esc_url( $this->action_url( 'snapshots_clear' ) ) . '" data-wpcs-confirm="' . esc_attr__( 'Delete every stored file copy? Reports can then no longer show what changed in files found so far. While copies are switched on, the next scan copies the trusted files again.', 'cybergate-security' ) . '"><span class="dashicons dashicons-trash" aria-hidden="true"></span>' . esc_html__( 'Delete stored copies', 'cybergate-security' ) . '</a></p>';
 			}
