@@ -93,6 +93,9 @@ class Settings {
 			'clamav_enabled'           => false,
 			'clamav_binary'            => '',
 
+			// Advanced: hosting panel the instructions follow ('' detects it, see Hosting).
+			'hosting_panel'            => '',
+
 			// Housekeeping.
 			'log_retention_days'       => 90,
 			'delete_data_on_uninstall' => false,
@@ -115,6 +118,7 @@ class Settings {
 			'notify_mode'      => array( 'instant', 'digest', 'off' ),
 			'scan_root'        => array( 'abspath', 'parent', 'custom' ),
 			'guard_action'     => array( 'block', 'strip' ),
+			'hosting_panel'    => array_merge( array( '' ), Hosting::ids() ),
 		);
 	}
 

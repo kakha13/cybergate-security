@@ -383,15 +383,18 @@ class Developer_Instructions {
 							'code' => 'touch ' . Sysadmin_Tools::shell_arg( $file ) . "\nchown " . $user . ' ' . Sysadmin_Tools::shell_arg( $file ),
 						),
 					);
+					$entry['steps'] = self::panel( 'web_rules', $entry['steps'] );
 				}
 				break;
 
 			case 'guard':
 				$entry['title'] = __( 'Load the early upload guard (auto_prepend_file)', 'cybergate-security' );
 				$entry['why']   = __( 'The guard is installed, but PHP does not load it yet and the plugin cannot write the setting on this server.', 'cybergate-security' );
+				// The way that fits this PHP SAPI; the hosting panel's own way goes first through panel().
 				$snippet = null;
+				$sapi_id = (string) Sysadmin_Tools::call( 'guard_manager', 'recommended_snippet', array(), '' );
 				foreach ( (array) Sysadmin_Tools::call( 'guard_manager', 'snippets', array(), array() ) as $candidate ) {
-					if ( is_array( $candidate ) && ! empty( $candidate['recommended'] ) ) {
+					if ( is_array( $candidate ) && isset( $candidate['id'] ) && $candidate['id'] === $sapi_id ) {
 						$snippet = $candidate;
 						break;
 					}
@@ -406,6 +409,7 @@ class Developer_Instructions {
 						),
 						array( 'text' => __( 'Restart PHP (or the web server), then open Settings > Advanced > Early guard: it shows "Active in this request: Yes" once it works.', 'cybergate-security' ) ),
 					);
+					$entry['steps'] = self::panel( 'prepend', $entry['steps'] );
 				} elseif ( $steps ) {
 					$entry['steps'] = array_slice( $steps, 1 ); // The first step installs the guard files, which is done.
 				}
@@ -425,12 +429,13 @@ class Developer_Instructions {
 						Sysadmin_Tools::cron_disable_step(),
 					);
 				}
+				$entry['steps'] = self::panel( 'cron', $entry['steps'] );
 				break;
 
 			case 'clamav':
 				$entry['title']    = __( 'Install ClamAV (optional)', 'cybergate-security' );
 				$entry['why']      = __( 'ClamAV knows millions of existing infections and gives every upload a second opinion. It finds more, but it does not block attacks.', 'cybergate-security' );
-				$entry['steps']    = Admin\Clamav_Guide::install_steps();
+				$entry['steps']    = self::panel( 'clamav', Admin\Clamav_Guide::install_steps() );
 				$entry['optional'] = true;
 				break;
 
@@ -448,7 +453,7 @@ class Developer_Instructions {
 			case 'maldet':
 				$entry['title']    = __( 'Install Linux Malware Detect (optional)', 'cybergate-security' );
 				$entry['why']      = __( 'maldet adds signatures made for website malware such as PHP web shells. With ClamAV installed, its signatures are used by ClamAV too.', 'cybergate-security' );
-				$entry['steps']    = array_merge( Admin\Clamav_Guide::maldet_install_steps(), $tools ? array_slice( $tools->maldet_steps(), 0, 5 ) : array() );
+				$entry['steps']    = self::panel( 'maldet', array_merge( Admin\Clamav_Guide::maldet_install_steps(), $tools ? array_slice( $tools->maldet_steps(), 0, 5 ) : array() ) );
 				$entry['optional'] = true;
 				break;
 
@@ -489,6 +494,45 @@ class Developer_Instructions {
 				}
 		}
 		return $entry['steps'] ? $entry : null;
+	}
+
+	/**
+	 * The hosting panel's steps first, these under "Other ways" (Hosting::merge()).
+	 *
+	 * @param string  $task    Hosting task.
+	 * @param array[] $generic Generic steps.
+	 * @return array[]
+	 */
+	private static function panel( $task, array $generic ) {
+		$hosting = wpcybersec()->hosting;
+		if ( ! is_object( $hosting ) || ! method_exists( $hosting, 'merge' ) ) {
+			return $generic;
+		}
+		try {
+			return $hosting->merge( $task, $generic );
+		} catch ( \Throwable $e ) {
+			return $generic;
+		}
+	}
+
+	/**
+	 * "Hosting: CyberPanel (OpenLiteSpeed, lsphp)" for the instructions header, '' when unavailable.
+	 *
+	 * @return string
+	 */
+	public static function hosting_line() {
+		$hosting = wpcybersec()->hosting;
+		if ( ! is_object( $hosting ) || ! method_exists( $hosting, 'label' ) ) {
+			return '';
+		}
+		try {
+			$info = $hosting->current();
+		} catch ( \Throwable $e ) {
+			return '';
+		}
+		$note = ! empty( $info['overridden'] ) ? __( 'chosen in Settings > Advanced', 'cybergate-security' ) : ( 'high' === $info['confidence'] ? '' : ( 'likely' === $info['confidence'] ? __( 'likely', 'cybergate-security' ) : __( 'not detected, generic steps', 'cybergate-security' ) ) );
+		/* translators: %s: hosting panel with web server and PHP handler */
+		return sprintf( __( 'Hosting: %s', 'cybergate-security' ), $hosting->label( $info ) ) . ( '' !== $note ? ' [' . $note . ']' : '' );
 	}
 
 	/**
@@ -547,8 +591,12 @@ class Developer_Instructions {
 			sprintf( __( 'Generated %s UTC. Each item needs someone with access to the server (SSH, SFTP or the hosting panel).', 'cybergate-security' ), gmdate( 'Y-m-d H:i' ) ),
 			/* translators: %s: WordPress folder */
 			sprintf( __( 'WordPress folder: %s', 'cybergate-security' ), untrailingslashit( wp_normalize_path( ABSPATH ) ) ),
-			'',
 		);
+		$hosting = self::hosting_line();
+		if ( '' !== $hosting ) {
+			$lines[] = $hosting;
+		}
+		$lines[] = '';
 		if ( ! $items ) {
 			$lines[] = __( 'Nothing needs server access right now.', 'cybergate-security' );
 		}
@@ -562,6 +610,10 @@ class Developer_Instructions {
 				$lines[] = '   ' . sprintf( __( 'Tried from the admin panel on %1$s: %2$s', 'cybergate-security' ), gmdate( 'Y-m-d H:i', (int) $item['at'] ) . ' UTC', $item['error'] );
 			}
 			foreach ( $item['steps'] as $step ) {
+				if ( ! empty( $step['other'] ) ) {
+					$lines[] = '   ' . ( ! empty( $step['text'] ) ? $step['text'] : __( 'Other ways', 'cybergate-security' ) ) . ':';
+					continue;
+				}
 				if ( ! empty( $step['text'] ) ) {
 					$lines[] = '   - ' . $step['text'];
 				}

@@ -170,6 +170,17 @@ class Site_Report {
 			__( 'Baseline recorded', 'cybergate-security' )   => $baseline ? $this->when( $baseline ) : __( 'Not yet', 'cybergate-security' ),
 			__( 'Last scan', 'cybergate-security' )           => ! empty( $last['finished_at'] ) ? $this->when( (int) $last['finished_at'] ) : __( 'Never', 'cybergate-security' ),
 		);
+		$hosting = wpcybersec()->hosting;
+		if ( is_object( $hosting ) && method_exists( $hosting, 'current' ) ) {
+			try {
+				$info = $hosting->current();
+				$rows[ __( 'Hosting', 'cybergate-security' ) ] = $hosting->label( $info ) . '. ' . $hosting->confidence_text( $info )
+					/* translators: %s: list of what was found */
+					. ( ! empty( $info['signals'] ) ? ' ' . sprintf( __( 'Found: %s.', 'cybergate-security' ), implode( '; ', (array) $info['signals'] ) ) : '' );
+			} catch ( \Throwable $e ) {
+				unset( $e );
+			}
+		}
 		if ( is_multisite() && function_exists( 'get_sites' ) ) {
 			// One report covers the whole network: files, approvals and scans are shared.
 			$rows[ __( 'Sites in the network', 'cybergate-security' ) ] = number_format_i18n( (int) get_sites( array( 'count' => true ) ) );

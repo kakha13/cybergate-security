@@ -71,6 +71,7 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
 | sysadmin | `Sysadmin_Tools` | setup |
 | hardening | `Hardening` | setup (one-click fixes) |
 | developer | `Developer_Instructions` | setup (steps that need server access) |
+| hosting | `Hosting` | setup (hosting panel detection and panel steps) |
 | admin | `Admin\Admin` | admin UI |
 
 Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` (core), `Network`
@@ -687,6 +688,39 @@ Files: `includes/admin/class-wizard.php`, `includes/admin/class-settings-page.ph
   re-run, never deletes site files).
 - `Cli`: static `register()` -> `WP_CLI::add_command('wpcybersec', ...)` with `status`, `scan`,
   `pending`, `approve`, `deny`, `allowlist`, `guard`, `unlock`, `lock`, `report`.
+
+## Hosting panel detection
+
+Files: `includes/class-hosting.php`; used by `Sysadmin_Tools` (check `hosting`), `Hardening::manual_steps()`,
+`Developer_Instructions`, `Guard_Manager::snippets()`, `Admin\Settings_Page`, `Admin\Wizard`, `Site_Report`.
+
+- `detect()`: `{ id, name, kind panel|managed|local|unknown, confidence high|likely|'', signals[], web_server,
+  web_server_name, php_handler fpm|lsapi|mod_php|cgi|cli|other, php_handler_name, sapi }`. Only folders, files,
+  constants and environment variables, never a program; every file check goes through the probe, whose default
+  (`default_probe()`) checks `Storage::path_allowed()` before `@is_dir()` / `@is_file()`. `new Hosting( $probe )`
+  takes a callable `( $what dir|file|func|const|env|server|value, $arg )` so tests fake all of it. A marker that
+  belongs to the panel (install folder, host constant) gives `high` and beats any layout; site paths alone give
+  `likely`; CloudLinux only decides (cPanel, likely) when nothing else matched. DDEV and Lando win over managed
+  hosts' mu-plugins copied with a site; `PANTHEON_ENVIRONMENT=lando` is Lando.
+- `current( $fresh )`: the cached detection (non-autoloaded option `wpcybersec_hosting` `{ v, at, result }`, 12 h,
+  `RULES_VERSION`) with setting `hosting_panel` applied (`''` detect, a panel id, or `other` for the generic
+  steps); adds `detected_*`, `overridden`. Read it only on pages that show instructions (Advanced sections,
+  wizard Environment and Server steps, developer instructions, the report): normal admin pages stay at 0 queries.
+- `steps( $task )` for `cron`, `prepend`, `php_restart`, `clamav`, `maldet`, `web_rules`, `data_dir`: the usual
+  `{ text, code }` steps, empty when the panel has none (generic steps apply). Cron steps come from
+  `Sysadmin_Tools::cron_jobs()` (which also gives `script`, `args`, `url` for panels that ask for them apart),
+  nginx rules from `Sysadmin_Tools::nginx_uploads_block()` (the `UPLOADS_EXEC_PATTERN` rule as a prefix location
+  with the PHP block nested, so it works wherever a panel includes it) and `nginx_data_rule()`, Apache rules
+  from `apache_uploads_rules()`. Filter `wpcybersec_hosting_steps`.
+- `merge( $task, $generic )`: panel steps, then the marker step `Hosting::other_ways()` (`{ text, other: true }`),
+  then the generic ones; `Settings_Page::render_steps()` folds what follows the marker under "Other ways",
+  `Developer_Instructions::as_text()` prints "Other ways:". `prepend` adds the `php_restart` steps; `data_dir`
+  notes go in front without a fold. `prepend_snippet()` is the recommended `Guard_Manager::snippets()` entry
+  (id `panel`) when the panel has one. `Settings_Page::render_panel_steps()` / `other_ways_open()` /
+  `other_ways_close()` do the same for cards.
+- `server-tools/cgav.sh` `detect_panel()` checks the same install folders (then the site path) as root, prints the
+  panel in `cgav status`, and `install-clamav` follows it (cPanel's own package, DirectAdmin CustomBuild hint
+  unless `CGAV_OS_PACKAGES=1`, Plesk note, system packages elsewhere).
 
 ## Speed and usability contracts
 

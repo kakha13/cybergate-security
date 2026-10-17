@@ -556,6 +556,7 @@ class Sysadmin_Tools {
 			'check_zip',
 			'check_wp_config',
 			'check_file_edit',
+			'check_hosting',
 			'check_server',
 			'check_plugins',
 			'check_security_plugins',
@@ -1318,6 +1319,31 @@ class Sysadmin_Tools {
 	}
 
 	/**
+	 * Hosting panel the instructions follow (Hosting::current()).
+	 *
+	 * @param bool $fresh Detect again.
+	 * @return array|null
+	 */
+	private function check_hosting( $fresh = false ) {
+		$hosting = self::service( 'hosting' );
+		if ( ! $hosting || ! method_exists( $hosting, 'current' ) ) {
+			return null;
+		}
+		$info = $hosting->current( $fresh );
+		return array(
+			'id'      => 'hosting',
+			'label'   => __( 'Hosting', 'cybergate-security' ),
+			'status'  => 'info',
+			'detail'  => $hosting->label( $info ) . '. ' . $hosting->confidence_text( $info ),
+			'signals' => isset( $info['signals'] ) ? (array) $info['signals'] : array(),
+			'link'    => array(
+				'url'   => Hosting::change_url(),
+				'label' => __( 'Change the hosting panel', 'cybergate-security' ),
+			),
+		);
+	}
+
+	/**
 	 * @return array
 	 */
 	private function check_server() {
@@ -2022,12 +2048,17 @@ class Sysadmin_Tools {
 	 * only its normal output goes to /dev/null, so errors still reach the
 	 * cron mail.
 	 *
-	 * @return array[] Each { id, schedule, when, command, line }.
+	 * Panels that ask for a PHP script and its arguments separately (Plesk
+	 * "Run a PHP script") use script and args; url is set when the job is
+	 * better added as "fetch a URL" (WordPress cron on multisite).
+	 *
+	 * @return array[] Each { id, schedule, when, command, line, script, args, url }.
 	 */
 	public static function cron_jobs() {
-		$php  = self::php_command();
-		$cron = self::shell_arg( wp_normalize_path( WPCYBERSEC_DIR ) . 'bin/cron.php' );
-		$args = ' --quiet --wp=' . self::shell_arg( self::abspath() ) . self::cron_url_arg();
+		$php    = self::php_command();
+		$script = wp_normalize_path( WPCYBERSEC_DIR ) . 'bin/cron.php';
+		$cron   = self::shell_arg( $script );
+		$args   = ' --quiet --wp=' . self::shell_arg( self::abspath() ) . self::cron_url_arg();
 
 		if ( is_multisite() ) {
 			// "php wp-cron.php" cannot tell which site of a network to load (no
@@ -2043,12 +2074,18 @@ class Sysadmin_Tools {
 				'schedule' => '17 * * * *',
 				'when'     => __( 'Quick scan, every hour (at minute 17)', 'cybergate-security' ),
 				'command'  => $php . ' ' . $cron . $args . ' > /dev/null',
+				'script'   => $script,
+				'args'     => ltrim( $args ),
+				'url'      => '',
 			),
 			array(
 				'id'       => 'full',
 				'schedule' => '30 3 * * *',
 				'when'     => __( 'Full malware scan, every night (at 3:30)', 'cybergate-security' ),
 				'command'  => $php . ' ' . $cron . ' --full' . $args . ' > /dev/null',
+				'script'   => $script,
+				'args'     => '--full' . $args,
+				'url'      => '',
 			),
 			array(
 				'id'       => 'wp_cron',
@@ -2057,6 +2094,9 @@ class Sysadmin_Tools {
 					? __( 'WordPress cron of the main site, every 5 minutes', 'cybergate-security' )
 					: __( 'The rest of WordPress cron, every 5 minutes', 'cybergate-security' ),
 				'command'  => $wp_cron,
+				'script'   => self::abspath() . '/wp-cron.php',
+				'args'     => '',
+				'url'      => is_multisite() ? network_site_url( 'wp-cron.php?doing_wp_cron' ) : '',
 			),
 		);
 		foreach ( $jobs as $i => $job ) {
@@ -2170,11 +2210,51 @@ class Sysadmin_Tools {
 	}
 
 	/**
+	 * The same uploads rule as nginx_uploads_rule() as a prefix location with
+	 * the PHP block nested inside. nginx tries the regular expressions nested
+	 * in the longest matching prefix location first, so a panel that includes
+	 * custom rules at the end of the server block, or keeps its PHP location
+	 * inside "location /", would never reach a plain regex location; this form
+	 * works wherever it is placed in the server block.
+	 *
+	 * @return string
+	 */
+	public static function nginx_uploads_block() {
+		$path = self::url_path_for( self::uploads_dir() );
+		$path = '' !== $path ? $path : '/wp-content/uploads/';
+		return 'location ^~ ' . $path . " {\n    location ~* \\.(" . self::UPLOADS_EXEC_PATTERN . ")$ {\n        deny all;\n    }\n}";
+	}
+
+	/**
+	 * URL path of the uploads folder ("/wp-content/uploads/").
+	 *
+	 * @return string
+	 */
+	public static function uploads_url_path() {
+		$path = self::url_path_for( self::uploads_dir() );
+		return '' !== $path ? $path : '/wp-content/uploads/';
+	}
+
+	/**
+	 * URL path of the data folder, '' when it is outside the web root.
+	 *
+	 * @return string
+	 */
+	public static function data_url_path() {
+		$storage = self::service( 'storage' );
+		$storage = $storage ? $storage : new Storage();
+		if ( ! $storage->is_in_webroot( $storage->data_dir() ) ) {
+			return '';
+		}
+		return self::url_path_for( $storage->data_dir() );
+	}
+
+	/**
 	 * nginx rule that blocks the data folder (empty comment when outside the web root).
 	 *
 	 * @return string
 	 */
-	private function nginx_data_rule() {
+	public function nginx_data_rule() {
 		$storage = self::service( 'storage' );
 		$storage = $storage ? $storage : new Storage();
 		$path    = self::url_path_for( $storage->data_dir() );
@@ -3258,6 +3338,7 @@ class Sysadmin_Tools {
 			'disable_file_editor'      => self::post_bool( $post, 'disable_file_editor' ),
 			'unlock_minutes'           => isset( $post['unlock_minutes'] ) ? (int) $post['unlock_minutes'] : $old['unlock_minutes'],
 			'clamav_enabled'           => self::post_bool( $post, 'clamav_enabled' ),
+			'hosting_panel'            => isset( $post['hosting_panel'] ) ? sanitize_key( (string) $post['hosting_panel'] ) : $old['hosting_panel'],
 			'log_retention_days'       => isset( $post['log_retention_days'] ) ? (int) $post['log_retention_days'] : $old['log_retention_days'],
 			'delete_data_on_uninstall' => self::post_bool( $post, 'delete_data_on_uninstall' ),
 		);

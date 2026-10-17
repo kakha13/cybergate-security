@@ -415,6 +415,16 @@ class Settings_Page {
 			if ( '' !== (string) $check['detail'] ) {
 				echo '<span class="wpcs-sub">' . esc_html( $check['detail'] ) . '</span>';
 			}
+			if ( ! empty( $check['signals'] ) && is_array( $check['signals'] ) ) {
+				echo '<details class="wpcs-manual wpcs-signals"><summary>' . esc_html__( 'What was found', 'cybergate-security' ) . '</summary><ul class="wpcs-signals__list">';
+				foreach ( $check['signals'] as $signal ) {
+					echo '<li><code>' . esc_html( (string) $signal ) . '</code></li>';
+				}
+				echo '</ul></details>';
+			}
+			if ( ! empty( $check['link']['url'] ) ) {
+				echo '<a class="wpcs-check__link" href="' . esc_url( $check['link']['url'] ) . '">' . esc_html( isset( $check['link']['label'] ) ? (string) $check['link']['label'] : __( 'Change', 'cybergate-security' ) ) . '</a>';
+			}
 			$auto  = ! empty( $check['auto_fix'] ) && is_array( $check['auto_fix'] ) ? $check['auto_fix'] : null;
 			$steps = ! empty( $check['manual_steps'] ) && is_array( $check['manual_steps'] ) ? $check['manual_steps'] : array();
 			// The check's own snippet (for example the nginx rule) when the steps do not show it.
@@ -523,14 +533,81 @@ class Settings_Page {
 	 */
 	public static function render_steps( array $steps ) {
 		echo '<ol class="wpcs-howto">';
+		$folded = false;
 		foreach ( $steps as $step ) {
+			if ( ! empty( $step['other'] ) ) {
+				// Hosting::merge(): the generic steps after the panel's own fold away.
+				echo '</ol>' . ( $folded ? '</details>' : '' );
+				echo '<details class="wpcs-manual wpcs-other-ways"><summary>' . esc_html( isset( $step['text'] ) ? (string) $step['text'] : __( 'Other ways', 'cybergate-security' ) ) . '</summary><ol class="wpcs-howto">';
+				$folded = true;
+				continue;
+			}
 			echo '<li>' . esc_html( isset( $step['text'] ) ? (string) $step['text'] : '' );
 			if ( ! empty( $step['code'] ) ) {
 				echo self::code( (string) $step['code'] ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
 			}
 			echo '</li>';
 		}
-		echo '</ol>';
+		echo '</ol>' . ( $folded ? '</details>' : '' );
+	}
+
+	/**
+	 * Panel-specific steps of one task (Hosting::steps()) under a short
+	 * heading, or nothing when the panel has none.
+	 *
+	 * @param string|string[] $tasks Hosting task, or several in a row (prepend, php_restart).
+	 * @param string          $lead  Optional sentence before the steps.
+	 * @return bool Whether anything was printed.
+	 */
+	public static function render_panel_steps( $tasks, $lead = '' ) {
+		$hosting = Sysadmin_Tools::service( 'hosting' );
+		if ( ! $hosting || ! method_exists( $hosting, 'steps' ) ) {
+			return false;
+		}
+		$tasks = (array) $tasks;
+		$steps = $hosting->steps( $tasks[0] );
+		if ( ! $steps ) {
+			return false;
+		}
+		foreach ( array_slice( $tasks, 1 ) as $task ) {
+			$steps = array_merge( $steps, $hosting->steps( $task ) );
+		}
+		$info = $hosting->current();
+		echo '<div class="wpcs-panel-steps" data-wpcs-panel-steps="' . esc_attr( $tasks[0] ) . '" data-wpcs-hosting="' . esc_attr( $info['id'] ) . '">';
+		echo '<p class="wpcs-panel-steps__head"><span class="dashicons dashicons-admin-site-alt3" aria-hidden="true"></span><strong>' . esc_html(
+			/* translators: %s: hosting panel name */
+			sprintf( __( 'On %s', 'cybergate-security' ), $info['name'] )
+		) . '</strong> <a class="wpcs-panel-steps__change" href="' . esc_url( \WPCyberSecurity\Hosting::change_url() ) . '">' . esc_html__( 'Not your panel?', 'cybergate-security' ) . '</a></p>';
+		if ( '' !== $lead ) {
+			echo '<p class="wpcs-sub">' . esc_html( $lead ) . '</p>';
+		}
+		self::render_steps( $steps );
+		echo '</div>';
+		return true;
+	}
+
+	/**
+	 * Opens the "Other ways" fold around generic content when panel steps were
+	 * printed above it; close it with other_ways_close().
+	 *
+	 * @param bool   $panel_shown Whether render_panel_steps() printed something.
+	 * @param string $summary     Summary text.
+	 */
+	public static function other_ways_open( $panel_shown, $summary = '' ) {
+		if ( $panel_shown ) {
+			echo '<details class="wpcs-disclosure wpcs-other-ways" data-wpcs-other-ways><summary>' . esc_html( '' !== $summary ? $summary : __( 'Other ways', 'cybergate-security' ) ) . '</summary>';
+		}
+	}
+
+	/**
+	 * Closes the fold of other_ways_open().
+	 *
+	 * @param bool $panel_shown Same value as for other_ways_open().
+	 */
+	public static function other_ways_close( $panel_shown ) {
+		if ( $panel_shown ) {
+			echo '</details>';
+		}
 	}
 
 	/**
@@ -1000,6 +1077,7 @@ class Settings_Page {
 		$this->panel_open( 'health' );
 		try {
 			$this->card_open( 'wpcs-health', 'heart', __( 'Server health', 'cybergate-security' ), __( 'Recommendations for this server. Use the buttons to fix them here, or follow the steps to do it by hand.', 'cybergate-security' ) );
+			$this->render_hosting_choice( $s );
 			if ( $attention ) {
 				$fixable = self::auto_fix_ids( $attention );
 				if ( $fixable ) {
@@ -1067,6 +1145,57 @@ class Settings_Page {
 		$this->panel_open( 'transfer' );
 		$this->section_transfer();
 		$this->panel_close();
+	}
+
+	/**
+	 * "Hosting panel: Detected X (change)" with the select that overrides the
+	 * detection. Part of the Advanced form, so the Save button saves it.
+	 *
+	 * @param array $s Settings.
+	 */
+	private function render_hosting_choice( array $s ) {
+		$hosting = Sysadmin_Tools::service( 'hosting' );
+		if ( ! $hosting || ! method_exists( $hosting, 'current' ) ) {
+			return;
+		}
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read only.
+		$info  = $hosting->current( ! empty( $_GET['recheck'] ) );
+		$label = $hosting->label( $info );
+		if ( ! empty( $info['overridden'] ) ) {
+			/* translators: %s: hosting panel with web server and PHP handler */
+			$line  = sprintf( __( 'Hosting panel: %s (your choice)', 'cybergate-security' ), $label );
+			$badge = $this->badge( __( 'Chosen', 'cybergate-security' ), 'info' );
+		} elseif ( 'unknown' === $info['id'] ) {
+			/* translators: %s: web server and PHP handler, for example "(nginx, PHP-FPM)" */
+			$line  = sprintf( __( 'Hosting panel: none detected %s', 'cybergate-security' ), preg_replace( '/^[^(]*/', '', $label ) );
+			$badge = $this->badge( __( 'Generic instructions', 'cybergate-security' ), 'muted' );
+		} else {
+			/* translators: %s: hosting panel with web server and PHP handler */
+			$line  = sprintf( __( 'Hosting panel: Detected %s', 'cybergate-security' ), $label );
+			$badge = 'high' === $info['confidence'] ? $this->badge( __( 'Sure', 'cybergate-security' ), 'ok' ) : $this->badge( __( 'Likely', 'cybergate-security' ), 'medium' );
+		}
+		$current = isset( $s['hosting_panel'] ) ? (string) $s['hosting_panel'] : '';
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display only: the fold opens when a "change" link points here.
+		$open = '' !== $current && ! empty( $_GET['hosting'] );
+		echo '<div class="wpcs-hosting" id="wpcs-hosting" data-wpcs-hosting="' . esc_attr( $info['id'] ) . '">';
+		echo '<p class="wpcs-hosting__line"><span class="dashicons dashicons-admin-site-alt3" aria-hidden="true"></span><strong>' . esc_html( $line ) . '</strong> ' . $badge . '</p>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- badge is escaped.
+		echo '<details class="wpcs-manual wpcs-hosting__change"' . ( $open ? ' open' : '' ) . '><summary>' . esc_html__( 'Change', 'cybergate-security' ) . '</summary>';
+		echo '<p class="wpcs-sub">' . esc_html( $hosting->confidence_text( $info ) ) . '</p>';
+		if ( ! empty( $info['signals'] ) ) {
+			echo '<ul class="wpcs-signals__list">';
+			foreach ( (array) $info['signals'] as $signal ) {
+				echo '<li><code>' . esc_html( (string) $signal ) . '</code></li>';
+			}
+			echo '</ul>';
+		}
+		$this->field(
+			__( 'Instructions follow', 'cybergate-security' ),
+			$this->select( 'hosting_panel', \WPCyberSecurity\Hosting::choices( 'unknown' !== $info['detected_id'] ? $info['detected_name'] : '' ), $current )
+				. ' <button type="submit" class="button">' . esc_html__( 'Save', 'cybergate-security' ) . '</button>',
+			__( 'Every step the plugin cannot do itself (cron, auto_prepend_file, web server rules, antivirus) names the menus of this panel first. "Other / not listed" shows the generic steps only.', 'cybergate-security' ),
+			'wpcs-hosting-panel'
+		);
+		echo '</details></div>';
 	}
 
 	/**
@@ -1287,7 +1416,11 @@ class Settings_Page {
 		} else {
 			echo '<h3 class="wpcs-guide-title">' . esc_html__( 'How to install ClamAV', 'cybergate-security' ) . '</h3>';
 		}
+		// The hosting panel's install route first; the per-system guide folds away under "Other ways".
+		$panel = self::render_panel_steps( 'clamav' );
+		self::other_ways_open( $panel, __( 'Other ways: install guide per server type', 'cybergate-security' ) );
 		Clamav_Guide::render( (string) $tools->clamav_detect(), (bool) $clam['exec'], ! empty( $info['daemon'] ), $clam );
+		self::other_ways_close( $panel );
 		if ( $ready ) {
 			echo '</details>';
 		}
@@ -1311,6 +1444,9 @@ class Settings_Page {
 
 		// maldet by hand, moved here from Integrations.
 		echo '<h3 class="wpcs-subhead">' . esc_html__( 'Linux Malware Detect step by step', 'cybergate-security' ) . '</h3>';
+		if ( '' === $maldet['binary'] ) {
+			self::render_panel_steps( 'maldet' );
+		}
 		if ( '' === $maldet['binary'] && $maldet['supported'] ) {
 			$install = Clamav_Guide::maldet_install_steps();
 			echo '<p class="wpcs-muted">' . esc_html( $install[0]['text'] ) . '</p>';
@@ -1352,6 +1488,10 @@ class Settings_Page {
 	 */
 	private function section_developer( array $items ) {
 		$this->card_open( 'wpcs-developer', 'clipboard', __( 'Developer instructions', 'cybergate-security' ), __( 'Steps this server did not let the plugin do from the admin panel, and setup that always needs server access. Send them to your developer or host: each one has the exact commands for this server.', 'cybergate-security' ) );
+		$line = \WPCyberSecurity\Developer_Instructions::hosting_line();
+		if ( '' !== $line ) {
+			echo '<p class="wpcs-hosting__line"><span class="dashicons dashicons-admin-site-alt3" aria-hidden="true"></span><strong>' . esc_html( $line ) . '</strong> <a href="' . esc_url( \WPCyberSecurity\Hosting::change_url() ) . '">' . esc_html__( 'Change', 'cybergate-security' ) . '</a></p>';
+		}
 		if ( ! $items ) {
 			self::notice( __( 'Nothing needs server access right now.', 'cybergate-security' ), 'ok' );
 			$this->card_close();
@@ -1439,6 +1579,8 @@ class Settings_Page {
 		$this->field( __( 'Web access test', 'cybergate-security' ), '<div class="wpcs-inline-status">' . $web . '</div>' );
 
 		if ( $in_root ) {
+			// Where this hosting panel lets PHP use a folder outside the web root (open_basedir).
+			self::render_panel_steps( 'data_dir' );
 			$snippet = $tools->data_dir_snippet();
 			$this->field(
 				__( 'Move it outside the web root', 'cybergate-security' ),
@@ -1655,18 +1797,21 @@ class Settings_Page {
 				}
 				if ( ! empty( $snippet['recommended'] ) && ! $recommended ) {
 					$recommended[] = $snippet;
-				} else {
+				} elseif ( 'panel' !== ( isset( $snippet['id'] ) ? $snippet['id'] : '' ) ) {
 					$others[] = $snippet;
 				}
 			}
 			if ( $recommended && empty( $status['active'] ) ) {
 				echo '<h3 class="wpcs-subhead">' . esc_html__( 'Recommended for this server', 'cybergate-security' ) . ' ' . $this->badge( isset( $status['sapi'] ) ? (string) $status['sapi'] : PHP_SAPI, 'info' ) . '</h3>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- badge is escaped.
-				$this->render_snippet( $recommended[0] );
-			} else {
+				// The hosting panel's way as numbered steps (with how PHP picks it up), else the snippet for this PHP SAPI.
+				if ( 'panel' !== $recommended[0]['id'] || ! self::render_panel_steps( array( 'prepend', 'php_restart' ) ) ) {
+					$this->render_snippet( $recommended[0] );
+				}
+			} elseif ( $recommended && 'panel' !== $recommended[0]['id'] ) {
 				$others = array_merge( $recommended, $others );
 			}
 			if ( $others ) {
-				echo '<details class="wpcs-disclosure"><summary>' . esc_html__( 'Other ways to set auto_prepend_file (.user.ini, Apache, PHP-FPM, nginx, php.ini)', 'cybergate-security' ) . '</summary>';
+				echo '<details class="wpcs-disclosure wpcs-other-ways"><summary>' . esc_html__( 'Other ways to set auto_prepend_file (.user.ini, Apache, PHP-FPM, nginx, php.ini)', 'cybergate-security' ) . '</summary>';
 				foreach ( $others as $snippet ) {
 					$this->render_snippet( $snippet );
 				}
@@ -1714,10 +1859,22 @@ class Settings_Page {
 		echo '<div class="wpcs-inline-status wpcs-card__lead">' . $state . '</div>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- built from escaped parts.
 		// The first variant opens when no real cron job runs yet, or scheduled tasks are late.
 		$missing = $last_cli < time() - 2 * HOUR_IN_SECONDS || self::is_open( self::check_status( $by_id, 'wp_cron' ) );
+		// The hosting panel's own way first; the crontab variants fold away under "Other ways".
+		$panel = $missing ? self::render_panel_steps( 'cron' ) : false;
+		self::other_ways_open( $panel, __( 'Other ways: crontab, WP-CLI', 'cybergate-security' ) );
 		foreach ( $tools->cron_snippets() as $i => $snippet ) {
 			echo '<div class="wpcs-cmd-block"><strong class="wpcs-cmd-block__title">' . esc_html( $snippet['label'] ) . '</strong>';
-			echo self::commands( $snippet['code'], $snippet['file'], $snippet['help'], 0 === $i && $missing ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
+			echo self::commands( $snippet['code'], $snippet['file'], $snippet['help'], 0 === $i && $missing && ! $panel ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
 			echo '</div>';
+		}
+		self::other_ways_close( $panel );
+		if ( ! $missing ) {
+			// A real cron job already runs: the panel's steps stay available, folded away.
+			echo '<details class="wpcs-disclosure"><summary>' . esc_html__( 'Steps for this hosting panel', 'cybergate-security' ) . '</summary>';
+			if ( ! self::render_panel_steps( 'cron' ) ) {
+				echo '<p class="wpcs-muted">' . esc_html__( 'No panel-specific steps: use the crontab lines above.', 'cybergate-security' ) . '</p>';
+			}
+			echo '</details>';
 		}
 		// The same switch-off step as the wizard: a button once real cron is seen running.
 		$hardening = Sysadmin_Tools::service( 'hardening' );
@@ -1786,6 +1943,9 @@ class Settings_Page {
 		$status = $tools->uploads_htaccess_status();
 		$server = Sysadmin_Tools::server_type();
 		$this->card_open( 'wpcs-hardening', 'admin-site-alt3', __( 'Web server hardening', 'cybergate-security' ), __( 'Stop PHP from running where it never should, and keep private folders private.', 'cybergate-security' ) );
+		// Where this hosting panel takes the rules; the generic Apache and nginx blocks fold away.
+		$panel = self::render_panel_steps( 'web_rules' );
+		self::other_ways_open( $panel, __( 'Other ways: Apache .htaccess and nginx server block', 'cybergate-security' ) );
 
 		$labels = array(
 			'ours'  => $this->badge( __( 'CyberGate Security rules present', 'cybergate-security' ), 'ok' ),
@@ -1807,6 +1967,7 @@ class Settings_Page {
 		echo '<h3 class="wpcs-subhead">nginx' . ( 'nginx' === $server ? ' ' . $this->badge( __( 'This server', 'cybergate-security' ), 'info' ) : '' ) . '</h3>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- badge is escaped.
 		$nginx_open = 'nginx' === $server && ( self::is_open( self::check_status( $by_id, 'uploads_php' ) ) || self::is_open( self::check_status( $by_id, 'quarantine_web' ) ) );
 		echo self::commands( $tools->nginx_rules(), __( 'Server block', 'cybergate-security' ), '', $nginx_open ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
+		self::other_ways_close( $panel );
 
 		echo '<h3 class="wpcs-subhead">' . esc_html__( 'File permissions', 'cybergate-security' ) . '</h3>';
 		$perms_open = self::is_open( self::check_status( $by_id, 'wp_config_perms' ) ) || 'fail' === self::check_status( $by_id, 'data_dir' );

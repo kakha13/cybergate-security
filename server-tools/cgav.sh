@@ -65,11 +65,59 @@ need_site() {
 
 monitor_pids() { pgrep -f 'inotifywait.*maldetect' 2>/dev/null; }
 
+# Hosting panel, from the same markers the plugin uses (Settings > Advanced shows its own result).
+# Sets PANEL (id), PANEL_NAME and PANEL_WHY. Install folders count first; the site layout only
+# gives a "likely" guess.
+detect_panel() {
+  PANEL=unknown; PANEL_NAME=""; PANEL_WHY=""
+  local m
+  for m in \
+    "cpanel|cPanel|/usr/local/cpanel" \
+    "plesk|Plesk|/usr/local/psa" \
+    "plesk|Plesk|/opt/psa" \
+    "directadmin|DirectAdmin|/usr/local/directadmin" \
+    "cyberpanel|CyberPanel|/usr/local/CyberCP" \
+    "aapanel|aaPanel / BT Panel|/www/server/panel" \
+    "hestia|HestiaCP|/usr/local/hestia" \
+    "vesta|VestaCP|/usr/local/vesta" \
+    "cloudpanel|CloudPanel|/home/clp" \
+    "cwp|CWP (Control Web Panel)|/usr/local/cwpsrv" \
+    "ispconfig|ISPConfig|/usr/local/ispconfig" \
+    "virtualmin|Virtualmin|/etc/webmin/virtual-server" \
+    "webmin|Webmin|/etc/webmin" \
+    "fastpanel|FASTPANEL|/usr/local/fastpanel2" \
+    "ispmanager|ISPmanager|/usr/local/mgr5" \
+    "runcloud|RunCloud|/etc/runcloud" \
+    "gridpane|GridPane|/opt/gridpane"; do
+    if [ -d "${m##*|}" ]; then
+      PANEL="${m%%|*}"; m="${m#*|}"; PANEL_NAME="${m%%|*}"; PANEL_WHY="${m##*|}"
+      return 0
+    fi
+  done
+  case "${SITE:-}/" in
+    /www/wwwroot/*)                      PANEL=aapanel;    PANEL_NAME="aaPanel / BT Panel" ;;
+    /var/www/vhosts/*)                   PANEL=plesk;      PANEL_NAME=Plesk ;;
+    /home/u[0-9]*/domains/*/public_html/*) PANEL=hostinger; PANEL_NAME="Hostinger (hPanel)" ;;
+    /home/*/domains/*/public_html/*)     PANEL=directadmin; PANEL_NAME=DirectAdmin ;;
+    /home/*/web/*/public_html/*)         PANEL=hestia;     PANEL_NAME=HestiaCP ;;
+    /home/*/htdocs/*)                    PANEL=cloudpanel; PANEL_NAME=CloudPanel ;;
+    /var/www/clients/client*/web*/web/*) PANEL=ispconfig;  PANEL_NAME=ISPConfig ;;
+    /home/master/applications/*)         PANEL=cloudways;  PANEL_NAME=Cloudways ;;
+    /home/forge/*)                       PANEL=forge;      PANEL_NAME="Laravel Forge" ;;
+    /home/ploi/*)                        PANEL=ploi;       PANEL_NAME=Ploi ;;
+    /sites/*/files/*)                    PANEL=spinupwp;   PANEL_NAME=SpinupWP ;;
+    *) return 0 ;;
+  esac
+  PANEL_WHY="likely, from the site folder $SITE"
+}
+
 # ------------------------------------------------------------------ status
 cmd_status() {
   detect_os
   head1 "Site"
   if [ -n "$SITE" ] && [ -f "$SITE/wp-config.php" ]; then ok "WordPress: $SITE"; else warn "WordPress path not set (cgav set-site /path/to/wordpress)"; fi
+  detect_panel
+  if [ "$PANEL" != unknown ]; then ok "hosting panel: $PANEL_NAME ($PANEL_WHY)"; else warn "hosting panel: none of the known panels found"; fi
 
   head1 "ClamAV"
   if have clamscan; then
@@ -99,9 +147,24 @@ cmd_status() {
 
 # ------------------------------------------------------------------ ClamAV
 cmd_install_clamav() {
-  need_root; detect_os
+  need_root; detect_os; detect_panel
   head1 "Before"; cmd_status | sed -n '/== ClamAV ==/,/== Linux/p' | sed '$d'
   head1 "Installing ClamAV"
+  case "$PANEL" in
+    cpanel)      ok "cPanel: using cPanel's own ClamAV package (same as WHM > cPanel > Manage Plugins > ClamAV)" ;;
+    directadmin)
+      if ! have clamscan && [ "${CGAV_OS_PACKAGES:-0}" != 1 ]; then
+        warn "DirectAdmin installs ClamAV through CustomBuild. Run as root:"
+        echo "        da build set clamav yes"
+        echo "        da build clamav"
+        echo "      (older installs: cd /usr/local/directadmin/custombuild && ./build set clamav yes && ./build clamav)"
+        echo "      Then run: cgav status. To use the system packages anyway: CGAV_OS_PACKAGES=1 cgav install-clamav"
+        return 0
+      fi ;;
+    plesk)       warn "Plesk: its own ClamAV comes with the Plesk Email Security extension (mail); for site files Plesk offers the Imunify extension. Installing ClamAV from the system packages for CyberGate Security." ;;
+    unknown)     : ;;
+    *)           ok "$PANEL_NAME: no ClamAV of its own for site files, using the system packages" ;;
+  esac
   if [ -x /usr/local/cpanel/cpanel ]; then
     # cPanel ships its own ClamAV build; distribution packages would conflict with it.
     /scripts/update_local_rpm_versions --edit target_settings.clamav installed >/dev/null &&

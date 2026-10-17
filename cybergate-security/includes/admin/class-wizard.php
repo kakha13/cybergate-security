@@ -306,6 +306,7 @@ class Wizard {
 			__( 'Environment check', 'cybergate-security' ),
 			__( 'We looked at how your server is set up. Most recommendations can be fixed right here with one click; the rest come with short step-by-step instructions. Nothing here stops the setup.', 'cybergate-security' )
 		);
+		$this->render_hosting_line( $fresh );
 		$attention_checks = array_merge( $groups['fail'], $groups['warn'] );
 		$fixable          = Settings_Page::auto_fix_ids( $attention_checks );
 		if ( $fixable ) {
@@ -370,6 +371,40 @@ class Wizard {
 			Settings_Page::render_checks( $rest, true );
 			echo '</details>';
 		}
+	}
+
+	/**
+	 * "Hosting: CyberPanel (OpenLiteSpeed, lsphp)" with a link to change it:
+	 * every by-hand step of the wizard follows that panel.
+	 *
+	 * @param bool $fresh Detect again.
+	 */
+	private function render_hosting_line( $fresh = false ) {
+		$hosting = Sysadmin_Tools::service( 'hosting' );
+		if ( ! $hosting || ! method_exists( $hosting, 'current' ) ) {
+			return;
+		}
+		$info = $hosting->current( $fresh );
+		echo '<p class="wpcs-hosting__line wpcs-wizard-hosting" data-wpcs-hosting="' . esc_attr( $info['id'] ) . '"><span class="dashicons dashicons-admin-site-alt3" aria-hidden="true"></span>';
+		/* translators: %s: hosting panel with web server and PHP handler */
+		echo '<strong>' . esc_html( sprintf( __( 'Hosting: %s', 'cybergate-security' ), $hosting->label( $info ) ) ) . '</strong> ';
+		echo '<span class="wpcs-muted">' . esc_html( 'unknown' === $info['id'] ? __( 'Steps below are generic.', 'cybergate-security' ) : __( 'Steps below follow this panel.', 'cybergate-security' ) ) . '</span> ';
+		echo '<a href="' . esc_url( \WPCyberSecurity\Hosting::change_url() ) . '">' . esc_html__( 'Change', 'cybergate-security' ) . '</a></p>';
+	}
+
+	/**
+	 * Name of the detected panel when it has its own steps for a task, else ''.
+	 *
+	 * @param string $task Hosting task.
+	 * @return string
+	 */
+	private static function panel_name( $task ) {
+		$hosting = Sysadmin_Tools::service( 'hosting' );
+		if ( ! $hosting || ! method_exists( $hosting, 'steps' ) || ! $hosting->steps( $task ) ) {
+			return '';
+		}
+		$info = $hosting->current();
+		return (string) $info['name'];
 	}
 
 	/**
@@ -614,6 +649,7 @@ class Wizard {
 			__( 'Server hardening', 'cybergate-security' ),
 			__( 'These steps add protection at the server level. If you are not sure, skip them: all of them are also in Settings > Advanced.', 'cybergate-security' )
 		);
+		$this->render_hosting_line();
 		echo '<p class="wpcs-wizard__audience"><span class="wpcs-badge wpcs-badge--info"><span class="dashicons dashicons-admin-users" aria-hidden="true"></span>' . esc_html__( 'For system administrators - optional', 'cybergate-security' ) . '</span></p>';
 		?>
 		<div class="wpcs-section">
@@ -665,7 +701,10 @@ class Wizard {
 			$hardening = Sysadmin_Tools::service( 'hardening' );
 			if ( $hardening && method_exists( $hardening, 'manual_steps' ) ) {
 				// A real cron job already runs: the steps stay available but folded away.
-				echo $cron_runs ? '<details class="wpcs-manual"><summary>' . esc_html__( 'In a hosting control panel', 'cybergate-security' ) . '</summary>' : '<div class="wpcs-manual wpcs-manual--open"><span class="wpcs-sub wpcs-check__fix">' . esc_html__( 'In a hosting control panel:', 'cybergate-security' ) . '</span>';
+				$panel_name = self::panel_name( 'cron' );
+				/* translators: %s: hosting panel name */
+				$where = '' !== $panel_name ? sprintf( __( 'On %s', 'cybergate-security' ), $panel_name ) : __( 'In a hosting control panel', 'cybergate-security' );
+				echo $cron_runs ? '<details class="wpcs-manual"><summary>' . esc_html( $where ) . '</summary>' : '<div class="wpcs-manual wpcs-manual--open"><span class="wpcs-sub wpcs-check__fix">' . esc_html( $where ) . ':</span>';
 				Settings_Page::render_steps( $hardening->manual_steps( 'wp_cron' ) );
 				echo $cron_runs ? '</details>' : '</div>';
 				echo '<details class="wpcs-manual"><summary>' . esc_html__( 'On your own server (crontab)', 'cybergate-security' ) . '</summary>';
@@ -773,6 +812,10 @@ class Wizard {
 			$facts[] = __( 'Linux Malware Detect is not installed.', 'cybergate-security' );
 		}
 		echo '<p class="wpcs-muted">' . esc_html( implode( ' ', $facts ) ) . '</p>';
+		if ( 'missing' === $clam['state'] ) {
+			// How this hosting panel installs ClamAV; the per-system guide is in Settings > Advanced.
+			Settings_Page::render_panel_steps( 'clamav' );
+		}
 		if ( in_array( $clam['state'], array( 'broken', 'slow' ), true ) || ( 'ready_off' === $clam['state'] && ! empty( $clam['slow_only'] ) ) ) {
 			// The self-test failed, or only a clamscan that is too slow for uploads works.
 			Settings_Page::notice( $clam['label'] . ( ! empty( $clam['hint'] ) ? ' ' . $clam['hint'] : '' ), 'broken' === $clam['state'] ? 'bad' : 'warn' );

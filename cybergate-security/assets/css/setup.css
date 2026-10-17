@@ -1608,3 +1608,58 @@ html:has(body.wpcs-settings-screen) {
 .wpcs-wrap .wpcs-guide-actions {
 	margin: 12px 0 0;
 }
+
+/* ---------- Hosting panel ---------- */
+.wpcs-wrap .wpcs-hosting {
+	margin: 0 0 14px;
+	padding: 10px 14px;
+	border: 1px solid var(--wpcs-line);
+	border-radius: var(--wpcs-radius-sm);
+	background: var(--wpcs-bg);
+}
+.wpcs-wrap .wpcs-hosting__line {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	margin: 0 0 6px;
+	font-size: 13px;
+}
+.wpcs-wrap .wpcs-hosting__line .dashicons,
+.wpcs-wrap .wpcs-panel-steps__head .dashicons {
+	color: var(--wpcs-brand-2);
+}
+.wpcs-wrap .wpcs-hosting .wpcs-field {
+	margin-top: 8px;
+}
+.wpcs-wrap .wpcs-signals__list {
+	margin: 6px 0 0 18px;
+	padding: 0;
+	list-style: disc;
+	font-size: 12px;
+}
+.wpcs-wrap .wpcs-check__link {
+	display: inline-block;
+	margin-top: 4px;
+	font-size: 12px;
+}
+.wpcs-wrap .wpcs-panel-steps {
+	margin: 10px 0 12px;
+	padding: 10px 14px;
+	border-left: 3px solid var(--wpcs-brand-2);
+	background: var(--wpcs-bg);
+}
+.wpcs-wrap .wpcs-panel-steps__head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	margin: 0;
+}
+.wpcs-wrap .wpcs-panel-steps__change {
+	margin-left: auto;
+	font-size: 12px;
+}
+.wpcs-wrap details.wpcs-other-ways {
+	margin-top: 10px;
+}

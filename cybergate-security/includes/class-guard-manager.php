@@ -1013,6 +1013,16 @@ class Guard_Manager {
 			),
 		);
 
+		// The hosting panel's own way comes first and is the recommended one
+		// (CyberPanel vHost Conf, cPanel MultiPHP INI Editor, aaPanel's locked
+		// .user.ini, Plesk PHP Settings, ...). Read only where snippets are shown.
+		$hosting = function_exists( 'wpcybersec' ) ? wpcybersec()->hosting : null;
+		$panel   = $hosting && method_exists( $hosting, 'prepend_snippet' ) ? $hosting->prepend_snippet() : null;
+		if ( is_array( $panel ) ) {
+			array_unshift( $snippets, $panel );
+			$recommended = 'panel';
+		}
+
 		foreach ( $snippets as &$snippet ) {
 			$snippet['recommended'] = $snippet['id'] === $recommended;
 		}

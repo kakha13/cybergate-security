@@ -283,18 +283,24 @@ class Hardening {
 
 			case 'data_dir':
 			case 'quarantine_web':
-				return $this->data_dir_steps( $above );
+				return $this->for_panel( 'data_dir', $this->data_dir_steps( $above ) );
 
 			case 'uploads_php':
 				if ( 'nginx' === $this->server_type() ) {
-					return array(
-						array( 'text' => __( 'nginx ignores .htaccess files, so ask your host (or your system administrator) to add this rule to the site\'s server block and reload nginx:', 'cybergate-security' ), 'code' => Sysadmin_Tools::nginx_uploads_rule() ),
+					return $this->for_panel(
+						'web_rules',
+						array(
+							array( 'text' => __( 'nginx ignores .htaccess files, so ask your host (or your system administrator) to add this rule to the site\'s server block and reload nginx:', 'cybergate-security' ), 'code' => Sysadmin_Tools::nginx_uploads_rule() ),
+						)
 					);
 				}
-				return array(
-					array( 'text' => $panel ),
-					array( 'text' => __( 'Open the folder wp-content/uploads and create (or edit) a file named .htaccess. Turn on "Show hidden files" if you do not see it.', 'cybergate-security' ) ),
-					array( 'text' => __( 'Add these lines and save:', 'cybergate-security' ), 'code' => ( new Sysadmin_Tools() )->apache_uploads_rules() ),
+				return $this->for_panel(
+					'web_rules',
+					array(
+						array( 'text' => $panel ),
+						array( 'text' => __( 'Open the folder wp-content/uploads and create (or edit) a file named .htaccess. Turn on "Show hidden files" if you do not see it.', 'cybergate-security' ) ),
+						array( 'text' => __( 'Add these lines and save:', 'cybergate-security' ), 'code' => ( new Sysadmin_Tools() )->apache_uploads_rules() ),
+					)
 				);
 
 			case 'hmac_key':
@@ -323,11 +329,20 @@ class Hardening {
 				if ( ! is_object( $gm ) || ! method_exists( $gm, 'is_installed' ) || ! $gm->is_installed() ) {
 					$first[] = array( 'text' => __( 'Install the guard files first (the "Install the guard files" button, also in Settings > Advanced > Early guard).', 'cybergate-security' ) );
 				}
-				return array_merge( $first, array(
-					array( 'text' => __( 'If PHP runs through PHP-FPM or CGI, create a file named .user.ini in the WordPress folder with:', 'cybergate-security' ), 'code' => "auto_prepend_file = '" . $boot . "'" ),
-					array( 'text' => __( 'If PHP runs as an Apache module, add to the .htaccess file in the WordPress folder:', 'cybergate-security' ), 'code' => "<IfModule php_module>\n    php_value auto_prepend_file \"" . $boot . "\"\n</IfModule>" ),
-					array( 'text' => __( 'On nginx with PHP-FPM, ask your host to add this to the PHP location block and reload nginx:', 'cybergate-security' ), 'code' => 'fastcgi_param PHP_VALUE "auto_prepend_file=' . $boot . '";' ),
-				), $extra );
+				return array_merge(
+					$first,
+					$this->for_panel(
+						'prepend',
+						array_merge(
+							array(
+								array( 'text' => __( 'If PHP runs through PHP-FPM or CGI, create a file named .user.ini in the WordPress folder with:', 'cybergate-security' ), 'code' => "auto_prepend_file = '" . $boot . "'" ),
+								array( 'text' => __( 'If PHP runs as an Apache module, add to the .htaccess file in the WordPress folder:', 'cybergate-security' ), 'code' => "<IfModule php_module>\n    php_value auto_prepend_file \"" . $boot . "\"\n</IfModule>" ),
+								array( 'text' => __( 'On nginx with PHP-FPM, ask your host to add this to the PHP location block and reload nginx:', 'cybergate-security' ), 'code' => 'fastcgi_param PHP_VALUE "auto_prepend_file=' . $boot . '";' ),
+							),
+							$extra
+						)
+					)
+				);
 
 			case 'disable_wp_cron':
 				$off = Sysadmin_Tools::cron_disable_step();
@@ -350,9 +365,29 @@ class Hardening {
 					);
 				}
 				$steps[] = Sysadmin_Tools::cron_disable_step();
-				return $steps;
+				return $this->for_panel( 'cron', $steps );
 		}
 		return array();
+	}
+
+	/**
+	 * The hosting panel's own steps first, these folded under "Other ways"
+	 * (Hosting::merge()); just these when the panel has none.
+	 *
+	 * @param string  $task    Hosting task.
+	 * @param array[] $generic Generic steps.
+	 * @return array[]
+	 */
+	private function for_panel( $task, array $generic ) {
+		$hosting = wpcybersec()->hosting;
+		if ( ! is_object( $hosting ) || ! method_exists( $hosting, 'merge' ) ) {
+			return $generic;
+		}
+		try {
+			return $hosting->merge( $task, $generic );
+		} catch ( \Throwable $e ) {
+			return $generic;
+		}
 	}
 
 	/**

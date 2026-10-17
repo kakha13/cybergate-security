@@ -61,6 +61,8 @@ final class Plugin {
 	public $hardening;
 	/** @var Developer_Instructions */
 	public $developer;
+	/** @var Hosting */
+	public $hosting;
 	/** @var Ajax */
 	public $ajax;
 	/** @var Admin\Admin|null */
@@ -117,6 +119,7 @@ final class Plugin {
 		$this->sysadmin      = new Sysadmin_Tools();
 		$this->hardening     = new Hardening();
 		$this->developer     = new Developer_Instructions();
+		$this->hosting       = new Hosting();
 		$this->ajax          = new Ajax();
 
 		$modules = array(
