@@ -349,7 +349,11 @@ class Storage {
 		$primary = $status['primary'];
 		$const   = defined( 'WPCYBERSEC_DATA_DIR' ) && WPCYBERSEC_DATA_DIR;
 		$outside = $this->suggested_outside_dir();
-		if ( $this->is_in_webroot( $outside ) ) {
+		$hint    = '';
+		if ( ! self::path_allowed( $outside ) ) {
+			$hint = self::basedir_hint() . ' '; // Never suggest a folder PHP may not use.
+		}
+		if ( '' !== $hint || $this->is_in_webroot( $outside ) ) {
 			$outside = '/path/outside/the/web/root/wpcybersec'; // Nothing suitable was found: a placeholder to fill in.
 		}
 		$code = "define( 'WPCYBERSEC_DATA_DIR', " . var_export( $outside, true ) . ' );'; // phpcs:ignore WordPress.PHP.DevelopmentFunctions
@@ -361,7 +365,7 @@ class Storage {
 				'text'  => sprintf( __( '%s is not writable for WordPress, and neither is the uploads folder. Uploads are not held for approval right now (only uploads that look malicious are blocked), held files cannot be kept and scans cannot run.', 'cybergate-security' ), $primary ),
 				'fix'   => $const
 					? __( 'Fix: make the folder set by WPCYBERSEC_DATA_DIR in wp-config.php writable for the web server user, or point it to a folder that is.', 'cybergate-security' )
-					: __( 'Fix: make wp-content writable for the web server user (so WordPress can create the wpcybersec folder), or add this line to wp-config.php with a folder outside the web root that the web server user can write:', 'cybergate-security' ),
+					: $hint . __( 'Fix: make wp-content writable for the web server user (so WordPress can create the wpcybersec folder), or add this line to wp-config.php with a folder outside the web root that the web server user can write:', 'cybergate-security' ),
 				'code'  => $const ? '' : $code,
 			);
 		}
@@ -388,7 +392,7 @@ class Storage {
 			'fix'   => $const
 				? __( 'Fix: make the folder set by WPCYBERSEC_DATA_DIR in wp-config.php writable for the web server user, or point it to a folder that is.', 'cybergate-security' )
 				/* translators: %s: folder path */
-				: sprintf( __( 'Fix: make wp-content writable for the web server user; a button to move the data back then appears here. Or create a folder outside the web root that the web server user can write, copy everything from %s into it, and add this line to wp-config.php:', 'cybergate-security' ), $status['dir'] ),
+				: $hint . sprintf( __( 'Fix: make wp-content writable for the web server user; a button to move the data back then appears here. Or create a folder outside the web root that the web server user can write, copy everything from %s into it, and add this line to wp-config.php:', 'cybergate-security' ), $status['dir'] ),
 			'code'  => $const ? '' : $code,
 		);
 	}
@@ -443,7 +447,37 @@ class Storage {
 			}
 			$dir = $up;
 		}
-		return wp_normalize_path( dirname( untrailingslashit( ABSPATH ) ) ) . '/' . $name;
+		$fallback = wp_normalize_path( dirname( untrailingslashit( ABSPATH ) ) ) . '/' . $name;
+		if ( self::path_allowed( $fallback ) ) {
+			return $fallback;
+		}
+		// open_basedir hides the folders next to WordPress: a folder inside one of
+		// the allowed ones that the web server does not serve (never a temp folder).
+		$temp = array_filter( array( '/tmp', '/var/tmp', '/dev/shm', untrailingslashit( wp_normalize_path( (string) sys_get_temp_dir() ) ), untrailingslashit( wp_normalize_path( (string) ini_get( 'upload_tmp_dir' ) ) ) ) );
+		foreach ( explode( PATH_SEPARATOR, (string) ini_get( 'open_basedir' ) ) as $allowed ) {
+			$allowed = untrailingslashit( wp_normalize_path( trim( $allowed ) ) );
+			if ( '' === $allowed || '.' === $allowed[0] || in_array( $allowed, $temp, true ) || ! @is_dir( $allowed ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				continue;
+			}
+			if ( ! self::looks_served( $allowed ) && Fs::is_writable( $allowed ) && ! $this->is_in_webroot( $allowed . '/' . $name ) ) {
+				return $allowed . '/' . $name;
+			}
+		}
+		return $fallback; // Callers check path_allowed() and explain open_basedir.
+	}
+
+	/**
+	 * Hint for a data folder suggestion that open_basedir does not allow.
+	 *
+	 * @return string '' when open_basedir is not set.
+	 */
+	public static function basedir_hint() {
+		$limit = trim( (string) ini_get( 'open_basedir' ) );
+		if ( '' === $limit ) {
+			return '';
+		}
+		/* translators: %s: open_basedir value */
+		return sprintf( __( 'PHP on this site may only use these folders (open_basedir): %s. The data folder must be inside one of them and not served by the web server, or the host must add it to open_basedir.', 'cybergate-security' ), $limit );
 	}
 
 	/**

@@ -696,10 +696,12 @@ class Wizard {
 		$facts[] = '' !== $clam['binary']
 			/* translators: %s: program path */
 			? sprintf( __( 'ClamAV found at %s.', 'cybergate-security' ), $clam['binary'] )
-			: __( 'ClamAV is not installed.', 'cybergate-security' );
+			: ( ! empty( $clam['hidden'] ) ? __( 'Whether ClamAV is installed is unknown: the hosting hides it.', 'cybergate-security' ) : __( 'ClamAV is not installed.', 'cybergate-security' ) );
 		if ( '' !== $maldet['binary'] ) {
 			/* translators: %s: program path */
 			$facts[] = sprintf( __( 'Linux Malware Detect found at %s.', 'cybergate-security' ), $maldet['binary'] );
+		} elseif ( ! empty( $maldet['hidden'] ) ) {
+			$facts[] = __( 'Whether Linux Malware Detect is installed is unknown: the hosting hides the folders it is installed in.', 'cybergate-security' );
 		} elseif ( $maldet['supported'] ) {
 			$facts[] = __( 'Linux Malware Detect is not installed.', 'cybergate-security' );
 		}

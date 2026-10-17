@@ -677,8 +677,17 @@ class Scan_Job {
 			// Exhausted memory: a little more lets the handler finish its work.
 			if ( false !== stripos( $message, 'memory' ) ) {
 				$room = Scanner::memory_room();
-				if ( null !== $room ) {
-					@ini_set( 'memory_limit', (string) ( (int) wp_convert_hr_to_bytes( (string) ini_get( 'memory_limit' ) ) + 32 * MB_IN_BYTES ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.PHP.IniSet.memory_limit_Disallowed -- only after a fatal error, so this handler can record it.
+				if ( null !== $room && function_exists( 'wp_raise_memory_limit' ) ) {
+					// 32 MB above the limit that was just exhausted, through core's
+					// wp_raise_memory_limit(), so this handler can record the file.
+					$more = (int) wp_convert_hr_to_bytes( (string) ini_get( 'memory_limit' ) ) + 32 * MB_IN_BYTES;
+					add_filter(
+						'wpcybersec_fatal_memory_limit',
+						static function () use ( $more ) {
+							return $more;
+						}
+					);
+					wp_raise_memory_limit( 'wpcybersec_fatal' );
 				}
 			}
 		}
@@ -2708,7 +2717,7 @@ class Scan_Job {
 	 */
 	private function acquire_lock( $hold, $wait = 0.0 ) {
 		global $wpdb;
-		$table = Network::lock_table();
+		$table = esc_sql( Network::lock_table() );
 		$token = substr( md5( uniqid( 'wpcs-lock', true ) . wp_rand() . getmypid() ), 0, 16 );
 		$until = microtime( true ) + max( 0.0, (float) $wait );
 		$tries = 0;
@@ -2753,7 +2762,7 @@ class Scan_Job {
 		if ( $value === $this->lock ) {
 			return true;
 		}
-		$table = Network::lock_table();
+		$table = esc_sql( Network::lock_table() );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$ok = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET option_value = %s WHERE option_name = %s AND option_value = %s", $value, self::LOCK_OPTION, $this->lock ) );
 		if ( $ok ) {
@@ -2773,7 +2782,7 @@ class Scan_Job {
 		if ( '' === (string) $value ) {
 			return;
 		}
-		$table = Network::lock_table();
+		$table = esc_sql( Network::lock_table() );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE option_name = %s AND option_value = %s", self::LOCK_OPTION, (string) $value ) );
 	}
@@ -2783,7 +2792,7 @@ class Scan_Job {
 	 */
 	private function request_cancel( $id ) {
 		global $wpdb;
-		$table = Network::lock_table();
+		$table = esc_sql( Network::lock_table() );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$wpdb->query( $wpdb->prepare( "INSERT INTO {$table} (option_name, option_value, autoload) VALUES (%s, %s, 'no') ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)", self::CANCEL_OPTION, (string) $id ) );
 		wp_cache_delete( self::CANCEL_OPTION, 'options' );
@@ -2794,7 +2803,7 @@ class Scan_Job {
 	 */
 	private function clear_cancel() {
 		global $wpdb;
-		$table = Network::lock_table();
+		$table = esc_sql( Network::lock_table() );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE option_name = %s", self::CANCEL_OPTION ) );
 		wp_cache_delete( self::CANCEL_OPTION, 'options' );
@@ -2826,7 +2835,7 @@ class Scan_Job {
 	 */
 	private static function db_option( $name ) {
 		global $wpdb;
-		$table = Network::lock_table();
+		$table = esc_sql( Network::lock_table() );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$value = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$table} WHERE option_name = %s LIMIT 1", $name ) );
 		return null === $value ? null : (string) $value;

@@ -20,7 +20,9 @@
  *                 drop-ins (db.php, object-cache.php, advanced-cache.php) still
  *                 load; they are listed so you can check them yourself.
  *   --wp=PATH     WordPress root (where wp-load.php lives). Default: walk up
- *                 from this file, then try the current directory.
+ *                 from this file, then from the current directory, looking
+ *                 in each folder and in its wp/ and web/wp/ subfolders
+ *                 (WordPress in a subfolder, Bedrock).
  *   --url=URL     Site address WordPress loads as. Needed on multisite when
  *                 wp-config.php does not define DOMAIN_CURRENT_SITE in a
  *                 plain define() line; without a matching address WordPress
@@ -127,8 +129,12 @@ function wpcybersec_find_wp_load( $explicit ) {
 	foreach ( $starts as $start ) {
 		$dir = str_replace( '\\', '/', $start );
 		for ( $i = 0; $i < 12 && '' !== $dir && '/' !== $dir; $i++ ) {
-			if ( is_file( $dir . '/wp-load.php' ) ) {
-				return $dir . '/wp-load.php';
+			// WordPress in this folder, in its wp/ subfolder (Bedrock's web/ with
+			// core in web/wp) or in web/wp/ (the Bedrock project folder).
+			foreach ( array( '', '/wp', '/web/wp' ) as $sub ) {
+				if ( is_file( $dir . $sub . '/wp-load.php' ) ) {
+					return $dir . $sub . '/wp-load.php';
+				}
 			}
 			$parent = dirname( $dir );
 			if ( $parent === $dir ) {
@@ -328,12 +334,19 @@ function wpcybersec_cron_shutdown() {
 	if ( ! empty( $GLOBALS['wpcybersec_cron_booted'] ) ) {
 		return;
 	}
-	$hint = ! empty( $GLOBALS['wpcybersec_cron_url_given'] ) ? '' : ' On multisite pass the network address: --url=https://example.com/';
+	$url  = isset( $GLOBALS['wpcybersec_cron_url_given'] ) ? (string) $GLOBALS['wpcybersec_cron_url_given'] : '';
+	$hint = '' === $url
+		? ' On multisite pass the network address: --url=https://example.com/'
+		: ' On multisite --url must be the address of a site of the network (for example the network address, --url=https://example.com/); --url=' . $url . ' matches none.';
 	wpcybersec_cron_print( 'WordPress stopped while loading, so no scan ran.' . $hint . "\n", STDERR );
 	exit( 1 );
 }
 
-$wpcybersec_options = wpcybersec_cron_args( isset( $argv ) && is_array( $argv ) ? $argv : ( isset( $_SERVER['argv'] ) && is_array( $_SERVER['argv'] ) ? $_SERVER['argv'] : array() ) );
+// Command line arguments, not request data (the script refuses web requests
+// above, and WordPress is not loaded yet); every value is matched against the
+// fixed options in wpcybersec_cron_args().
+$wpcybersec_argv    = isset( $argv ) && is_array( $argv ) ? $argv : ( isset( $_SERVER['argv'] ) && is_array( $_SERVER['argv'] ) ? $_SERVER['argv'] : array() ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.MissingUnslash, WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- argv of the CLI process, see above.
+$wpcybersec_options = wpcybersec_cron_args( array_map( 'strval', $wpcybersec_argv ) );
 $wpcybersec_wp_load = wpcybersec_find_wp_load( $wpcybersec_options['wp'] );
 
 if ( ! $wpcybersec_wp_load ) {
@@ -369,7 +382,7 @@ $_SERVER['REQUEST_METHOD'] = 'GET';
 
 // WordPress may exit while loading (multisite: no site for this address).
 $GLOBALS['wpcybersec_cron_booted']    = false;
-$GLOBALS['wpcybersec_cron_url_given'] = '' !== $wpcybersec_options['url'];
+$GLOBALS['wpcybersec_cron_url_given'] = (string) $wpcybersec_options['url'];
 register_shutdown_function( 'wpcybersec_cron_shutdown' );
 
 require $wpcybersec_wp_load;

@@ -139,7 +139,8 @@ class Install_Gate {
 			return $source;
 		}
 
-		list( $hits, $partial ) = $this->scan_package( self::local_path( $source ) );
+		list( $hits, $partial, $verified ) = $this->scan_package( self::local_path( $source ), $type, $slug, $info['version'] );
+		$info['checksum_verified']         = $verified;
 		$severity               = $this->max_severity( $hits );
 		$display                = self::display_name( '' !== $info['name'] ? $info['name'] : $slug );
 
@@ -201,7 +202,7 @@ class Install_Gate {
 					'hits'           => array_slice( $hits, 0, 50 ),
 					'scan_partial'   => (bool) $partial,
 					'request_uri'    => self::request_uri(),
-				),
+				) + ( ! empty( $info['checksum_verified'] ) ? array( 'checksum_verified' => (int) $info['checksum_verified'] ) : array() ),
 			)
 		);
 		if ( ! $id ) {
@@ -792,7 +793,7 @@ class Install_Gate {
 			$data = str_replace( "\r", "\n", substr( $data, 0, 8192 ) );
 			$found = array();
 			foreach ( $headers as $key => $label ) {
-				$found[ $key ] = preg_match( '/^(?:[ \t]*<\?php)?[ \t\/*#@]*' . preg_quote( $label, '/' ) . ':(.*)$/mi', $data, $m ) && $m[1] ? _cleanup_header_comment( $m[1] ) : '';
+				$found[ $key ] = preg_match( '/^(?:[ \t]*<\?php)?[ \t\/*#@]*' . preg_quote( $label, '/' ) . ':(.*)$/mi', $data, $m ) && $m[1] ? self::header_value( $m[1] ) : '';
 			}
 			if ( '' === $found['name'] ) {
 				continue;
@@ -805,6 +806,17 @@ class Install_Gate {
 			break;
 		}
 		return $info;
+	}
+
+	/**
+	 * A header value without a trailing comment close or PHP close tag (what
+	 * get_file_data() does for local files).
+	 *
+	 * @param string $value Raw value after "Label:".
+	 * @return string
+	 */
+	private static function header_value( $value ) {
+		return trim( (string) preg_replace( '/\s*(?:\*\/|\?>).*/', '', (string) $value ) );
 	}
 
 	/**
@@ -865,22 +877,34 @@ class Install_Gate {
 	/**
 	 * Bounded malware check of an unpacked package, so the reviewer sees hits.
 	 *
-	 * @param string $dir Package folder.
-	 * @return array [ hits, partial ]
+	 * Hits in a plugin file that is byte for byte the wordpress.org file of
+	 * that slug and version (the plugin checksums the scanner uses after the
+	 * install) are dropped: they are the official code, typically test
+	 * fixtures in vendor/ that quote malware patterns. A file that differs
+	 * from the official one, or is not listed there, keeps its hits.
+	 *
+	 * @param string $dir     Package folder.
+	 * @param string $type    plugin | theme.
+	 * @param string $slug    Package folder name.
+	 * @param string $version Version from the package header.
+	 * @return array [ hits, partial, verified (files whose hits the official checksums cleared) ]
 	 */
-	private function scan_package( $dir ) {
+	private function scan_package( $dir, $type = '', $slug = '', $version = '' ) {
 		$scanner = wpcybersec()->scanner;
 		if ( '' === (string) $dir ) {
-			return array( array(), true ); // Not reachable as a local folder: not checked, shown as partial.
+			return array( array(), true, 0 ); // Not reachable as a local folder: not checked, shown as partial.
 		}
 		if ( ! $scanner || ! method_exists( $scanner, 'scan_file' ) || ! is_dir( $dir ) ) {
-			return array( array(), false );
+			return array( array(), false, 0 );
 		}
 		$base     = trailingslashit( wp_normalize_path( $dir ) );
 		$deadline = microtime( true ) + self::SCAN_SECONDS;
 		$checked  = 0;
 		$hits     = array();
 		$partial  = false;
+		$verified = 0;
+		$checks   = wpcybersec()->settings ? wpcybersec()->settings->get( 'use_checksums', true ) : true;
+		$map      = ( $checks && 'plugin' === $type && '' !== (string) $slug && '' !== (string) $version && method_exists( $scanner, 'checksum_map' ) ) ? null : false;
 		$scan_ext = array( 'js', 'html', 'htm', 'svg', 'htaccess' );
 
 		try {
@@ -899,9 +923,20 @@ class Install_Gate {
 					$partial = true;
 					break;
 				}
-				$abs = wp_normalize_path( $file->getPathname() );
-				$rel = 0 === strpos( $abs, $base ) ? substr( $abs, strlen( $base ) ) : $name;
-				foreach ( (array) $scanner->scan_file( $abs, $rel ) as $hit ) {
+				$abs       = wp_normalize_path( $file->getPathname() );
+				$rel       = 0 === strpos( $abs, $base ) ? substr( $abs, strlen( $base ) ) : $name;
+				$file_hits = (array) $scanner->scan_file( $abs, $rel );
+				if ( $file_hits && false !== $map ) {
+					if ( null === $map ) {
+						$map = $scanner->checksum_map( $slug, $version ); // Fetched once, only when something was found.
+						$map = is_array( $map ) && $map ? $map : false;
+					}
+					if ( false !== $map && $scanner->matches_map( $map, $rel, $abs ) ) {
+						++$verified;
+						continue;
+					}
+				}
+				foreach ( $file_hits as $hit ) {
 					if ( ! is_array( $hit ) ) {
 						continue;
 					}
@@ -916,7 +951,7 @@ class Install_Gate {
 		} catch ( \Throwable $e ) {
 			$partial = true;
 		}
-		return array( $hits, $partial );
+		return array( $hits, $partial, $verified );
 	}
 
 	/**

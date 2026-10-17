@@ -100,17 +100,28 @@ Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` 
   `upload_not_held` once an hour; only malicious ones are refused). `configured_dir()`,
   `default_dir()`, static `site_id()` (md5 of ABSPATH plus `$wpdb->base_prefix`, so every site of a
   network shares it; written into `.wpcybersec-site`, `marker_matches()`, `write_marker()`),
-  `suggested_outside_dir()`, static `path_allowed($path)` (open_basedir: paths outside it are
-  never touched or suggested), `dir_usable()`, `relocate($target, $after_switch)` (copy, verify,
+  `suggested_outside_dir()` (next to the WordPress folder; when open_basedir hides that, a
+  writable folder inside an allowed one that is not served and not a temp folder; callers check
+  `path_allowed()`), static `basedir_hint()` (the open_basedir sentence `problem()` puts in front
+  of its fix text instead of suggesting a folder PHP may not use), static `path_allowed($path)`
+  (open_basedir: paths outside it are never touched or suggested), `dir_usable()`, `relocate($target, $after_switch)` (copy, verify,
   switch, remove; resumable with `resume_move()` / `move_pending()`, option
   `wpcybersec_data_move`; refused on multisite and with the constant).
 - `Paths` (static): `scan_root()`, `rel($abs)`, `abs($rel)`, `hash($rel)`, `ext($name)`,
   `is_executable($name)`, `is_excluded($rel)`. Scan set: `scan_set()` is the scan root plus the
   WordPress folders outside it (ABSPATH, WP_CONTENT_DIR, WP_PLUGIN_DIR, WPMU_PLUGIN_DIR, the
   uploads folder: walked in full; the home folder of WordPress in a subfolder or Bedrock's `web/`:
-  its own files only; a wp-config.php one folder above ABSPATH), each realpath'd and dropped when
-  another entry covers it (entries `{ path, depth all|top|file, kind, alias }`, filter
-  `wpcybersec_scan_set`). `extra_roots()` (all but the root), `outside_root()` (for the UI),
+  its own files only; a wp-config.php one folder above ABSPATH; Bedrock's `<project>/config/`
+  folder, walked in full, only when the home folder is `<project>/web/`, `config/application.php`
+  exists and that wp-config.php names it (kind `config-dir`); every other file wp-config.php loads
+  before wp-settings.php, each on its own, at most 300 (kind `loaded`, `config_includes()`)), each
+  realpath'd and dropped when another entry covers it (entries `{ path, depth all|top|file, kind,
+  alias }`, filter `wpcybersec_scan_set`). `config_includes($config)`: from
+  `get_included_files()` (after wp-config.php, before wp-settings.php) when the request included
+  wp-config.php itself, remembered in network option `wpcybersec_config_includes`; WP-CLI evaluates
+  wp-config.php instead of including it and uses that option, else the plain `require`/`include`
+  lines of wp-config.php (`__DIR__`, `dirname( __FILE__ )`, `dirname( __DIR__ )` plus a string).
+  Unrelated parent folders are never walked. `extra_roots()` (all but the root), `outside_root()` (for the UI),
   `in_scope($abs)` (a whole-site scan covers it: use this, not "inside the scan root", before
   reading or touching a live file), `in_full_scope($dir)`, `scope_entry($abs)`, `alias($abs)`
   (`wp-content/...` name of a file outside the root, for exclusions), `home_dir()`, `reset()`.
@@ -177,6 +188,7 @@ created_at, updated_at, decided_by, decided_at
 - `post_id` (attach approved upload to this post), `context`: `media` | `sideload` | `plugin_zip` | `theme_zip` | `guard`
 - `request_uri`, `script` (guard), `field` (guard form field name)
 - `install_type` (`plugin`|`theme`), `slug`, `name`, `version`, `install_source` (`wporg`|`upload`|`url`)
+- `checksum_verified` (install items: files whose signature hits the wordpress.org checksums cleared)
 - `blog_id` (multisite: the site an upload, guard upload, database finding or administrator
   belongs to), `sites` (user items: every site where the account is administrator),
   `migrated_from` (copied from a site's own tables by the network migration)
@@ -207,8 +219,9 @@ administrator). Deleted or demoted accounts resolve their item.
 Core integrity (`Scanner::integrity_issue()`, every scan mode including baseline): executable
 or PHP-content files in wp-admin/ or wp-includes/ that core does not ship are high threats
 (only when core checksums loaded; logs ignored); .htaccess-like files there and non-core PHP
-files in the WordPress root (except wp-config.php, the exact guard bootstrap and a plain
-Wordfence loader) are medium file items. Checksum mismatches of core, wordpress.org plugin and
+files in the WordPress root (except wp-config.php, the guard bootstrap and a plain Wordfence
+loader) are medium file items. The guard bootstrap counts when it is exactly the current one, or
+`Guard_Manager::is_leftover_bootstrap()` (one an earlier install wrote for another data folder). Checksum mismatches of core, wordpress.org plugin and
 own files are threats in every mode, for executable names and .js/.mjs. Whole-site runs count
 missing core files (`missing_core` in status/last_result, "Missing core files: N" in the
 summary).
@@ -244,7 +257,9 @@ because every site shares the file system. Single sites behave exactly as before
   `home_url()` / `admin_url()` / `name()` (network address and name).
 - Items remember the site: held uploads (`Upload_Gate`) and guard uploads (spool `host` + `uri`
   mapped with `get_site_by_path()`) store `details.blog_id`; approving a media/REST/sideload
-  upload imports it into that site's Media Library inside `Network::on_site()` (a deleted site:
+  upload imports it into that site's Media Library inside `Network::on_site()`. Like core, only
+  `:80` / `:443` are dropped from the host (a network on another port stores `host:port` as the
+  domain); the host without the port is tried second (a deleted site:
   the hash is allowed only). The same file held on two sites is two items. Database findings and
   administrator items record `blog_id` too. Reports (source column "Site: ..."), alert emails
   ("Site" row) and the downloadable report show it; the report also counts the network's sites.
@@ -387,6 +402,10 @@ Files: `includes/class-scanner.php`, `includes/class-signatures.php`,
   for `package_locale()`: `$wp_local_package` in wp-includes/version.php (what the core files
   were built for), en_US when unset, not the site language; when only another locale's list is
   available, version.php is compared without its `$wp_local_package` line.
+- `checksum_map($slug, $version)`: the wordpress.org checksum list of one plugin version (same
+  fetch and site transient as `verify()`, without the "does it fit the installed copy" sample that
+  `plugin_map()` adds); `matches_map($map, $inner, $abs)`: the file has a listed sha256 (other line
+  endings count).
 - `is_core_path($rel)`, `plugin_slug_for($rel)` helpers.
 - `clamav_available()`: bool, `clamav_scan($path)`: null (not available) or hits.
 
@@ -459,10 +478,14 @@ Only one job at a time. State in option `wpcybersec_job` (not autoloaded); file 
 ### `bin/cron.php`
 CLI runner for real cron without WP-CLI: `php bin/cron.php [--full|--baseline] [--no-malware] [--isolated] [--quiet] [--wp=/abs/path] [--url=https://example.com/]`.
 Refuses to run from the web (CLI, or php-cgi started from a shell or cron without request
-variables; use `php-cgi -q`). Loads `wp-load.php`, runs a scan to completion, prints a one-line
+variables; use `php-cgi -q`). Without `--wp` it walks up from its own folder, then from the
+current one, and looks for `wp-load.php` in each folder and in its `wp/` and `web/wp/` subfolders
+(Bedrock). Loads `wp-load.php`, runs a scan to completion, prints a one-line
 summary, exits 1 when the scan failed. `--url` sets HTTP_HOST / REQUEST_URI; without it a
 multisite host comes from `DOMAIN_CURRENT_SITE` / `PATH_CURRENT_SITE` in wp-config.php. When
-WordPress exits while loading (no site for the address) a shutdown function says so and exits 1.
+WordPress exits while loading (no site for the address) a shutdown function says so, with the
+multisite hint (pass the network address; with a wrong `--url` it names the value that matched no
+site), and exits 1.
 Records network option `wpcybersec_cli_cron_at` (proof that real cron runs).
 `Sysadmin_Tools::cron_snippets()` builds the crontab lines (`cron_url_arg()` adds `--url` on
 multisite). The plain `php wp-cron.php` line has no host either, so on multisite it becomes
@@ -517,6 +540,11 @@ Files: `includes/class-upload-gate.php`, `includes/class-install-gate.php`,
   folders after a core update; the same folders are remembered as update marks with
   `Recent_Changes::remember_update()`), `file_mod_allowed` (when `freeze_mods` is on, return false
   unless unlocked).
+- Package check (`scan_package()`): signature hits of an unpacked plugin are dropped for files that
+  match the wordpress.org checksums of that slug and version (`Scanner::checksum_map()`, only with
+  `use_checksums`; fetched once, only when something was found), so official test fixtures in
+  vendor/ do not make a wordpress.org plugin Critical. A changed or unlisted file keeps its hits.
+  The item gets `details.checksum_verified` (number of such files).
 - `on_approve(array $item)`: allowlist install key (and package hash if known).
 - `unlock($minutes)`, `lock()`, `is_unlocked()`, `unlocked_until()` (unix, 0 when locked).
 - static `local_path($path)`: the local path of a path the filesystem API handed over (with
@@ -539,6 +567,15 @@ Files: `includes/class-upload-gate.php`, `includes/class-install-gate.php`,
   `openlitespeed` | `enterprise` | `unknown` | ''.
 - `config_array()`: `home_path` (main site) and on multisite `home_paths` (every site's URL path);
   rewritten on `wp_initialize_site` / `wp_delete_site`; kept in sync from the main site only.
+- Leftover bootstrap: static `bootstrap_parts($code)` returns `{ guard, config, chain }` only when
+  the code is exactly `build_bootstrap()`'s template (rebuilt with those paths it must be the same
+  text). `is_leftover_bootstrap($code)` additionally requires this plugin's `guard_file()`, no
+  chained file other than the saved `wpcybersec_guard_chain`, and the current config file or a
+  `guard/config.php` inside a `wpcybersec*` data folder that is missing or holds only data
+  (static `config_is_data()`: tokens of `return array( ... );` with plain values). The marker
+  `WPCYBERSEC_GUARD_BOOTSTRAPPED` alone never counts. `refresh_leftover_bootstrap()` rewrites such
+  a file for the current data folder: from `Installer::activate()` when the guard is not installed,
+  and on admin pages for administrators.
 - `install()`: writes the bootstrap (checks `file_exists` before including the plugin's
   `guard/guard.php`, so deleting the plugin never fatals), `Guard_Config::write()`,
   `allowlist->export_guard_file()`, sets option `wpcybersec_guard_installed`.
@@ -626,7 +663,8 @@ Files: `includes/admin/class-wizard.php`, `includes/admin/class-settings-page.ph
   [], 'wpcs-<key>')` adds it from the fragment.
 - `Hardening`: one-click fixes (`run($id)`), `move_data_dir($target, $outside_only)` moves the
   data folder through `Storage::relocate()` (refused while a scan runs, on multisite, or when the
-  guard bootstrap cannot be rewritten; the guard spool is imported first, the allowlist mirror and
+  guard bootstrap cannot be rewritten; a target outside open_basedir is refused with that reason
+  before anything else; the guard spool is imported first, the allowlist mirror and
   guard config are rewritten in the new folder, the guard is reinstalled there). The uploads PHP
   block is only reported fixed after a live test (a probe PHP file must not run, a probe text file
   must still load; otherwise rolled back); on nginx the rule is shown instead of writing a
@@ -636,10 +674,13 @@ Files: `includes/admin/class-wizard.php`, `includes/admin/class-settings-page.ph
   (option `wpcybersec_fix_failures`; Hardening::run(), the guard and uploads/.htaccess handlers call
   them), `as_text($items)`, admin-post `wpcybersec_dev_instructions` (.txt download). No secrets.
 - `Sysadmin_Tools`: `diagnostics()` (list of `{ id, label, status pass|warn|fail|info, detail, fix }`),
-  `cron_snippets()`, `apache_uploads_rules()`, `nginx_rules()`, `permission_commands()`,
+  `cron_snippets()`, `apache_uploads_rules()`, static `nginx_uploads_rule()` (the one nginx rule that
+  blocks PHP in uploads, `UPLOADS_EXEC_PATTERN`; Hardening's manual steps use it and
+  `apache_uploads_rules()` too), `nginx_rules()`, `permission_commands()`,
   `fapolicyd_trust_export()`, `fapolicyd_rules()`, `inotify_script()`, `maldet_steps()`,
   `antivirus_status()` (ClamAV shows "Unknown (hosting hides it)" instead of "Not installed" when
-  `clamav_hidden()` says the host may hide the binary), static `maldet_detect()`, `inotifywait_installed()`,
+  `clamav_hidden()` says the host may hide the binary; maldet likewise with `maldet_hidden()`, key
+  `maldet.hidden`), static `maldet_detect()`, `inotifywait_installed()`,
   `write_uploads_htaccess()`, `hmac_snippet()`. `server-tools/cgav.sh` (also offered as a
   download, `includes/admin/cgav-script.txt`) installs and checks ClamAV and Linux Malware Detect
   on the server (status, install-clamav, install-maldet, monitor, test, update, scan, logs; safe to

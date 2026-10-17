@@ -838,8 +838,10 @@ class Scanner {
 
 	/**
 	 * Whether a file is exactly the early guard bootstrap this plugin writes
-	 * (ABSPATH/wpcybersec-guard.php). A file with that name but other content
-	 * is not trusted.
+	 * (ABSPATH/wpcybersec-guard.php), or one an earlier install wrote for
+	 * another data folder (Guard_Manager::is_leftover_bootstrap(): the exact
+	 * template with paths that cannot run other code). A file with that name
+	 * but other content is not trusted.
 	 *
 	 * @param string $abs Absolute path.
 	 * @return bool
@@ -859,7 +861,11 @@ class Scanner {
 			return false;
 		}
 		try {
-			return (string) @file_get_contents( $abs ) === (string) $guard->bootstrap_code(); // phpcs:ignore
+			$code = (string) @file_get_contents( $abs ); // phpcs:ignore
+			if ( $code === (string) $guard->bootstrap_code() ) {
+				return true;
+			}
+			return method_exists( $guard, 'is_leftover_bootstrap' ) && $guard->is_leftover_bootstrap( $code );
 		} catch ( \Throwable $e ) {
 			return false;
 		}
@@ -1062,30 +1068,66 @@ class Scanner {
 	public function plugin_map( $slug ) {
 		$slug    = (string) $slug;
 		$version = $this->plugin_version( $slug );
-		if ( '' === $slug || '' === $version || ! preg_match( '~^[a-z0-9._-]{1,100}$~i', $slug ) || ! preg_match( '~^[a-z0-9._+-]{1,40}$~i', $version ) ) {
-			return false;
-		}
-		$id = $slug . '@' . $version;
+		$id      = $slug . '@' . $version;
 		if ( array_key_exists( $id, $this->plugin_maps ) ) {
 			return $this->plugin_maps[ $id ];
 		}
 		$this->plugin_maps[ $id ] = false;
 
-		$key    = self::PLUGIN_TRANSIENT . md5( $id );
-		$cached = get_site_transient( $key );
-		$map    = false;
-		if ( is_string( $cached ) && 0 === strpos( $cached, "v1\n" ) ) {
-			$map = $this->unpack_map( $cached );
-		} elseif ( 'none' === $cached || $this->offline() || $this->fetch_failures >= 2 ) {
-			return false;
-		} else {
-			$map = $this->fetch_plugin_map( $slug, $version, $key );
-		}
+		$map = $this->checksum_map( $slug, $version );
 		if ( ! $map || ! $this->map_fits( $slug, $map ) ) {
 			return false;
 		}
 		$this->plugin_maps[ $id ] = $map;
 		return $map;
+	}
+
+	/**
+	 * Official wordpress.org checksums of one plugin version (path inside
+	 * the plugin folder => list of sha256), whatever is installed. The same
+	 * list and cache plugin_map() uses; Install_Gate checks an unpacked
+	 * package against it.
+	 *
+	 * @param string $slug    Plugin folder.
+	 * @param string $version Version.
+	 * @return array|false False when it is not a wordpress.org plugin version or cannot be fetched.
+	 */
+	public function checksum_map( $slug, $version ) {
+		$slug    = (string) $slug;
+		$version = (string) $version;
+		if ( '' === $slug || '' === $version || ! preg_match( '~^[a-z0-9._-]{1,100}$~i', $slug ) || ! preg_match( '~^[a-z0-9._+-]{1,40}$~i', $version ) ) {
+			return false;
+		}
+		$key    = self::PLUGIN_TRANSIENT . md5( $slug . '@' . $version );
+		$cached = get_site_transient( $key );
+		if ( is_string( $cached ) && 0 === strpos( $cached, "v1\n" ) ) {
+			return $this->unpack_map( $cached );
+		}
+		if ( 'none' === $cached || $this->offline() || $this->fetch_failures >= 2 ) {
+			return false;
+		}
+		return $this->fetch_plugin_map( $slug, $version, $key );
+	}
+
+	/**
+	 * Whether a file has one of the sha256 sums a checksum map lists for it
+	 * (other line endings count as the same file).
+	 *
+	 * @param array  $map   checksum_map() result.
+	 * @param string $inner Path inside the plugin folder.
+	 * @param string $abs   File to check.
+	 * @return bool
+	 */
+	public function matches_map( array $map, $inner, $abs ) {
+		$inner = ltrim( wp_normalize_path( (string) $inner ), '/' );
+		if ( '' === $inner || ! isset( $map[ $inner ] ) ) {
+			return false;
+		}
+		$sha = strtolower( (string) @hash_file( 'sha256', $abs ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( '' === $sha ) {
+			return false;
+		}
+		return in_array( $sha, (array) $map[ $inner ], true ) || (bool) array_intersect( $this->line_ending_hashes( $abs, 'sha256' ), (array) $map[ $inner ] );
 	}
 
 	/**

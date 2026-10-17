@@ -19,6 +19,9 @@ class Sysadmin_Tools {
 	/** Marker used for the uploads .htaccess block. */
 	const MARKER = 'CyberGate Security';
 
+	/** Extensions nginx_uploads_rule() refuses to serve from uploads (regex alternation). */
+	const UPLOADS_EXEC_PATTERN = 'php[0-9]?|phtml|phar|pht|phps|inc';
+
 	/** Admin page slugs owned by the setup module. */
 	const WIZARD_PAGE   = 'wpcybersec-wizard';
 	const SETTINGS_PAGE = 'wpcybersec-settings';
@@ -753,7 +756,7 @@ class Sysadmin_Tools {
 			$check['detail'] = __( 'Live test: a PHP file placed in the uploads folder was executed. A backdoor uploaded there would run.', 'cybergate-security' );
 			if ( 'nginx' === $server ) {
 				$check['fix']  = __( 'Add this rule to the nginx server block, then run the test again.', 'cybergate-security' );
-				$check['code'] = $this->nginx_uploads_rule();
+				$check['code'] = self::nginx_uploads_rule();
 			} else {
 				$check['fix']     = __( 'Write the blocking rule to uploads/.htaccess, then run the test again.', 'cybergate-security' );
 				$check['actions'] = array( 'write_htaccess', 'probe' );
@@ -799,7 +802,7 @@ class Sysadmin_Tools {
 			$check['status']  = 'info';
 			$check['detail']  = __( 'nginx does not read .htaccess files, so the blocking rule must be in the server configuration.', 'cybergate-security' );
 			$check['fix']     = __( 'Make sure the server block contains a rule like this one, then run a live test.', 'cybergate-security' );
-			$check['code']    = $this->nginx_uploads_rule();
+			$check['code']    = self::nginx_uploads_rule();
 			$check['actions'] = array( 'probe' );
 			return $check;
 		}
@@ -899,10 +902,14 @@ class Sysadmin_Tools {
 			'detail' => $detail,
 		);
 		$maldet  = self::maldet_detect();
-		$detail .= ' ' . ( '' !== $maldet
+		if ( '' !== $maldet ) {
 			/* translators: %s: binary path */
-			? sprintf( __( 'Linux Malware Detect found at %s.', 'cybergate-security' ), $maldet )
-			: __( 'Linux Malware Detect (maldet) not found.', 'cybergate-security' ) );
+			$detail .= ' ' . sprintf( __( 'Linux Malware Detect found at %s.', 'cybergate-security' ), $maldet );
+		} else {
+			$detail .= ' ' . ( self::maldet_hidden()
+				? __( 'Linux Malware Detect (maldet): unknown, the hosting hides the folders it is installed in (open_basedir).', 'cybergate-security' )
+				: __( 'Linux Malware Detect (maldet) not found.', 'cybergate-security' ) );
+		}
 		$check['detail'] = $detail;
 
 		$settings = self::service( 'settings' );
@@ -920,6 +927,21 @@ class Sysadmin_Tools {
 	 * @return string Path, '' when not found.
 	 */
 	public static function maldet_detect() {
+		foreach ( self::maldet_candidates() as $bin ) {
+			if ( self::path_allowed( $bin ) && @is_file( $bin ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				return wp_normalize_path( $bin );
+			}
+		}
+		return '';
+	}
+
+	/**
+	 * Places Linux Malware Detect is installed in: the standard ones and
+	 * "maldet" in every PATH folder.
+	 *
+	 * @return string[]
+	 */
+	private static function maldet_candidates() {
 		$candidates = array( '/usr/local/maldetect/maldet', '/usr/local/sbin/maldet', '/usr/sbin/maldet', '/usr/bin/maldet', '/usr/local/bin/maldet' );
 		$path       = (string) getenv( 'PATH' );
 		foreach ( '' !== $path ? explode( PATH_SEPARATOR, $path ) : array() as $dir ) {
@@ -928,12 +950,26 @@ class Sysadmin_Tools {
 				$candidates[] = rtrim( $dir, '/' ) . '/maldet';
 			}
 		}
-		foreach ( array_unique( $candidates ) as $bin ) {
-			if ( self::path_allowed( $bin ) && @is_file( $bin ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-				return wp_normalize_path( $bin );
+		return array_values( array_unique( $candidates ) );
+	}
+
+	/**
+	 * Whether PHP cannot tell if Linux Malware Detect is installed:
+	 * open_basedir hides one of the places it is installed in (like
+	 * clamav_hidden() for ClamAV).
+	 *
+	 * @return bool
+	 */
+	public static function maldet_hidden() {
+		if ( '' !== self::maldet_detect() ) {
+			return false;
+		}
+		foreach ( self::maldet_candidates() as $candidate ) {
+			if ( ! self::path_allowed( $candidate ) ) {
+				return true;
 			}
 		}
-		return '';
+		return false;
 	}
 
 	/**
@@ -1012,13 +1048,17 @@ class Sysadmin_Tools {
 				$linked = false;
 			}
 		}
-		$monitor = '' !== $maldet ? self::inotifywait_installed() : null;
+		$monitor  = '' !== $maldet ? self::inotifywait_installed() : null;
+		$m_hidden = $supported && '' === $maldet && self::maldet_hidden();
 		if ( '' !== $maldet && ! $monitor ) {
 			$m_label = __( 'Installed, real-time monitor unavailable', 'cybergate-security' );
 			$m_tone  = 'medium';
 		} elseif ( '' !== $maldet ) {
 			$m_label = __( 'Installed', 'cybergate-security' );
 			$m_tone  = 'ok';
+		} elseif ( $m_hidden ) {
+			$m_label = __( 'Unknown (hosting hides it)', 'cybergate-security' );
+			$m_tone  = 'muted';
 		} elseif ( $supported ) {
 			$m_label = __( 'Not installed', 'cybergate-security' );
 			$m_tone  = 'muted';
@@ -1047,6 +1087,8 @@ class Sysadmin_Tools {
 				'monitor'   => $monitor,
 				'label'     => $m_label,
 				'tone'      => $m_tone,
+				// Not found while open_basedir hides where it would be installed.
+				'hidden'    => $m_hidden,
 			),
 		);
 	}
@@ -1569,7 +1611,7 @@ class Sysadmin_Tools {
 		$lines = array(
 			'# BEGIN ' . self::MARKER,
 			'# Blocks PHP execution in the uploads folder. Remove this block to undo.',
-			'<FilesMatch "\.(?i:php[3-8]?|phtml|phar|pht|phps)(\.|$)|\.(?i:inc)$">',
+			'<FilesMatch "\.(?i:php[0-9]?|phtml|phar|pht|phps)(\.|$)|\.(?i:inc)$">',
 			"\t<IfModule mod_authz_core.c>",
 			"\t\tRequire all denied",
 			"\t</IfModule>",
@@ -1632,7 +1674,7 @@ class Sysadmin_Tools {
 			return new \WP_Error(
 				'wpcybersec_htaccess_nginx',
 				/* translators: %s: nginx rule */
-				sprintf( __( 'This server runs nginx, which ignores .htaccess files, so nothing was written. Add this rule to the site\'s nginx server block and reload nginx (or ask your host): %s', 'cybergate-security' ), $this->nginx_uploads_rule() )
+				sprintf( __( 'This server runs nginx, which ignores .htaccess files, so nothing was written. Add this rule to the site\'s nginx server block and reload nginx (or ask your host): %s', 'cybergate-security' ), self::nginx_uploads_rule() )
 			);
 		}
 		$dir = self::uploads_dir();
@@ -1859,14 +1901,15 @@ class Sysadmin_Tools {
 	}
 
 	/**
-	 * nginx rule that blocks PHP in uploads.
+	 * nginx rule that blocks PHP in uploads. The one source of this rule
+	 * (Hardening's manual steps use it too).
 	 *
 	 * @return string
 	 */
-	private function nginx_uploads_rule() {
+	public static function nginx_uploads_rule() {
 		$path = self::url_path_for( self::uploads_dir() );
 		$path = '' !== $path ? $path : '/wp-content/uploads/';
-		return 'location ~* ^' . str_replace( '\\-', '-', preg_quote( $path, '#' ) ) . '.*\\.(php[3-8]?|phtml|phar|pht|phps|inc)$ {' . "\n    deny all;\n}";
+		return 'location ~* ^' . str_replace( '\\-', '-', preg_quote( $path, '#' ) ) . '.*\\.(' . self::UPLOADS_EXEC_PATTERN . ')$ {' . "\n    deny all;\n}";
 	}
 
 	/**
@@ -1895,7 +1938,7 @@ class Sysadmin_Tools {
 		$guard = str_replace( '//', '/', $guard );
 		return '# ' . __( 'Inside the server { } block of this site, above the generic "location ~ \.php$" block.', 'cybergate-security' ) . "\n"
 			. '# ' . __( 'Block PHP execution in uploads.', 'cybergate-security' ) . "\n"
-			. $this->nginx_uploads_rule() . "\n\n"
+			. self::nginx_uploads_rule() . "\n\n"
 			. '# ' . __( 'Block web access to the CyberGate Security data folder.', 'cybergate-security' ) . "\n"
 			. $this->nginx_data_rule() . "\n\n"
 			. '# ' . __( 'The early guard bootstrap is only loaded through auto_prepend_file.', 'cybergate-security' ) . "\n"
@@ -2288,7 +2331,8 @@ class Sysadmin_Tools {
 				}
 			}
 			if ( null === $running ) {
-				$code = self::exit_code( 'pgrep -f ' . escapeshellarg( 'inotifywait.*maldetect' ) );
+				// "[i]" keeps the pattern from matching the command line of the shell that runs pgrep.
+				$code = self::exit_code( 'pgrep -f ' . escapeshellarg( '[i]notifywait.*maldetect' ) );
 				if ( 0 === $code ) {
 					$running = true;
 				} elseif ( 1 === $code ) {

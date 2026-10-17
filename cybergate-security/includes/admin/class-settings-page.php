@@ -1178,7 +1178,7 @@ class Settings_Page {
 			$linked = $maldet['linked'] ? $this->badge( $yes, 'ok' ) : $this->badge( $no, 'medium' );
 		}
 		$rows = array(
-			__( 'Program', 'cybergate-security' ) => '' !== $maldet['binary'] ? '<code class="wpcs-path">' . esc_html( $maldet['binary'] ) . '</code>' : esc_html__( 'Not found', 'cybergate-security' ),
+			__( 'Program', 'cybergate-security' ) => '' !== $maldet['binary'] ? '<code class="wpcs-path">' . esc_html( $maldet['binary'] ) . '</code>' : ( ! empty( $maldet['hidden'] ) ? esc_html__( 'Unknown (hosting hides it)', 'cybergate-security' ) : esc_html__( 'Not found', 'cybergate-security' ) ),
 		);
 		if ( '' !== $maldet['binary'] ) {
 			$rows[ __( 'Signature version', 'cybergate-security' ) ]       = '' !== $maldet['version'] ? '<code>' . esc_html( $maldet['version'] ) . '</code>' : esc_html__( 'Unknown', 'cybergate-security' );
@@ -1186,6 +1186,8 @@ class Settings_Page {
 			$rows[ __( 'Real-time monitor', 'cybergate-security' ) ]             = $maldet['monitor'] ? $this->badge( __( 'Available', 'cybergate-security' ), 'ok' ) : $this->badge( __( 'Unavailable: install inotify-tools', 'cybergate-security' ), 'medium' );
 		} elseif ( ! $maldet['supported'] ) {
 			$rows[ __( 'Note', 'cybergate-security' ) ] = esc_html__( 'maldet runs on Linux servers only.', 'cybergate-security' );
+		} elseif ( ! empty( $maldet['hidden'] ) ) {
+			$rows[ __( 'Note', 'cybergate-security' ) ] = esc_html__( 'PHP may not look into the folders maldet is installed in (open_basedir), so it cannot tell whether it is there. Ask your host, or run "maldet --help" in a shell.', 'cybergate-security' );
 		} else {
 			$rows[ __( 'Note', 'cybergate-security' ) ] = esc_html__( 'Optional. Adds signatures made for website malware such as PHP web shells.', 'cybergate-security' );
 		}
@@ -1413,9 +1415,18 @@ class Settings_Page {
 		$outside = method_exists( '\WPCyberSecurity\Paths', 'outside_root' ) ? \WPCyberSecurity\Paths::outside_root() : array();
 		if ( $outside ) {
 			// WordPress folders outside the scan folder (Bedrock, WordPress in a subfolder, linked uploads) are scanned too.
-			$paths = array();
+			$paths  = array();
+			$loaded = 0;
 			foreach ( $outside as $entry ) {
+				if ( 'loaded' === $entry['kind'] ) {
+					++$loaded; // Files wp-config.php loads (Composer's autoloader and so on): counted, not listed.
+					continue;
+				}
 				$paths[] = '<code>' . esc_html( $entry['path'] ) . '</code>' . ( 'top' === $entry['depth'] ? ' ' . esc_html__( '(files at its top only)', 'cybergate-security' ) : '' );
+			}
+			if ( $loaded ) {
+				/* translators: %d: number of files */
+				$paths[] = esc_html( sprintf( _n( '%d more file that wp-config.php loads', '%d more files that wp-config.php loads', $loaded, 'cybergate-security' ), $loaded ) );
 			}
 			$root .= '<div class="wpcs-notice wpcs-notice--info wpcs-notice--compact"><span class="dashicons dashicons-info" aria-hidden="true"></span><p>' . esc_html__( 'Some WordPress folders lie outside the scan folder and are scanned as well:', 'cybergate-security' ) . ' ' . implode( ', ', $paths ) . '</p></div>';
 		}

@@ -90,10 +90,11 @@ class Network {
 	 * @return bool False when it already existed.
 	 */
 	public static function add_option( $name, $value, $deprecated = '', $autoload = true ) {
+		unset( $deprecated ); // Kept for the add_option() signature; core ignores it since 2.3.
 		if ( self::active() ) {
 			return add_site_option( $name, $value );
 		}
-		return add_option( $name, $value, $deprecated, $autoload );
+		return add_option( $name, $value, '', $autoload );
 	}
 
 	/**
@@ -519,7 +520,7 @@ class Network {
 			return;
 		}
 		global $wpdb;
-		$table = $wpdb->get_blog_prefix( self::main_site_id() ) . 'options';
+		$table = esc_sql( $wpdb->get_blog_prefix( self::main_site_id() ) . 'options' );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- core options table of the main site.
 		$rows = (array) $wpdb->get_results( $wpdb->prepare( "SELECT option_name, option_value FROM {$table} WHERE option_name LIKE %s", $wpdb->esc_like( 'wpcybersec_' ) . '%' ), ARRAY_A );
 		foreach ( $rows as $row ) {
@@ -621,7 +622,7 @@ class Network {
 		}
 
 		// Options: trusted administrators are merged, everything else is the main site's (already migrated).
-		$table = $prefix . 'options';
+		$table = esc_sql( $prefix . 'options' );
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- core options table of a site of this network.
 		$trusted = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$table} WHERE option_name = %s", User_Watch::TRUSTED_OPTION ) );
 		if ( null !== $trusted ) {
@@ -673,7 +674,7 @@ class Network {
 			$table = $prefix . 'wpcybersec_' . $name;
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) === $table ) {
-				$old[ $name ] = $table;
+				$old[ $name ] = esc_sql( $table );
 			}
 		}
 		if ( ! $old ) {
@@ -685,7 +686,9 @@ class Network {
 			'log'       => 0,
 		);
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- table names are the plugin's fixed names with a site prefix from $wpdb.
+		// Table names cannot be placeholders before WordPress 6.2 (%i); these are the plugin's
+		// fixed names with a prefix from $wpdb, confirmed by SHOW TABLES above and escaped.
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- see above.
 		if ( isset( $old['allowlist'] ) ) {
 			$counts['allowlist'] = (int) $wpdb->query( 'INSERT IGNORE INTO ' . Store::table( 'allowlist' ) . ' (kind, value, label, note, created_by, created_at) SELECT kind, value, label, note, created_by, created_at FROM ' . $old['allowlist'] . ' ORDER BY id' );
 		}

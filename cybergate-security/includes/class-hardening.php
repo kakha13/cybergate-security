@@ -277,13 +277,13 @@ class Hardening {
 			case 'uploads_php':
 				if ( 'nginx' === $this->server_type() ) {
 					return array(
-						array( 'text' => __( 'nginx ignores .htaccess files, so ask your host (or your system administrator) to add this rule to the site\'s server block and reload nginx:', 'cybergate-security' ), 'code' => "location ~* ^/wp-content/uploads/.*\\.(php[0-9]?|phtml|phar|pht)$ {\n    deny all;\n}" ),
+						array( 'text' => __( 'nginx ignores .htaccess files, so ask your host (or your system administrator) to add this rule to the site\'s server block and reload nginx:', 'cybergate-security' ), 'code' => Sysadmin_Tools::nginx_uploads_rule() ),
 					);
 				}
 				return array(
 					array( 'text' => $panel ),
 					array( 'text' => __( 'Open the folder wp-content/uploads and create (or edit) a file named .htaccess. Turn on "Show hidden files" if you do not see it.', 'cybergate-security' ) ),
-					array( 'text' => __( 'Add these lines and save:', 'cybergate-security' ), 'code' => "<FilesMatch \"\\.(php[0-9]?|phtml|phar|pht|inc)$\">\n    Require all denied\n</FilesMatch>" ),
+					array( 'text' => __( 'Add these lines and save:', 'cybergate-security' ), 'code' => ( new Sysadmin_Tools() )->apache_uploads_rules() ),
 				);
 
 			case 'hmac_key':
@@ -486,6 +486,13 @@ class Hardening {
 		$job = is_object( $plugin->scan_job ) && method_exists( $plugin->scan_job, 'status' ) ? $plugin->scan_job->status() : array();
 		if ( isset( $job['state'] ) && in_array( $job['state'], array( 'enumerating', 'processing', 'finishing' ), true ) ) {
 			return new \WP_Error( 'wpcybersec_fix', __( 'A scan is running. Try again when it has finished.', 'cybergate-security' ) );
+		}
+		if ( ! Storage::path_allowed( $target ) ) {
+			return new \WP_Error(
+				'wpcybersec_fix',
+				/* translators: 1: folder path, 2: open_basedir value */
+				sprintf( __( 'PHP may not use %1$s on this server (open_basedir allows only %2$s), so nothing was moved. Add the folder to open_basedir in the PHP settings of this site, or choose a folder inside the allowed ones that the web server does not serve.', 'cybergate-security' ), $target, (string) ini_get( 'open_basedir' ) )
+			);
 		}
 		if ( $outside_only && $storage->is_in_webroot( $target ) ) {
 			return new \WP_Error( 'wpcybersec_fix', __( 'The folder next to WordPress is still served by the web server here, so the move would not help.', 'cybergate-security' ) );

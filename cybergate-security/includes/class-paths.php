@@ -30,6 +30,15 @@ class Paths {
 	/** @var string|null Real data folder path with a trailing slash ('' when unknown). */
 	private static $data_real = null;
 
+	/** @var string[]|null config_includes() cache. */
+	private static $loaded = null;
+
+	/** Option: files wp-config.php loaded the last time a request included it. */
+	const LOADED_OPTION = 'wpcybersec_config_includes';
+
+	/** At most this many files loaded by wp-config.php are added to the scan set. */
+	const LOADED_CAP = 300;
+
 	/**
 	 * Folder the scanner walks, with a trailing slash.
 	 *
@@ -121,16 +130,16 @@ class Paths {
 		}
 
 		// wp-config.php one folder above ABSPATH (WordPress loads it from there).
+		$tops = array();
+		foreach ( $set as $entry ) {
+			if ( 'top' === $entry['depth'] ) {
+				$tops[] = $entry['path'];
+			}
+		}
 		$config = class_exists( __NAMESPACE__ . '\\Config_Editor' ) ? Config_Editor::path() : '';
 		if ( '' !== $config ) {
 			$real   = realpath( $config );
 			$config = wp_normalize_path( $real ? $real : $config );
-			$tops   = array();
-			foreach ( $set as $entry ) {
-				if ( 'top' === $entry['depth'] ) {
-					$tops[] = $entry['path'];
-				}
-			}
 			if ( ! self::covered( $config, $full ) && ! in_array( trailingslashit( wp_normalize_path( dirname( $config ) ) ), $tops, true ) ) {
 				$set[] = array(
 					'path'  => $config,
@@ -139,6 +148,42 @@ class Paths {
 					'alias' => '',
 				);
 			}
+		}
+
+		// Bedrock: web/wp-config.php loads ../config/application.php, which loads
+		// config/environments/<env>.php. That folder runs on every request, so it
+		// is walked in full (only when the layout is clear).
+		$bedrock = self::bedrock_config_dir( $home, $config );
+		if ( '' !== $bedrock && ! self::covered( $bedrock, $full ) ) {
+			$full[] = $bedrock;
+			$set[]  = array(
+				'path'  => $bedrock,
+				'depth' => 'all',
+				'kind'  => 'config-dir',
+				'alias' => '',
+			);
+		}
+
+		// Other PHP files wp-config.php loads before WordPress starts (a config
+		// file next to the web root, Composer's autoloader): each file on its
+		// own, never their folders.
+		$listed = array();
+		foreach ( $set as $entry ) {
+			if ( 'file' === $entry['depth'] ) {
+				$listed[ $entry['path'] ] = true;
+			}
+		}
+		foreach ( self::config_includes( $config ) as $file ) {
+			if ( isset( $listed[ $file ] ) || self::covered( $file, $full ) || in_array( trailingslashit( wp_normalize_path( dirname( $file ) ) ), $tops, true ) ) {
+				continue;
+			}
+			$listed[ $file ] = true;
+			$set[]           = array(
+				'path'  => $file,
+				'depth' => 'file',
+				'kind'  => 'loaded',
+				'alias' => '',
+			);
 		}
 
 		/**
@@ -176,6 +221,7 @@ class Paths {
 	public static function reset() {
 		self::$set       = null;
 		self::$data_real = null;
+		self::$loaded    = null;
 	}
 
 	/**
@@ -365,6 +411,158 @@ class Paths {
 		$found = self::real_dir( $found );
 		$real  = self::real_dir( $abspath );
 		return $found === $real ? '' : $found;
+	}
+
+	/**
+	 * Bedrock's config/ folder next to the web root: the home folder is
+	 * <project>/web/, <project>/config/application.php exists and the
+	 * wp-config.php in web/ loads it.
+	 *
+	 * @param string $home   home_dir() result.
+	 * @param string $config Resolved wp-config.php path ('' when unknown).
+	 * @return string Real folder with a trailing slash, '' when the layout is not Bedrock's.
+	 */
+	private static function bedrock_config_dir( $home, $config ) {
+		$home = (string) $home;
+		if ( '' === $home || '' === (string) $config || 'web' !== basename( untrailingslashit( $home ) ) ) {
+			return '';
+		}
+		if ( trailingslashit( wp_normalize_path( dirname( $config ) ) ) !== $home ) {
+			return '';
+		}
+		$project = trailingslashit( wp_normalize_path( dirname( untrailingslashit( $home ) ) ) );
+		if ( ! Storage::path_allowed( $project . 'config' ) || ! @is_file( $project . 'config/application.php' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return '';
+		}
+		$code = (string) @file_get_contents( $config, false, null, 0, 65536 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		if ( false === strpos( $code, 'config/application.php' ) ) {
+			return '';
+		}
+		return self::real_dir( $project . 'config' );
+	}
+
+	/**
+	 * PHP files wp-config.php loads before WordPress starts (wp-settings.php),
+	 * such as Bedrock's config/application.php and Composer's autoloader.
+	 *
+	 * Taken from get_included_files() when this request included wp-config.php
+	 * itself (web, wp-cron.php, bin/cron.php) and remembered in an option, so a
+	 * request that did not (WP-CLI evaluates wp-config.php instead of including
+	 * it) scans the same files. Without that list, the plain require/include
+	 * lines of wp-config.php are read instead.
+	 *
+	 * @param string $config Resolved wp-config.php path ('' when unknown).
+	 * @return string[] Real paths of existing files, at most LOADED_CAP.
+	 */
+	public static function config_includes( $config ) {
+		$config = (string) $config;
+		if ( '' === $config ) {
+			return array();
+		}
+		if ( is_array( self::$loaded ) ) {
+			return self::$loaded;
+		}
+		$can_save = function_exists( 'get_option' ) && class_exists( __NAMESPACE__ . '\\Network' );
+		$found    = self::loaded_now( $config );
+		if ( null !== $found ) {
+			if ( $can_save && Network::get_option( self::LOADED_OPTION, null ) !== $found ) {
+				Network::update_option( self::LOADED_OPTION, $found, false );
+			}
+		} else {
+			$saved = $can_save ? Network::get_option( self::LOADED_OPTION, null ) : null;
+			$found = is_array( $saved ) ? $saved : self::parse_includes( $config );
+		}
+		$out = array();
+		foreach ( (array) $found as $file ) {
+			$file = wp_normalize_path( (string) $file );
+			if ( '' === $file || ! self::is_absolute( $file ) || false !== strpos( $file, '://' ) || ! Storage::path_allowed( $file ) || ! @is_file( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				continue;
+			}
+			$out[] = $file;
+			if ( count( $out ) >= self::LOADED_CAP ) {
+				break;
+			}
+		}
+		self::$loaded = array_values( array_unique( $out ) );
+		return self::$loaded;
+	}
+
+	/**
+	 * Files included after wp-config.php and before wp-settings.php in this
+	 * request.
+	 *
+	 * @param string $config Resolved wp-config.php path.
+	 * @return string[]|null Null when this request did not include wp-config.php itself.
+	 */
+	private static function loaded_now( $config ) {
+		$settings = self::real_file( ABSPATH . 'wp-settings.php' );
+		$started  = false;
+		$out      = array();
+		foreach ( get_included_files() as $file ) {
+			$real = self::real_file( $file );
+			if ( ! $started ) {
+				$started = ( $real === $config );
+				continue;
+			}
+			if ( $real === $settings ) {
+				return array_values( array_unique( $out ) );
+			}
+			if ( '' !== $real ) {
+				$out[] = $real;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Fallback: the require/include lines of wp-config.php whose path is a
+	 * plain string, optionally after __DIR__, dirname( __FILE__ ) or
+	 * dirname( __DIR__ ). One level only; nothing is executed.
+	 *
+	 * @param string $config Resolved wp-config.php path.
+	 * @return string[]
+	 */
+	private static function parse_includes( $config ) {
+		$size = @filesize( $config ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( false === $size || $size > 262144 ) {
+			return array();
+		}
+		$code = (string) @file_get_contents( $config ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$dir  = untrailingslashit( wp_normalize_path( dirname( $config ) ) );
+		$up   = untrailingslashit( wp_normalize_path( dirname( $dir ) ) );
+		$out  = array();
+		$re   = '~\b(?:require|include)(?:_once)?\s*\(?\s*(?:(dirname\s*\(\s*__DIR__\s*\)|dirname\s*\(\s*dirname\s*\(\s*__FILE__\s*\)\s*\)|__DIR__|dirname\s*\(\s*__FILE__\s*\))\s*\.\s*)?([\'"])([^\'"$]+)\2~i';
+		if ( ! preg_match_all( $re, $code, $matches, PREG_SET_ORDER ) ) {
+			return array();
+		}
+		foreach ( $matches as $m ) {
+			$base = strtolower( preg_replace( '/\s+/', '', $m[1] ) );
+			if ( '' === $base ) {
+				$path = self::is_absolute( $m[3] ) ? $m[3] : $dir . '/' . $m[3];
+			} elseif ( 'dirname(__dir__)' === $base || 'dirname(dirname(__file__))' === $base ) {
+				$path = $up . '/' . ltrim( $m[3], '/' );
+			} else {
+				$path = $dir . '/' . ltrim( $m[3], '/' );
+			}
+			$real = self::real_file( $path );
+			if ( '' !== $real ) {
+				$out[] = $real;
+			}
+		}
+		return array_values( array_unique( $out ) );
+	}
+
+	/**
+	 * @param string $file Path.
+	 * @return string Normalized real path of a local file, '' otherwise.
+	 */
+	private static function real_file( $file ) {
+		$file = (string) $file;
+		if ( '' === $file || false !== strpos( $file, '://' ) || ! Storage::path_allowed( wp_normalize_path( $file ) ) ) {
+			return '';
+		}
+		$real = realpath( $file );
+		return $real ? wp_normalize_path( $real ) : '';
 	}
 
 	/**

@@ -41,6 +41,14 @@ class Installer {
 		Network::update_option( self::REDIRECT_OPTION, get_current_user_id() ? get_current_user_id() : 1, false );
 		if ( Network::get_option( 'wpcybersec_guard_installed' ) ) {
 			Guard_Config::set_enabled( true );
+		} else {
+			// A guard bootstrap an earlier install left behind (another data
+			// folder): rewritten for the current folder, so scans do not report it.
+			try {
+				( new Guard_Manager() )->refresh_leftover_bootstrap();
+			} catch ( \Throwable $e ) {
+				unset( $e );
+			}
 		}
 	}
 

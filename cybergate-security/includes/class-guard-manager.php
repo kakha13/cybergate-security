@@ -123,6 +123,8 @@ class Guard_Manager {
 				$this->ensure_cron();
 			}
 			$this->heal_bootstrap();
+		} elseif ( Admin\Admin::can() ) {
+			$this->refresh_leftover_bootstrap();
 		}
 	}
 
@@ -521,6 +523,140 @@ class Guard_Manager {
 	}
 
 	/**
+	 * Guard, config and chain paths of a bootstrap that is exactly
+	 * build_bootstrap()'s template, whatever paths it holds (a bootstrap an
+	 * earlier install wrote for another data folder).
+	 *
+	 * @param string $code File content.
+	 * @return array|null { guard, config, chain }, null when it is not the template.
+	 */
+	public static function bootstrap_parts( $code ) {
+		$code = (string) $code;
+		$lit  = "'(?:[^'\\\\]|\\\\.)*'";
+		if ( strlen( $code ) > 65536 || ! preg_match( "/^\\tif \\( @file_exists\\( ($lit) \\) && @file_exists\\( ($lit) \\) \\) \\{\$/m", $code, $m ) ) {
+			return null;
+		}
+		$chain = '';
+		if ( preg_match( "/^\\tif \\( @file_exists\\( ($lit) \\) \\) \\{\$/m", $code, $c ) ) {
+			$chain = self::unexport( $c[1] );
+		}
+		$parts = array(
+			'guard'  => self::unexport( $m[1] ),
+			'config' => self::unexport( $m[2] ),
+			'chain'  => $chain,
+		);
+		// Rebuilt with the same paths it must be the same text: nothing added or changed.
+		if ( self::build_bootstrap( $parts['guard'], $parts['config'], $parts['chain'] ) !== $code ) {
+			return null;
+		}
+		return $parts;
+	}
+
+	/**
+	 * @param string $literal Single-quoted PHP string as var_export() writes it.
+	 * @return string
+	 */
+	private static function unexport( $literal ) {
+		return (string) preg_replace( '/\\\\(.)/s', '$1', substr( (string) $literal, 1, -1 ) );
+	}
+
+	/**
+	 * Whether a bootstrap is one this plugin wrote earlier for another data
+	 * folder (left by an uninstall, or written before the data folder moved).
+	 * Only the exact template counts, and only with paths that cannot run
+	 * other code: this plugin's guard.php, a guard/config.php in a wpcybersec
+	 * data folder that is missing or holds only data, and no chained prepend
+	 * file other than the one the administrator approved.
+	 *
+	 * @param string $code File content.
+	 * @return bool
+	 */
+	public function is_leftover_bootstrap( $code ) {
+		$parts = self::bootstrap_parts( $code );
+		if ( ! $parts ) {
+			return false;
+		}
+		if ( wp_normalize_path( $parts['guard'] ) !== $this->guard_file() ) {
+			return false;
+		}
+		if ( '' !== $parts['chain'] && $parts['chain'] !== (string) Network::get_option( self::CHAIN_OPTION, '' ) ) {
+			return false;
+		}
+		$config  = wp_normalize_path( $parts['config'] );
+		$current = wp_normalize_path( Guard_Config::file() );
+		if ( $config === $current ) {
+			return true;
+		}
+		$data = dirname( dirname( $config ) );
+		if ( 'config.php' !== basename( $config ) || 'guard' !== basename( dirname( $config ) ) || ! preg_match( '/^wpcybersec(?:$|-)/', basename( $data ) ) ) {
+			return false;
+		}
+		if ( ! Storage::path_allowed( $config ) ) {
+			return false;
+		}
+		return ! @file_exists( $config ) || self::config_is_data( $config ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
+
+	/**
+	 * Whether a guard config file is only "return array( ... );" with plain
+	 * values, as Guard_Config::write() creates it (guard.php includes it, so
+	 * anything else could run code).
+	 *
+	 * @param string $file Config file.
+	 * @return bool
+	 */
+	public static function config_is_data( $file ) {
+		$size = @filesize( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( false === $size || $size > 262144 || ! function_exists( 'token_get_all' ) ) {
+			return false;
+		}
+		$code = (string) @file_get_contents( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$ok   = array( T_OPEN_TAG, T_WHITESPACE, T_COMMENT, T_DOC_COMMENT, T_RETURN, T_ARRAY, T_CONSTANT_ENCAPSED_STRING, T_LNUMBER, T_DNUMBER, T_DOUBLE_ARROW );
+		$seen = false;
+		foreach ( token_get_all( $code ) as $token ) {
+			if ( is_array( $token ) ) {
+				if ( T_RETURN === $token[0] ) {
+					$seen = true;
+				}
+				if ( in_array( $token[0], $ok, true ) ) {
+					continue;
+				}
+				if ( T_STRING === $token[0] && in_array( strtolower( $token[1] ), array( 'true', 'false', 'null' ), true ) ) {
+					continue;
+				}
+				return false;
+			}
+			if ( ! in_array( $token, array( '(', ')', ',', ';', '-', '[', ']' ), true ) ) {
+				return false;
+			}
+		}
+		return $seen;
+	}
+
+	/**
+	 * Brings a bootstrap left by an earlier install (another data folder) up
+	 * to date, so it is not reported and points at the current folder. Runs
+	 * on activation and on admin pages while the guard is not installed.
+	 *
+	 * @return bool Whether it was rewritten.
+	 */
+	public function refresh_leftover_bootstrap() {
+		$path = $this->bootstrap_path();
+		if ( ! @is_file( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return false;
+		}
+		$code = (string) @file_get_contents( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		if ( $code === $this->bootstrap_code() || ! $this->is_leftover_bootstrap( $code ) ) {
+			return false;
+		}
+		if ( is_wp_error( $this->write_bootstrap() ) ) {
+			return false;
+		}
+		$this->log( 'guard_bootstrap_refreshed', __( 'The early guard file left by an earlier install was updated to the current data folder.', 'cybergate-security' ) );
+		return true;
+	}
+
+	/**
 	 * Writes the config, the allow file and the bootstrap, and marks the guard installed.
 	 * The administrator still has to point auto_prepend_file at the bootstrap (see snippets()).
 	 *
@@ -631,6 +767,9 @@ class Guard_Manager {
 		}
 		Fs::chmod( $path, 0644 );
 		$this->trust_file( $path );
+		// The whole file is generated, so an open item about an older copy is stale.
+		// Not done for .htaccess or .user.ini: lines outside our block survive a rewrite.
+		wpcybersec()->store->items_resolve_open( Paths::rel( $path ), 'now_trusted' );
 		return true;
 	}
 
@@ -1691,12 +1830,19 @@ class Guard_Manager {
 		if ( ! Network::active() || ! function_exists( 'get_site_by_path' ) ) {
 			return array();
 		}
-		$host = isset( $entry['host'] ) ? strtolower( (string) preg_replace( '/:\d+$/', '', (string) $entry['host'] ) ) : '';
+		// Like core (ms-load.php) only the default ports are dropped: a network
+		// on another port stores "host:port" as the domain of its sites.
+		$host = isset( $entry['host'] ) ? strtolower( (string) preg_replace( '/:(?:80|443)$/', '', (string) $entry['host'] ) ) : '';
 		$path = isset( $entry['uri'] ) ? (string) wp_parse_url( (string) $entry['uri'], PHP_URL_PATH ) : '/';
+		$path = '' !== $path ? $path : '/';
 		if ( '' === $host ) {
-			$host = (string) wp_parse_url( network_home_url(), PHP_URL_HOST );
+			$port = (int) wp_parse_url( network_home_url(), PHP_URL_PORT );
+			$host = strtolower( (string) wp_parse_url( network_home_url(), PHP_URL_HOST ) ) . ( $port && ! in_array( $port, array( 80, 443 ), true ) ? ':' . $port : '' );
 		}
-		$site = get_site_by_path( $host, '' !== $path ? $path : '/' );
+		$site = get_site_by_path( $host, $path );
+		if ( ! $site && false !== strpos( $host, ':' ) ) {
+			$site = get_site_by_path( (string) preg_replace( '/:\d+$/', '', $host ), $path ); // Domain stored without the port.
+		}
 		return $site ? array( 'blog_id' => (int) $site->blog_id ) : array();
 	}
 

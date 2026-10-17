@@ -754,6 +754,8 @@ class Dashboard_Page {
 		$parts = array( sprintf( __( 'ClamAV: %s.', 'cybergate-security' ), $clam['label'] ) );
 		if ( '' !== $maldet['binary'] ) {
 			$parts[] = __( 'Linux Malware Detect: installed.', 'cybergate-security' );
+		} elseif ( ! empty( $maldet['hidden'] ) ) {
+			$parts[] = __( 'Linux Malware Detect: unknown (hosting hides it).', 'cybergate-security' );
 		} elseif ( $maldet['supported'] ) {
 			$parts[] = __( 'Linux Malware Detect: not installed.', 'cybergate-security' );
 		}

@@ -173,14 +173,14 @@ class User_Watch {
 		}
 		$base  = $wpdb->base_prefix;
 		$like  = $wpdb->esc_like( $base ) . '%' . $wpdb->esc_like( 'capabilities' );
-		$query = "SELECT user_id, meta_key, meta_value FROM {$wpdb->usermeta} WHERE meta_key LIKE %s AND meta_value LIKE %s";
-		$args  = array( $like, '%' . $wpdb->esc_like( '"' . self::ROLE . '"' ) . '%' );
+		$role  = '%' . $wpdb->esc_like( '"' . self::ROLE . '"' ) . '%';
 		if ( $user_id > 0 ) {
-			$query .= ' AND user_id = %d';
-			$args[] = (int) $user_id;
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- core usermeta table across every site of the network; no API reads it this way.
+			$rows = (array) $wpdb->get_results( $wpdb->prepare( "SELECT user_id, meta_key, meta_value FROM {$wpdb->usermeta} WHERE meta_key LIKE %s AND meta_value LIKE %s AND user_id = %d LIMIT 20000", $like, $role, (int) $user_id ), ARRAY_A );
+		} else {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- core usermeta table across every site of the network; no API reads it this way.
+			$rows = (array) $wpdb->get_results( $wpdb->prepare( "SELECT user_id, meta_key, meta_value FROM {$wpdb->usermeta} WHERE meta_key LIKE %s AND meta_value LIKE %s LIMIT 20000", $like, $role ), ARRAY_A );
 		}
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- core usermeta table, every value is a placeholder.
-		$rows  = (array) $wpdb->get_results( $wpdb->prepare( $query . ' LIMIT 20000', $args ), ARRAY_A );
 		$out   = array();
 		$sites = array();
 		foreach ( $rows as $row ) {
