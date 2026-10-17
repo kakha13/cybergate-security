@@ -2691,10 +2691,30 @@ class Sysadmin_Tools {
 					$running = false; // Only trust "no match" when PHP can see other users' processes.
 				}
 			}
+			$active_ago = null;
+			if ( null === $running ) {
+				// Processes hidden: the monitor writes a "{mon}" line to event_log on every
+				// cycle (about every 30 seconds), so a fresh one shows it is alive.
+				$log   = $base . '/logs/event_log';
+				$mtime = self::path_allowed( $log ) ? @filemtime( $log ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				if ( $mtime && time() - $mtime <= 3 * MINUTE_IN_SECONDS && @is_readable( $log ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					$size = (int) @filesize( $log ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					$tail = (string) @file_get_contents( $log, false, null, max( 0, $size - 4096 ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+					if ( false !== strpos( $tail, '{mon}' ) ) {
+						$running    = true;
+						$active_ago = max( 0, time() - $mtime );
+					}
+				}
+			}
 			if ( null === $running ) {
 				$rows[] = array( $label, 'unknown', $hidden );
 			} else {
-				$rows[] = array( $label, $running ? 'ok' : 'bad', $running ? __( 'Running', 'cybergate-security' ) : __( 'Not running', 'cybergate-security' ) );
+				$text = $running ? __( 'Running', 'cybergate-security' ) : __( 'Not running', 'cybergate-security' );
+				if ( $running && null !== $active_ago ) {
+					/* translators: %s: time, for example "30 seconds" */
+					$text = sprintf( __( 'Running (last activity %s ago)', 'cybergate-security' ), human_time_diff( time() - $active_ago, time() ) );
+				}
+				$rows[] = array( $label, $running ? 'ok' : 'bad', $text );
 			}
 		}
 
