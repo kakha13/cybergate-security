@@ -1337,6 +1337,29 @@ class Scanner {
 	}
 
 	/**
+	 * Where ClamAV is installed on common systems, the daemon client first.
+	 * Distribution packages, /usr/local builds, cPanel's bundled ClamAV,
+	 * Homebrew (local development) and the Windows installer.
+	 *
+	 * @return string[]
+	 */
+	public static function clamav_candidates() {
+		$dirs = array( '/usr/bin/', '/usr/local/bin/', '/usr/sbin/', '/bin/', '/usr/local/cpanel/3rdparty/bin/', '/opt/homebrew/bin/' );
+		$exe  = '';
+		if ( '\\' === DIRECTORY_SEPARATOR ) {
+			$dirs = array( 'C:/Program Files/ClamAV/', 'C:/Program Files (x86)/ClamAV/', 'C:/ClamAV/' );
+			$exe  = '.exe';
+		}
+		$list = array();
+		foreach ( array( 'clamdscan', 'clamscan' ) as $name ) {
+			foreach ( $dirs as $dir ) {
+				$list[] = $dir . $name . $exe;
+			}
+		}
+		return $list;
+	}
+
+	/**
 	 * Usable ClamAV binaries, the daemon client first.
 	 *
 	 * @return string[]
@@ -1354,12 +1377,7 @@ class Scanner {
 		if ( '' !== $custom ) {
 			$candidates[] = $custom;
 		}
-		foreach ( array( 'clamdscan', 'clamscan' ) as $name ) {
-			foreach ( array( '/usr/bin/', '/usr/local/bin/', '/opt/homebrew/bin/', '/usr/sbin/', '/bin/' ) as $dir ) {
-				$candidates[] = $dir . $name;
-			}
-		}
-		foreach ( array_unique( $candidates ) as $bin ) {
+		foreach ( array_unique( array_merge( $candidates, self::clamav_candidates() ) ) as $bin ) {
 			$base = basename( $bin );
 			if ( 0 !== strpos( $base, 'clamdscan' ) && 0 !== strpos( $base, 'clamscan' ) ) {
 				continue; // Only ever run ClamAV binaries, whatever the setting says.

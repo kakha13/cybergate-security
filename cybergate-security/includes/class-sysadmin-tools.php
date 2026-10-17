@@ -1212,17 +1212,7 @@ class Sysadmin_Tools {
 	public function clamav_detect() {
 		$settings   = self::service( 'settings' );
 		$configured = $settings ? (string) $settings->get( 'clamav_binary', '' ) : '';
-		$candidates = array_filter(
-			array(
-				$configured,
-				'/usr/bin/clamdscan',
-				'/usr/local/bin/clamdscan',
-				'/usr/bin/clamscan',
-				'/usr/local/bin/clamscan',
-				'/opt/homebrew/bin/clamdscan',
-				'/opt/homebrew/bin/clamscan',
-			)
-		);
+		$candidates = array_filter( array_merge( array( $configured ), Scanner::clamav_candidates() ) );
 		foreach ( $candidates as $candidate ) {
 			if ( @is_file( $candidate ) && @is_executable( $candidate ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 				return wp_normalize_path( $candidate );

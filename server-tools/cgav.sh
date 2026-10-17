@@ -26,6 +26,8 @@ CONF=/etc/cgav.conf
 SITE="${SITE:-}"
 MALDET=/usr/local/maldetect
 MON_PATHS="$MALDET/monitor_paths"
+# cPanel keeps its ClamAV build outside PATH.
+[ -d /usr/local/cpanel/3rdparty/bin ] && PATH="$PATH:/usr/local/cpanel/3rdparty/bin"
 
 if [ -t 1 ]; then G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; B=$'\e[1m'; N=$'\e[0m'; else G=; Y=; R=; B=; N=; fi
 ok()   { printf '  %sok%s    %s\n' "$G" "$N" "$*"; }
@@ -100,6 +102,14 @@ cmd_install_clamav() {
   need_root; detect_os
   head1 "Before"; cmd_status | sed -n '/== ClamAV ==/,/== Linux/p' | sed '$d'
   head1 "Installing ClamAV"
+  if [ -x /usr/local/cpanel/cpanel ]; then
+    # cPanel ships its own ClamAV build; distribution packages would conflict with it.
+    /scripts/update_local_rpm_versions --edit target_settings.clamav installed >/dev/null &&
+      /scripts/check_cpanel_pkgs --fix --targets=clamav >/dev/null && ok "cPanel ClamAV installed (/usr/local/cpanel/3rdparty/bin)" ||
+      die "cPanel ClamAV install failed: use WHM > Manage Plugins > ClamAV Scanner"
+    head1 "After"; /usr/local/cpanel/3rdparty/bin/clamscan --version 2>/dev/null | sed 's/^/  ok    /'
+    return 0
+  fi
   if [ "$PKG" = apt ]; then
     apt-get update -qq >/dev/null
     pkg_install clamav clamav-daemon
