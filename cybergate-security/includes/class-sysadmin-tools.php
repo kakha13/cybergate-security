@@ -883,6 +883,14 @@ class Sysadmin_Tools {
 			$check['detail'] = __( 'The early upload guard is active.', 'cybergate-security' );
 			return $check;
 		}
+		$other = Guard_Manager::other_site_root( $prepend );
+		if ( '' !== $other ) {
+			$check['status'] = 'fail';
+			/* translators: 1: prepend file, 2: folder of the other site */
+			$check['detail'] = sprintf( __( 'PHP runs %1$s before every request, a file of another WordPress site (%2$s). This site depends on that site and runs its code with its settings, usually a leftover from copying a site.', 'cybergate-security' ), $prepend, $other );
+			$check['fix']    = __( 'Remove that auto_prepend_file line (.user.ini or .htaccess in this site\'s folder, the hosting panel\'s PHP settings, or the web server\'s settings for this site) and restart PHP. If this site uses Wordfence, run Wordfence > Firewall > Optimize the Wordfence Firewall again so it creates this site\'s own file. Then install the early guard.', 'cybergate-security' );
+			return $check;
+		}
 		$check['status'] = 'info';
 		if ( false !== stripos( $prepend, 'wordfence-waf' ) ) {
 			/* translators: %s: file path */

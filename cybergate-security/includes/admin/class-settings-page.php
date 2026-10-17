@@ -1588,8 +1588,8 @@ class Settings_Page {
 		$state = (string) $manager_live['state'];
 		if ( ! empty( $status['conflict'] ) ) {
 			$help = ! empty( $status['conflict_help'] ) ? (string) $status['conflict_help'] : __( 'Another file already uses auto_prepend_file. The guard bootstrap includes it so both keep working, but check the snippets below before you change the PHP configuration.', 'cybergate-security' );
-			self::notice( $help, 'warn' );
-			if ( ! empty( $status['conflict_snippet'] ) ) {
+			self::notice( $help, empty( $status['conflict_foreign'] ) ? 'warn' : 'bad' );
+			if ( ! empty( $status['conflict_snippet'] ) && empty( $status['conflict_foreign'] ) ) {
 				echo self::code( (string) $status['conflict_snippet'], __( 'Add at the top of the other prepend file', 'cybergate-security' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
 			}
 		} elseif ( 'confirmed' === $state ) {

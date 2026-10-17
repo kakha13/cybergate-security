@@ -502,6 +502,9 @@ class Guard_Manager {
 		$guard_file  = null === $guard_file ? $this->guard_file() : (string) $guard_file;
 		$config_file = null === $config_file ? Guard_Config::file() : (string) $config_file;
 		$chain       = null === $chain ? (string) Network::get_option( self::CHAIN_OPTION, '' ) : (string) $chain;
+		if ( '' !== $chain && '' !== self::other_site_root( $chain ) ) {
+			$chain = ''; // Saved by an older version: never include another site's file.
+		}
 		return self::build_bootstrap( $guard_file, $config_file, $chain );
 	}
 
@@ -705,8 +708,10 @@ class Guard_Manager {
 
 		// Remember another prepend file (for example a firewall) so the bootstrap keeps it running.
 		$conflict = $this->detect_conflict();
-		if ( $conflict ) {
+		if ( $conflict && '' === self::other_site_root( $conflict ) ) {
 			Network::update_option( self::CHAIN_OPTION, $conflict, false );
+		} elseif ( $conflict ) {
+			Network::delete_option( self::CHAIN_OPTION ); // Another site's file: never run it from here.
 		}
 
 		Network::update_option( self::INSTALLED_OPTION, time(), false );
@@ -872,7 +877,15 @@ class Guard_Manager {
 
 		$help    = '';
 		$snippet = '';
-		if ( $conflict ) {
+		$foreign = $conflict ? self::other_site_root( $conflict ) : '';
+		if ( $foreign ) {
+			$help = sprintf(
+				/* translators: 1: prepend file, 2: folder of the other site */
+				__( 'PHP runs %1$s before every request on this site, but that file belongs to another WordPress site (%2$s). This site then depends on the other site and runs its firewall with the other site\'s settings. It is usually left over from copying a site. Only one prepend file can be set, so the early guard cannot load. Remove the auto_prepend_file line that points to it (look in .user.ini and .htaccess in this site\'s folder, in the PHP settings of the hosting panel and in the web server\'s settings for this site), restart PHP, then install the guard. If this site uses Wordfence, run Wordfence > Firewall > Optimize the Wordfence Firewall again afterwards so it creates this site\'s own file.', 'cybergate-security' ),
+				$conflict,
+				$foreign
+			);
+		} elseif ( $conflict ) {
 			$help = sprintf(
 				/* translators: 1: other prepend file, 2: bootstrap file */
 				__( 'PHP already runs %1$s through auto_prepend_file, and only one prepend file can be set. Either add the line below at the top of that file so it also loads the guard, or point auto_prepend_file to %2$s instead: the guard bootstrap includes the other file automatically, so both keep working.', 'cybergate-security' ),
@@ -899,6 +912,7 @@ class Guard_Manager {
 			'prepend'             => $prepend,
 			'points_to_bootstrap' => $this->points_to_bootstrap( $prepend ),
 			'conflict'            => $conflict ? $conflict : null,
+			'conflict_foreign'    => $foreign,
 			'conflict_help'       => $help,
 			'conflict_snippet'    => $snippet,
 			'chain'               => (string) Network::get_option( self::CHAIN_OPTION, '' ),
@@ -1314,6 +1328,50 @@ class Guard_Manager {
 			}
 		}
 		return wp_normalize_path( $prepend );
+	}
+
+	/**
+	 * Folder of another WordPress site that a prepend file belongs to, or ''.
+	 * A copied site often keeps the original's firewall line (for example
+	 * Wordfence's wordfence-waf.php), so every request then runs a file of a
+	 * different website with that website's settings. Such a file is never
+	 * chained by the bootstrap.
+	 *
+	 * @param string $path Prepend file.
+	 * @return string
+	 */
+	public static function other_site_root( $path ) {
+		$path = wp_normalize_path( trim( (string) $path ) );
+		if ( '' === $path ) {
+			return '';
+		}
+		$own = array();
+		foreach ( array( ABSPATH, dirname( ABSPATH ), Paths::home_dir() ) as $dir ) {
+			$dir = untrailingslashit( wp_normalize_path( (string) $dir ) );
+			if ( '' !== $dir ) {
+				$own[] = $dir;
+				$real  = @realpath( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				if ( $real ) {
+					$own[] = untrailingslashit( wp_normalize_path( $real ) );
+				}
+			}
+		}
+		$real = @realpath( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		$dir  = dirname( $real ? wp_normalize_path( $real ) : $path );
+		for ( $i = 0; $i < 4 && strlen( $dir ) > 1; $i++ ) {
+			if ( in_array( $dir, $own, true ) ) {
+				return ''; // Inside this site.
+			}
+			if ( Storage::path_allowed( $dir ) && ( @is_file( $dir . '/wp-load.php' ) || @is_file( $dir . '/wp-config.php' ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				return $dir;
+			}
+			$dir = dirname( $dir );
+		}
+		// Cannot look there (open_basedir): compare the account folders of hosting layouts like /home/<site>/.
+		if ( preg_match( '#^(/home\d*/[^/]+)/#', $path, $theirs ) && preg_match( '#^(/home\d*/[^/]+)/#', wp_normalize_path( ABSPATH ), $ours ) && $theirs[1] !== $ours[1] ) {
+			return $theirs[1];
+		}
+		return '';
 	}
 
 	/**
