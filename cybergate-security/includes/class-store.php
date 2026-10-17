@@ -50,6 +50,18 @@ class Store {
 	const SEV_HIGH     = 2;
 	const SEV_CRITICAL = 3;
 
+	/** Option caching counts() (Network::STATE_OPTIONS). */
+	const COUNTS_OPTION = 'wpcybersec_counts';
+
+	/** Seconds a cached count is trusted at most. */
+	const COUNTS_TTL = 600;
+
+	/** Shape of the cached counts (a different value counts again). */
+	const COUNTS_FORMAT = 1;
+
+	/** @var array|null counts() of this request. */
+	private static $counts_cache = null;
+
 	/* Manifest states. */
 	const STATE_TRUSTED = 'trusted';
 	const STATE_PENDING = 'pending';
@@ -161,7 +173,11 @@ class Store {
 		}
 		$row['details'] = wp_json_encode( $row['details'] );
 		$ok             = $wpdb->insert( self::table( 'items' ), $row ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-		return $ok ? (int) $wpdb->insert_id : 0;
+		$id             = $ok ? (int) $wpdb->insert_id : 0;
+		if ( $id ) {
+			self::flush_counts();
+		}
+		return $id;
 	}
 
 	/**
@@ -186,7 +202,11 @@ class Store {
 			$data['details'] = wp_json_encode( array_merge( $current ? $current['details'] : array(), $data['details'] ) );
 		}
 		$data['updated_at'] = self::now();
-		return false !== $wpdb->update( self::table( 'items' ), $data, array( 'id' => (int) $id ) ); // phpcs:ignore
+		$ok                 = false !== $wpdb->update( self::table( 'items' ), $data, array( 'id' => (int) $id ) ); // phpcs:ignore
+		if ( $ok && array_intersect_key( $data, array( 'status' => 1, 'type' => 1, 'quarantine_path' => 1 ) ) ) {
+			self::flush_counts();
+		}
+		return $ok;
 	}
 
 	/**
@@ -268,29 +288,111 @@ class Store {
 	/**
 	 * Counts used for menu badges and dashboard cards.
 	 *
+	 * Cached in the autoloaded option COUNTS_OPTION (a network option on
+	 * multisite, see Network::STATE_OPTIONS), so the menu bubble, the admin
+	 * bar and the "waiting for approval" notice cost no query on ordinary
+	 * admin pages. Every change that can move a count (item_insert(),
+	 * item_update() of status, type or quarantine_path, items_delete(), the
+	 * network migration) calls flush_counts(); COUNTS_TTL bounds what a
+	 * change made outside this class (or a race with a concurrent recount)
+	 * could leave behind.
+	 *
+	 * @param bool $fresh Recount now.
 	 * @return array { pending: int (uploads+installs+files+new administrators), threats: int (files and database), quarantined: int }
 	 */
-	public function counts() {
+	public function counts( $fresh = false ) {
+		$cached = $this->cached_counts( $fresh );
 		return array(
-			'pending'     => $this->items_count(
-				array(
-					'type'   => array( self::TYPE_UPLOAD, self::TYPE_INSTALL, self::TYPE_FILE, self::TYPE_USER ),
-					'status' => self::STATUS_PENDING,
-				)
-			),
-			'threats'     => $this->items_count(
-				array(
-					'type'   => self::TYPE_THREAT,
-					'status' => self::STATUS_PENDING,
-				)
-			),
-			'quarantined' => $this->items_count(
-				array(
-					'held'   => true,
-					'status' => array( self::STATUS_PENDING, self::STATUS_QUARANTINED ),
-				)
-			),
+			'pending'     => $cached['pending'],
+			'threats'     => $cached['threats'],
+			'quarantined' => $cached['quarantined'],
 		);
+	}
+
+	/**
+	 * Highest id among open items (pending uploads, installs, files, threats
+	 * and administrators), from the same cache as counts().
+	 *
+	 * @return int 0 when nothing is open.
+	 */
+	public function newest_open_id() {
+		$cached = $this->cached_counts( false );
+		return $cached['newest'];
+	}
+
+	/**
+	 * Forgets the cached counts (the next counts() call counts again). The
+	 * marker always differs from what is stored, so the write is never skipped
+	 * as "unchanged" by a long running process (a scan) whose cached copy of
+	 * the option is out of date.
+	 */
+	public static function flush_counts() {
+		self::$counts_cache = null;
+		if ( function_exists( 'wp_installing' ) && wp_installing() ) {
+			return;
+		}
+		Network::update_option( self::COUNTS_OPTION, array( 'stale' => uniqid( '', true ) ) );
+	}
+
+	/**
+	 * @param bool $fresh Recount now.
+	 * @return array { pending, threats, quarantined, newest, at }
+	 */
+	private function cached_counts( $fresh ) {
+		if ( ! $fresh && null !== self::$counts_cache ) {
+			return self::$counts_cache;
+		}
+		if ( ! $fresh ) {
+			$stored = Network::get_option( self::COUNTS_OPTION, array() );
+			if ( is_array( $stored ) && isset( $stored['v'], $stored['at'], $stored['pending'], $stored['threats'], $stored['quarantined'], $stored['newest'] )
+				&& self::COUNTS_FORMAT === $stored['v'] && abs( time() - (int) $stored['at'] ) < self::COUNTS_TTL ) {
+				self::$counts_cache = array(
+					'pending'     => (int) $stored['pending'],
+					'threats'     => (int) $stored['threats'],
+					'quarantined' => (int) $stored['quarantined'],
+					'newest'      => (int) $stored['newest'],
+				);
+				return self::$counts_cache;
+			}
+		}
+
+		global $wpdb;
+		$table   = self::table( 'items' );
+		$pending = array( self::TYPE_UPLOAD, self::TYPE_INSTALL, self::TYPE_FILE, self::TYPE_USER );
+		$open    = array_merge( $pending, array( self::TYPE_THREAT ) );
+		// One pass over the open and quarantined rows instead of three COUNT(*) queries and a MAX().
+		// phpcs:disable WordPress.DB, PluginCheck.Security.DirectDB.UnescapedDBParameter -- $table is Store::table(): $wpdb->prefix plus a fixed name; every value is a placeholder.
+		$row = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT
+					SUM( status = %s AND type IN (%s, %s, %s, %s) ) AS pending,
+					SUM( status = %s AND type = %s ) AS threats,
+					SUM( quarantine_path <> '' ) AS quarantined,
+					MAX( CASE WHEN status = %s AND type IN (%s, %s, %s, %s, %s) THEN id ELSE 0 END ) AS newest
+				FROM {$table} WHERE status IN (%s, %s)",
+				array_merge(
+					array( self::STATUS_PENDING ),
+					$pending,
+					array( self::STATUS_PENDING, self::TYPE_THREAT ),
+					array( self::STATUS_PENDING ),
+					$open,
+					array( self::STATUS_PENDING, self::STATUS_QUARANTINED )
+				)
+			),
+			ARRAY_A
+		);
+		// phpcs:enable
+		$counts = array(
+			'pending'     => is_array( $row ) ? (int) $row['pending'] : 0,
+			'threats'     => is_array( $row ) ? (int) $row['threats'] : 0,
+			'quarantined' => is_array( $row ) ? (int) $row['quarantined'] : 0,
+			'newest'      => is_array( $row ) ? (int) $row['newest'] : 0,
+		);
+		self::$counts_cache = $counts;
+		if ( is_array( $row ) && ! ( function_exists( 'wp_installing' ) && wp_installing() ) ) {
+			Network::update_option( self::COUNTS_OPTION, array_merge( $counts, array( 'v' => self::COUNTS_FORMAT, 'at' => time() ) ) );
+		}
+		return $counts;
 	}
 
 	/**
@@ -359,7 +461,11 @@ class Store {
 		if ( ! $ids ) {
 			return 0;
 		}
-		return (int) $wpdb->query( 'DELETE FROM ' . self::table( 'items' ) . ' WHERE id IN (' . implode( ',', $ids ) . ')' ); // phpcs:ignore
+		$deleted = (int) $wpdb->query( 'DELETE FROM ' . self::table( 'items' ) . ' WHERE id IN (' . implode( ',', $ids ) . ')' ); // phpcs:ignore
+		if ( $deleted ) {
+			self::flush_counts();
+		}
+		return $deleted;
 	}
 
 	/**

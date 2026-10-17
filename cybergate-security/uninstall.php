@@ -104,9 +104,13 @@ if ( $wpcybersec_delete ) {
 				$wpcybersec_kept[] = $wpcybersec_line;
 			}
 			$wpcybersec_new = rtrim( implode( "\n", $wpcybersec_kept ) );
-			$wpcybersec_new = '' === $wpcybersec_new ? '' : $wpcybersec_new . "\n";
+			$wpcybersec_new = '' === trim( $wpcybersec_new ) ? '' : $wpcybersec_new . "\n";
 			if ( $wpcybersec_new !== $wpcybersec_old ) {
-				@file_put_contents( $wpcybersec_file, $wpcybersec_new, LOCK_EX ); // phpcs:ignore
+				if ( '' === $wpcybersec_new ) {
+					@unlink( $wpcybersec_file ); // phpcs:ignore -- held nothing but the guard lines (and blank lines).
+				} else {
+					@file_put_contents( $wpcybersec_file, $wpcybersec_new, LOCK_EX ); // phpcs:ignore
+				}
 			}
 		}
 	}
@@ -133,9 +137,9 @@ if ( $wpcybersec_delete ) {
 		$wpcybersec_new = preg_replace( '/^[ \t]*# BEGIN ' . preg_quote( $wpcybersec_marker, '/' ) . '[ \t]*\R.*?^[ \t]*# END ' . preg_quote( $wpcybersec_marker, '/' ) . '[ \t]*(\R|\z)/ms', '', $wpcybersec_old );
 		if ( is_string( $wpcybersec_new ) && $wpcybersec_new !== $wpcybersec_old ) {
 			$wpcybersec_new = rtrim( $wpcybersec_new );
-			$wpcybersec_new = '' === $wpcybersec_new ? '' : $wpcybersec_new . "\n";
-			if ( '' === $wpcybersec_new && 'CyberGate Security' === $wpcybersec_marker ) {
-				@unlink( $wpcybersec_file ); // phpcs:ignore -- the uploads .htaccess held nothing but our block.
+			$wpcybersec_new = '' === trim( $wpcybersec_new ) ? '' : $wpcybersec_new . "\n";
+			if ( '' === $wpcybersec_new ) {
+				@unlink( $wpcybersec_file ); // phpcs:ignore -- the file held nothing but our block (and blank lines).
 			} else {
 				@file_put_contents( $wpcybersec_file, $wpcybersec_new, LOCK_EX ); // phpcs:ignore
 			}
@@ -216,6 +220,7 @@ delete_metadata( 'user', 0, 'wpcybersec_dismiss_setup', '', true );
 delete_metadata( 'user', 0, 'wpcybersec_dismiss_pending', '', true );
 delete_metadata( 'user', 0, 'wpcybersec_dismiss_storage', '', true );
 delete_metadata( 'user', 0, 'wpcybersec_diff_layout', '', true );
+delete_metadata( 'user', 0, 'wpcybersec_storage_move', '', true );
 
 /*
  * Remove the data folder: the default one inside wp-content, and the one the

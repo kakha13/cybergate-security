@@ -48,11 +48,11 @@
 .wpcs-wrap .wpcs-header a.button-primary {
 	color: #042f2e;
 }
-.wpcs-wrap .wpcs-card .button:not(.button-primary):not(.wpcs-btn-approve):not(.wpcs-btn-danger):not(.wpcs-btn-safe):not(.wpcs-copy) {
+.wpcs-wrap .wpcs-card .button:not(.button-primary):not(.wpcs-btn-approve):not(.wpcs-btn-danger):not(.wpcs-btn-safe):not(.wpcs-btn-block):not(.wpcs-copy) {
 	color: var(--wpcs-ink-2);
 	border-color: var(--wpcs-line-2);
 }
-.wpcs-wrap .wpcs-card .button:not(.button-primary):not(.wpcs-btn-approve):not(.wpcs-btn-danger):not(.wpcs-btn-safe):not(.wpcs-copy):hover {
+.wpcs-wrap .wpcs-card .button:not(.button-primary):not(.wpcs-btn-approve):not(.wpcs-btn-danger):not(.wpcs-btn-safe):not(.wpcs-btn-block):not(.wpcs-copy):hover {
 	color: var(--wpcs-brand);
 	border-color: var(--wpcs-brand-2);
 	background: #f8fafc;
@@ -1641,5 +1641,195 @@
 	}
 	.wpcs-change-item__facts {
 		grid-template-columns: minmax(0, 1fr);
+	}
+}
+
+/* ---------- Reports: risky decisions ---------- */
+/* Flagged high or critical: the safe decision (Deny, Quarantine) is the primary button. */
+.wpcs-wrap .wpcs-actions .button.wpcs-btn-block {
+	background: var(--wpcs-bad);
+	border-color: var(--wpcs-bad);
+	color: #fff;
+}
+.wpcs-wrap .wpcs-actions .button.wpcs-btn-block:hover,
+.wpcs-wrap .wpcs-actions .button.wpcs-btn-block:focus {
+	background: #991b1b;
+	border-color: #991b1b;
+	color: #fff;
+}
+.wpcs-wrap .wpcs-actions .button.wpcs-btn-block:focus {
+	box-shadow: 0 0 0 1px #fff, 0 0 0 3px #991b1b;
+}
+
+/* ---------- Confirmation dialog (core.js confirmDialog) ---------- */
+.wpcs-dialog {
+	width: min(520px, calc(100vw - 32px));
+	max-width: none;
+	padding: 0;
+	border: 0;
+	border-radius: var(--wpcs-radius, 10px);
+	box-shadow: 0 20px 50px rgba(15, 23, 42, 0.35);
+	color: var(--wpcs-ink, #0f172a);
+	background: var(--wpcs-surface, #fff);
+}
+.wpcs-dialog::backdrop {
+	background: rgba(15, 23, 42, 0.55);
+}
+.wpcs-dialog__head {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 18px 20px 6px;
+}
+.wpcs-dialog__head .dashicons {
+	flex: 0 0 auto;
+	font-size: 24px;
+	width: 24px;
+	height: 24px;
+	color: var(--wpcs-bad, #b91c1c);
+}
+.wpcs-dialog--ok .wpcs-dialog__head .dashicons {
+	color: var(--wpcs-ok, #15803d);
+}
+.wpcs-dialog__head h2 {
+	margin: 0;
+	font-size: 17px;
+	line-height: 1.35;
+	overflow-wrap: anywhere;
+}
+.wpcs-dialog__body {
+	padding: 4px 20px 4px 54px;
+	font-size: 13px;
+	line-height: 1.55;
+}
+.wpcs-dialog__body p {
+	margin: 0 0 10px;
+}
+.wpcs-dialog__verdict {
+	padding: 8px 10px;
+	border-radius: var(--wpcs-radius-sm, 6px);
+	background: var(--wpcs-bad-soft, #fee2e2);
+	color: #7f1d1d;
+	font-weight: 600;
+}
+.wpcs-dialog--ok .wpcs-dialog__verdict {
+	background: var(--wpcs-warn-soft, #fef3c7);
+	color: #78350f;
+}
+.wpcs-dialog__actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 8px;
+	padding: 10px 20px 18px;
+}
+.wpcs-dialog__actions .button.wpcs-btn-danger {
+	background: #fff;
+}
+@media (max-width: 600px) {
+	.wpcs-dialog__body {
+		padding-left: 20px;
+	}
+	.wpcs-dialog__actions .button {
+		flex: 1 1 auto;
+		justify-content: center;
+		text-align: center;
+	}
+}
+
+/* ---------- Reports: image previews ---------- */
+.wpcs-item-media {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+}
+.wpcs-item-media__body {
+	min-width: 0;
+	flex: 1 1 auto;
+}
+/* Fixed box (width/height attributes too), so lazy loading never moves the row. */
+.wpcs-thumb {
+	flex: 0 0 48px;
+	display: block;
+	width: 48px;
+	height: 48px;
+	border-radius: var(--wpcs-radius-sm);
+	border: 1px solid var(--wpcs-line);
+	background: var(--wpcs-bg);
+	object-fit: cover;
+	box-sizing: border-box;
+}
+.wpcs-thumb--none {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--wpcs-muted);
+	background: repeating-linear-gradient(45deg, var(--wpcs-bg), var(--wpcs-bg) 6px, #eef2f7 6px, #eef2f7 12px);
+}
+.wpcs-thumb--none .dashicons {
+	font-size: 20px;
+	width: 20px;
+	height: 20px;
+}
+.wpcs-preview {
+	margin: 0 0 14px;
+}
+.wpcs-preview a {
+	display: inline-block;
+	line-height: 0;
+}
+.wpcs-preview img {
+	display: block;
+	max-width: 100%;
+	height: auto;
+	border-radius: var(--wpcs-radius-sm);
+	border: 1px solid var(--wpcs-line);
+	background: repeating-conic-gradient(#f1f5f9 0% 25%, #fff 0% 50%) 50% / 16px 16px;
+}
+.wpcs-preview figcaption {
+	margin-top: 6px;
+	color: var(--wpcs-muted);
+	font-size: 12px;
+}
+.wpcs-preview--none {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	max-width: 520px;
+	padding: 10px 12px;
+	border-radius: var(--wpcs-radius-sm);
+	background: var(--wpcs-bg);
+	border: 1px dashed var(--wpcs-line-2);
+	color: var(--wpcs-ink-2);
+}
+.wpcs-preview--none .dashicons {
+	flex: 0 0 auto;
+	color: var(--wpcs-muted);
+}
+.wpcs-preview--none p {
+	margin: 0;
+}
+
+/* ---------- Reports: allow all clean images ---------- */
+.wpcs-bulk .wpcs-allow-clean {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+.wpcs-bulk .wpcs-allow-clean .dashicons {
+	font-size: 16px;
+	width: 16px;
+	height: 16px;
+}
+.wpcs-clean-progress {
+	margin: 0 0 12px;
+}
+
+/* Narrow screens: the Source and Detected cells are shown again as blocks, so
+   the short copies inside the Item cell would repeat them. */
+@media (max-width: 782px) {
+	.wpcs-items .wpcs-narrow-when,
+	.wpcs-items .wpcs-narrow-source {
+		display: none;
 	}
 }

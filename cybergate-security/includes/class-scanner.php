@@ -46,6 +46,18 @@ class Scanner {
 	/** @var string[]|null Usable ClamAV binaries, daemon client first. */
 	private $clamav_bins = null;
 
+	/** Network option with the last ClamAV self-test (see clamav_selftest()). */
+	const SELFTEST_OPTION = 'wpcybersec_clamav_selftest';
+
+	/** A self-test older than this is run again in the background (scheduled scans, daily maintenance). */
+	const SELFTEST_TTL = 6 * HOUR_IN_SECONDS;
+
+	/** A plain clamscan slower than this (ms per file) is not used while someone waits for an upload. */
+	const SLOW_MS = 3000;
+
+	/** Network option: use a slow clamscan for uploads anyway (Settings > Advanced > Antivirus engines). */
+	const FORCE_SLOW_OPTION = 'wpcybersec_clamav_slow_uploads';
+
 	/** File in the plugin folder that lists the sha256 of every shipped file (bin/build-checksums.php). */
 	const SELF_CHECKSUMS = 'checksums.json';
 
@@ -71,7 +83,10 @@ class Scanner {
 		// After an update the installed versions change; drop per-request caches
 		// before Install_Gate re-baselines the updated folders.
 		add_action( 'upgrader_process_complete', array( $this, 'reset_caches' ), 1 );
-		add_action( 'wpcybersec_settings_updated', array( $this, 'reset_clamav' ) );
+		add_action( 'wpcybersec_settings_updated', array( $this, 'on_settings_updated' ), 10, 2 );
+		// The ClamAV self-test is refreshed in the background, never while an upload waits.
+		add_action( 'wpcybersec_scheduled_scan', array( $this, 'refresh_selftest_if_stale' ), 5 );
+		add_action( 'wpcybersec_maintenance', array( $this, 'refresh_selftest_if_stale' ), 5 );
 	}
 
 	/**
@@ -1418,34 +1433,69 @@ class Scanner {
 	/* ------------------------------------------------------------------ */
 
 	/**
-	 * Whether a ClamAV binary is installed and the server lets PHP run it.
+	 * Whether ClamAV can be used at all: a binary is installed, PHP may run it
+	 * and it did not fail its self-test (binaries not tested yet count).
 	 *
 	 * @return bool
 	 */
 	public function clamav_available() {
-		return (bool) $this->clamav_binaries();
+		return (bool) $this->clamav_working();
 	}
 
 	/**
 	 * Details for the settings and diagnostics screens.
 	 *
-	 * @return array { available: bool, binary: string, daemon: bool, can_exec: bool }
+	 * @return array {
+	 *     available: bool, binary: string, daemon: bool (a clamdscan that works), can_exec: bool,
+	 *     tested: bool, selftest: array|null, installed: string[] (every binary found),
+	 *     daemon_ms: int|null, scan_ms: int|null (plain clamscan), slow_only: bool,
+	 *     error: string (why nothing works, from the self-test), uploads: bool (uploads use it while they wait)
+	 * }
 	 */
 	public function clamav_info() {
-		$bins = $this->clamav_binaries();
-		return array(
-			'available' => (bool) $bins,
-			'binary'    => $bins ? $bins[0] : '',
+		$bins    = $this->clamav_binaries();
+		$working = $this->clamav_working();
+		$test    = $this->clamav_selftest_cached();
+		$info    = array(
+			'available' => (bool) $working,
+			'binary'    => $working ? $working[0] : ( $bins ? $bins[0] : '' ),
 			'daemon'    => $this->clamav_daemon_available(),
 			'can_exec'  => $this->can_exec(),
+			'tested'    => null !== $test,
+			'selftest'  => $test,
+			'installed' => $bins,
+			'daemon_ms' => null,
+			'scan_ms'   => null,
+			'slow_only' => false,
+			'error'     => '',
+			'uploads'   => (bool) $this->clamav_plan( 'upload', true ),
 		);
+		if ( $test ) {
+			foreach ( $test['bins'] as $bin => $row ) {
+				if ( empty( $row['ok'] ) ) {
+					if ( '' === $info['error'] ) {
+						$info['error'] = (string) $row['error'];
+					}
+					continue;
+				}
+				$key = ! empty( $row['daemon'] ) ? 'daemon_ms' : 'scan_ms';
+				if ( null === $info[ $key ] || (int) $row['ms'] < $info[ $key ] ) {
+					$info[ $key ] = (int) $row['ms'];
+				}
+			}
+			if ( '' === $info['error'] && ! empty( $test['error'] ) ) {
+				$info['error'] = (string) $test['error'];
+			}
+			$info['slow_only'] = null === $info['daemon_ms'] && null !== $info['scan_ms'] && $info['scan_ms'] > self::SLOW_MS;
+		}
+		return $info;
 	}
 
 	/**
 	 * Scans one file with ClamAV.
 	 *
 	 * @param string $path        File.
-	 * @param bool   $daemon_only Only use clamdscan.
+	 * @param bool   $daemon_only Only use clamdscan (whole-site scans).
 	 * @return array[]|null Hits (empty when clean), null when ClamAV is unavailable or failed.
 	 */
 	public function clamav_scan( $path, $daemon_only = false ) {
@@ -1453,13 +1503,9 @@ class Scanner {
 		if ( '' === $path || ! @is_file( $path ) || ! @is_readable( $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			return null;
 		}
-		foreach ( $this->clamav_binaries() as $bin ) {
-			$daemon = false !== strpos( basename( $bin ), 'clamdscan' );
-			if ( $daemon_only && ! $daemon ) {
-				continue;
-			}
-			$cmd    = escapeshellarg( $bin ) . ( $daemon ? ' --no-summary --fdpass ' : ' --no-summary --stdout ' ) . escapeshellarg( $path ) . ' 2>&1';
-			$result = $this->run_command( $cmd, $daemon ? 30 : 120 );
+		foreach ( $this->clamav_plan( $daemon_only ? 'scan' : 'upload' ) as $run ) {
+			$cmd    = escapeshellarg( $run['bin'] ) . ' ' . $run['flags'] . ' ' . escapeshellarg( $path ) . ' 2>&1';
+			$result = $this->run_command( $cmd, $run['daemon'] ? 30 : 120 );
 			if ( null === $result ) {
 				continue;
 			}
@@ -1492,21 +1538,340 @@ class Scanner {
 				}
 				return $hits;
 			}
-			// Exit code 2 (daemon not running, database error): try the next binary.
+			// Exit code 2 (daemon stopped since the self-test, database error): try the next binary.
 		}
 		return null;
 	}
 
 	/**
+	 * Whether a working daemon client (clamdscan) is there.
+	 *
 	 * @return bool
 	 */
 	private function clamav_daemon_available() {
-		foreach ( $this->clamav_binaries() as $bin ) {
-			if ( false !== strpos( basename( $bin ), 'clamdscan' ) ) {
+		foreach ( $this->clamav_working() as $bin ) {
+			if ( self::is_daemon_bin( $bin ) ) {
 				return true;
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * @param string $bin Binary path.
+	 * @return bool Whether it is the daemon client (clamdscan).
+	 */
+	private static function is_daemon_bin( $bin ) {
+		return false !== strpos( basename( (string) $bin ), 'clamdscan' );
+	}
+
+	/**
+	 * Installed binaries that did not fail their last self-test.
+	 *
+	 * @return string[]
+	 */
+	private function clamav_working() {
+		$test = $this->clamav_selftest_cached();
+		$list = array();
+		foreach ( $this->clamav_binaries() as $bin ) {
+			if ( $test && isset( $test['bins'][ $bin ] ) && empty( $test['bins'][ $bin ]['ok'] ) ) {
+				continue;
+			}
+			$list[] = $bin;
+		}
+		return $list;
+	}
+
+	/**
+	 * Binaries to run for one file, in order, with the options their
+	 * self-test worked with. A binary that failed its self-test is skipped (so
+	 * a broken clamdscan never makes every upload wait for clamscan), whole-site
+	 * scans use only the daemon client, and while someone waits for an upload a
+	 * plain clamscan slower than SLOW_MS (or not timed yet) is left out unless
+	 * the administrator forced it: it loads its whole database for every file.
+	 * Cron and command line runs (held uploads the early guard imports, for
+	 * example) still use it.
+	 *
+	 * @param string $context  upload | scan.
+	 * @param bool   $waiting  Treat the call as an upload someone waits for.
+	 * @return array[] { bin, daemon, flags }
+	 */
+	private function clamav_plan( $context, $waiting = null ) {
+		$test    = $this->clamav_selftest_cached();
+		$force   = (bool) Network::get_option( self::FORCE_SLOW_OPTION, false );
+		$waiting = null === $waiting ? self::upload_waits() : (bool) $waiting;
+		$plan    = array();
+		foreach ( $this->clamav_binaries() as $bin ) {
+			$daemon = self::is_daemon_bin( $bin );
+			$row    = $test && isset( $test['bins'][ $bin ] ) ? $test['bins'][ $bin ] : null;
+			if ( $row && empty( $row['ok'] ) ) {
+				continue;
+			}
+			if ( ! $daemon && ( 'scan' === $context || ( $waiting && ! $force && ( ! $row || (int) $row['ms'] > self::SLOW_MS ) ) ) ) {
+				continue;
+			}
+			$plan[] = array(
+				'bin'    => $bin,
+				'daemon' => $daemon,
+				'flags'  => $row && ! empty( $row['flags'] ) ? (string) $row['flags'] : ( $daemon ? '--no-summary --fdpass' : '--no-summary --stdout' ),
+			);
+		}
+		return $plan;
+	}
+
+	/**
+	 * Whether a person waits for this request (a web request, not cron or the command line).
+	 *
+	 * @return bool
+	 */
+	private static function upload_waits() {
+		return ! ( wp_doing_cron() || ( defined( 'WP_CLI' ) && WP_CLI ) || in_array( PHP_SAPI, array( 'cli', 'phpdbg' ), true ) );
+	}
+
+	/**
+	 * The EICAR antivirus test string, put together at run time so that no
+	 * file of the plugin contains it (antivirus software on the server would
+	 * otherwise report the plugin itself).
+	 *
+	 * @return string
+	 */
+	private static function eicar() {
+		$parts = array( 'X5O!P%@AP[4', '\\PZX54(P^)7CC)7}', '$EICAR-STAN', 'DARD-ANTIV', 'IRUS-TEST-', 'FILE!$H+H*' );
+		return implode( '', $parts );
+	}
+
+	/**
+	 * Last self-test result, also when it is older than SELFTEST_TTL (scans
+	 * and uploads never wait for a new one). Null when there is none for the
+	 * binaries installed now.
+	 *
+	 * @return array|null { at, key, error, bins: { path: { ok, error, kind, ms, daemon, flags } } }
+	 */
+	public function clamav_selftest_cached() {
+		$saved = Network::get_option( self::SELFTEST_OPTION, array() );
+		if ( ! is_array( $saved ) || empty( $saved['at'] ) || ! isset( $saved['bins'] ) || ! is_array( $saved['bins'] ) ) {
+			return null;
+		}
+		if ( ! isset( $saved['key'] ) || $saved['key'] !== $this->selftest_key() ) {
+			return null; // Other binaries now (setting changed, ClamAV installed or removed).
+		}
+		return $saved;
+	}
+
+	/**
+	 * Runs (or returns the cached) ClamAV self-test: the EICAR test file is
+	 * scanned with every installed binary, with a time limit, and the result,
+	 * the first line of any error and the time taken are stored per binary.
+	 *
+	 * @param bool $fresh Run it now even when a recent result exists.
+	 * @return array See clamav_selftest_cached().
+	 */
+	public function clamav_selftest( $fresh = false ) {
+		$cached = $this->clamav_selftest_cached();
+		if ( ! $fresh && $cached && (int) $cached['at'] > time() - self::SELFTEST_TTL ) {
+			return $cached;
+		}
+		$result        = $this->run_selftest( $this->clamav_binaries() );
+		$result['key'] = $this->selftest_key();
+		Network::update_option( self::SELFTEST_OPTION, $result, false );
+		return $result;
+	}
+
+	/**
+	 * Background refresh (scheduled scans, daily maintenance): only when ClamAV
+	 * is installed and the last result is older than SELFTEST_TTL.
+	 */
+	public function refresh_selftest_if_stale() {
+		if ( ! $this->clamav_binaries() ) {
+			return;
+		}
+		$cached = $this->clamav_selftest_cached();
+		if ( ! $cached || (int) $cached['at'] <= time() - self::SELFTEST_TTL ) {
+			$this->clamav_selftest( true );
+		}
+	}
+
+	/**
+	 * Settings changed: forget the detected binaries, and test again when a
+	 * ClamAV setting changed (unless a test ran a moment ago, as the one-click
+	 * "Turn on" does first).
+	 *
+	 * @param array $new New settings.
+	 * @param array $old Old settings.
+	 */
+	public function on_settings_updated( $new = array(), $old = array() ) {
+		$this->reset_clamav();
+		$changed = false;
+		foreach ( array( 'clamav_enabled', 'clamav_binary' ) as $key ) {
+			$a = is_array( $new ) && isset( $new[ $key ] ) ? $new[ $key ] : null;
+			$b = is_array( $old ) && isset( $old[ $key ] ) ? $old[ $key ] : null;
+			if ( $a !== $b ) {
+				$changed = true;
+			}
+		}
+		if ( ! $changed || ! $this->clamav_binaries() ) {
+			return;
+		}
+		$cached = $this->clamav_selftest_cached();
+		if ( ! $cached || (int) $cached['at'] < time() - MINUTE_IN_SECONDS ) {
+			$this->clamav_selftest( true );
+		}
+	}
+
+	/**
+	 * @return string Identifies the set of binaries a self-test belongs to.
+	 */
+	private function selftest_key() {
+		return md5( implode( '|', $this->clamav_binaries() ) );
+	}
+
+	/**
+	 * @param string[] $bins Binaries.
+	 * @return array
+	 */
+	private function run_selftest( array $bins ) {
+		$result = array(
+			'at'    => time(),
+			'error' => '',
+			'bins'  => array(),
+		);
+		if ( ! $bins ) {
+			$result['error'] = $this->can_exec()
+				? __( 'ClamAV was not found.', 'cybergate-security' )
+				: __( 'PHP may not run programs on this server (exec and proc_open are disabled).', 'cybergate-security' );
+			return $result;
+		}
+		$file = function_exists( 'wp_tempnam' ) ? wp_tempnam( 'wpcs-clamav-test' ) : '';
+		if ( '' === $file || ! Fs::direct()->put_contents( $file, self::eicar(), 0644 ) ) {
+			if ( '' !== $file ) {
+				Fs::delete( $file );
+			}
+			$result['error'] = __( 'The test file could not be written to the temporary folder, so ClamAV was not tested.', 'cybergate-security' );
+			return $result;
+		}
+		try {
+			foreach ( $bins as $bin ) {
+				$result['bins'][ $bin ] = $this->test_binary( $bin, $file );
+			}
+		} finally {
+			Fs::delete( $file );
+		}
+		return $result;
+	}
+
+	/**
+	 * Scans the test file with one binary. The daemon client tries passing the
+	 * open file to clamd first (--fdpass), then sending its content (--stream)
+	 * when clamd cannot take a file descriptor (a TCP socket).
+	 *
+	 * @param string $bin  Binary.
+	 * @param string $file Test file.
+	 * @return array { ok, error, kind, ms, daemon, flags }
+	 */
+	private function test_binary( $bin, $file ) {
+		$daemon  = self::is_daemon_bin( $bin );
+		$timeout = $daemon ? 15 : 90;
+		$row     = array();
+		foreach ( $daemon ? array( '--no-summary --fdpass', '--no-summary --stream' ) : array( '--no-summary --stdout' ) as $flags ) {
+			$start = microtime( true );
+			$run   = $this->run_command( escapeshellarg( $bin ) . ' ' . $flags . ' ' . escapeshellarg( $file ) . ' 2>&1', $timeout );
+			$row   = array(
+				'ok'     => false,
+				'error'  => '',
+				'kind'   => '',
+				'ms'     => (int) round( ( microtime( true ) - $start ) * 1000 ),
+				'daemon' => $daemon,
+				'flags'  => $flags,
+			);
+			if ( null === $run ) {
+				$row['kind'] = 'timeout';
+				/* translators: %d: seconds */
+				$row['error'] = sprintf( __( 'It did not answer within %d seconds.', 'cybergate-security' ), $timeout );
+				return $row;
+			}
+			list( $code, $output ) = $run;
+			if ( 1 === $code && false !== strpos( (string) $output, 'FOUND' ) ) {
+				$row['ok'] = true;
+				return $row;
+			}
+			if ( 0 === $code ) {
+				$row['kind']  = 'nodetect';
+				$row['error'] = __( 'It did not recognise the EICAR test file, so its virus database is probably missing or empty (run freshclam).', 'cybergate-security' );
+				return $row;
+			}
+			$line         = self::first_line( (string) $output );
+			$row['kind']  = self::error_kind( $line );
+			$row['error'] = '' !== $line
+				? $line
+				/* translators: %d: exit code */
+				: sprintf( __( 'It stopped with exit code %d and no message.', 'cybergate-security' ), (int) $code );
+			if ( 'socket' === $row['kind'] ) {
+				$row['error'] = sprintf(
+					/* translators: 1: user name, 2: error message */
+					__( 'clamd runs, but PHP (user %1$s) may not use its socket: %2$s', 'cybergate-security' ),
+					self::php_user(),
+					$line
+				);
+			}
+			if ( 'fdpass' !== $row['kind'] ) {
+				return $row;
+			}
+		}
+		return $row;
+	}
+
+	/**
+	 * @param string $output Program output.
+	 * @return string First non-empty line, cleaned and shortened.
+	 */
+	private static function first_line( $output ) {
+		foreach ( preg_split( '~\r?\n~', $output ) as $line ) {
+			$line = trim( wp_strip_all_tags( $line ) );
+			if ( '' !== $line ) {
+				return function_exists( 'mb_substr' ) ? mb_substr( $line, 0, 300 ) : substr( $line, 0, 300 );
+			}
+		}
+		return '';
+	}
+
+	/**
+	 * What kind of failure a ClamAV error line describes.
+	 *
+	 * @param string $line Error line.
+	 * @return string socket | not_running | config | fdpass | nodb | other
+	 */
+	private static function error_kind( $line ) {
+		$l = strtolower( $line );
+		if ( false !== strpos( $l, 'fdpass' ) || false !== strpos( $l, 'file descriptor' ) ) {
+			return 'fdpass';
+		}
+		if ( ( false !== strpos( $l, 'connect' ) || false !== strpos( $l, 'socket' ) ) && ( false !== strpos( $l, 'permission denied' ) || false !== strpos( $l, 'access denied' ) ) ) {
+			return 'socket';
+		}
+		if ( false !== strpos( $l, 'connect' ) ) {
+			return 'not_running';
+		}
+		if ( false !== strpos( $l, 'configuration' ) || false !== strpos( $l, 'clamd.conf' ) ) {
+			return 'config';
+		}
+		if ( false !== strpos( $l, 'database' ) || false !== strpos( $l, 'cli_loaddb' ) ) {
+			return 'nodb';
+		}
+		return 'other';
+	}
+
+	/**
+	 * @return string Name of the user PHP runs as ('' when unknown).
+	 */
+	private static function php_user() {
+		if ( function_exists( 'posix_geteuid' ) && function_exists( 'posix_getpwuid' ) ) {
+			$info = @posix_getpwuid( posix_geteuid() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( is_array( $info ) && ! empty( $info['name'] ) ) {
+				return (string) $info['name'];
+			}
+		}
+		$user = function_exists( 'get_current_user' ) ? (string) get_current_user() : '';
+		return '' !== $user ? $user : '?';
 	}
 
 	/**
@@ -1550,12 +1915,20 @@ class Scanner {
 		if ( '' !== $custom ) {
 			$candidates[] = $custom;
 		}
+		$seen = array();
 		foreach ( array_unique( array_merge( $candidates, self::clamav_candidates() ) ) as $bin ) {
 			$base = basename( $bin );
 			if ( 0 !== strpos( $base, 'clamdscan' ) && 0 !== strpos( $base, 'clamscan' ) ) {
 				continue; // Only ever run ClamAV binaries, whatever the setting says.
 			}
 			if ( @is_file( $bin ) && @is_executable( $bin ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				// /bin is often a link to /usr/bin: one program is tested and run once.
+				$real = @realpath( $bin ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				$real = $real ? $real : $bin;
+				if ( isset( $seen[ $real ] ) ) {
+					continue;
+				}
+				$seen[ $real ]       = true;
 				$this->clamav_bins[] = $bin;
 			}
 		}

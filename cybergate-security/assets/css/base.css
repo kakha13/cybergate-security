@@ -99,16 +99,24 @@
 	.wpcs-header {
 		flex-wrap: wrap;
 	}
+	/* The row is indented under the title, so it may only take what is left of the line. */
 	.wpcs-header__actions {
-		flex: 1 0 100%;
+		flex: 1 1 calc(100% - 58px);
+		min-width: 0;
+		max-width: calc(100% - 58px);
 		flex-wrap: wrap;
 		justify-content: flex-start;
 		margin-left: 58px;
 	}
 }
-@media (max-width: 600px) {
+@media (max-width: 782px) {
 	.wpcs-header__actions {
+		flex-basis: 100%;
+		max-width: 100%;
 		margin-left: 0;
+	}
+	.wpcs-header__actions .button {
+		white-space: normal;
 	}
 }
 .wpcs-header .button {
@@ -142,7 +150,8 @@
 	margin-bottom: 16px;
 }
 .wpcs-grid--2 {
-	grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+	/* min(): one column on phones instead of a 360px column wider than the screen. */
+	grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
 }
 .wpcs-stack > * + * {
 	margin-top: 16px;
@@ -261,6 +270,15 @@
 	background: #f1f5f9;
 	color: var(--wpcs-ink-2);
 	border: 1px solid transparent;
+}
+/* Long state labels (self-test results, "confirmed by a live test ...") wrap instead of widening the page. */
+.wpcs-engine__head .wpcs-badge,
+.wpcs-section__head .wpcs-badge,
+.wpcs-status-table .wpcs-badge,
+.wpcs-summary .wpcs-badge {
+	white-space: normal;
+	max-width: 100%;
+	min-width: 0;
 }
 .wpcs-badge .dashicons {
 	font-size: 14px;

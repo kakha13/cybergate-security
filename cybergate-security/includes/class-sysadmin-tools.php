@@ -42,7 +42,10 @@ class Sysadmin_Tools {
 	const LEVEL_IGNORE = array( 'notify_mode' );
 
 	/** Wizard quick actions that may be posted with wpcs_do. */
-	const WIZARD_ACTIONS = array( 'write_htaccess', 'probe', 'send_test' );
+	const WIZARD_ACTIONS = array( 'write_htaccess', 'probe', 'send_test', 'recommended_uploads' );
+
+	/** Average uploads a day above which holding every upload means a lot of approvals. */
+	const BUSY_UPLOADS_PER_DAY = 15;
 
 	/**
 	 * Hooks: assets for the wizard and settings page, admin-post handlers and
@@ -58,6 +61,8 @@ class Sysadmin_Tools {
 			add_action( 'admin_post_wpcybersec_' . $handler, array( $this, 'handle_' . $handler ) );
 		}
 		add_action( 'wp_ajax_wpcybersec_test_email', array( $this, 'ajax_test_email' ) );
+		// Runs before Ajax::clamav_enable(): "Turn on ClamAV" tests ClamAV first.
+		add_action( 'wp_ajax_wpcybersec_clamav_enable', array( $this, 'ajax_clamav_precheck' ), 1 );
 		add_action( 'wpcybersec_settings_updated', array( $this, 'forget_baseline_on_root_change' ), 10, 2 );
 	}
 
@@ -154,6 +159,10 @@ class Sysadmin_Tools {
 					'scanFailed'     => __( 'The scan stopped: %s', 'cybergate-security' ),
 					'scanCancelled'  => __( 'The scan was cancelled. You can start it again.', 'cybergate-security' ),
 					'runAgain'       => __( 'Run the scan again', 'cybergate-security' ),
+					'scanAgain'      => __( 'Scan again', 'cybergate-security' ),
+					'listing'        => __( 'Listing files...', 'cybergate-security' ),
+					/* translators: %s: number of files */
+					'listingCount'   => __( 'Listing files - %s files found so far', 'cybergate-security' ),
 					'leaving'        => __( 'A scan is running. If you leave, it continues in the background, more slowly.', 'cybergate-security' ),
 					'sending'        => __( 'Sending...', 'cybergate-security' ),
 					/* translators: %s: time */
@@ -851,6 +860,16 @@ class Sysadmin_Tools {
 			'id'    => 'auto_prepend_file',
 			'label' => __( 'auto_prepend_file', 'cybergate-security' ),
 		);
+		$manager = self::service( 'guard_manager' );
+		if ( ( '' === $prepend || 'none' === strtolower( $prepend ) ) && $manager && method_exists( $manager, 'live_state' ) ) {
+			$live = $manager->live_state();
+			if ( 'confirmed' === $live['state'] ) {
+				// WP-CLI, cron or a development server: this PHP does not read .user.ini or .htaccess.
+				$check['status'] = 'pass';
+				$check['detail'] = $live['label'];
+				return $check;
+			}
+		}
 		if ( '' === $prepend || 'none' === strtolower( $prepend ) ) {
 			$check['status'] = 'info';
 			$check['detail'] = __( 'Not set. The optional early upload guard is not active.', 'cybergate-security' );
@@ -913,7 +932,13 @@ class Sysadmin_Tools {
 		$check['detail'] = $detail;
 
 		$settings = self::service( 'settings' );
-		if ( $clam && self::function_available( 'exec' ) && $settings && ! $settings->get( 'clamav_enabled', false ) ) {
+		$av       = $clam ? $this->antivirus_status()['clamav'] : null;
+		if ( $av && 'broken' === $av['state'] ) {
+			// Installed, but the self-test failed: say why instead of "turn it on".
+			$check['detail'] .= ' ' . $av['label'];
+			$check['fix']     = $av['hint'];
+			$check['code']    = $av['hint_code'];
+		} elseif ( $clam && self::function_available( 'exec' ) && $settings && ! $settings->get( 'clamav_enabled', false ) ) {
 			$check['fix'] = __( 'Turn on ClamAV in Settings > Advanced > Antivirus engines for a second opinion on uploads.', 'cybergate-security' );
 		} elseif ( ! $clam || '' === $maldet ) {
 			$check['fix'] = __( 'Optional. ClamAV and Linux Malware Detect know many more existing infections (web shells, phishing kits, infected uploads) and are a good second opinion, but they do not block attacks. With root access (VPS or dedicated server): install ClamAV and Linux Malware Detect (maldet). Without root (shared hosting): run the malware scanner of your hosting panel, for example cPanel Virus Scanner or Imunify360.', 'cybergate-security' );
@@ -979,44 +1004,127 @@ class Sysadmin_Tools {
 	 * clamav.state:
 	 *   missing        no ClamAV binary found
 	 *   blocked        installed, but PHP may not run programs
+	 *   broken         installed, but no binary passed the self-test (label says why)
 	 *   ready_off      ready to scan, "Also scan uploads with ClamAV" is off
-	 *   uploads        scans uploads (clamscan only: whole-site scans skip it)
+	 *   slow           on, but only a slow clamscan works, so uploads skip it while someone waits
+	 *   uploads        scans uploads (no background service: whole-site scans skip it)
 	 *   uploads_scans  scans uploads and whole-site scans (clamd running)
 	 *
-	 * @return array { clamav: { state, label, tone, binary, exec, daemon, enabled }, maldet: { supported, binary, version, linked (bool|null), monitor (inotifywait found; null without maldet), label, tone } }
+	 * The self-test (Scanner::clamav_selftest()) scans the EICAR test file with
+	 * every installed binary. Admin pages run it once when there is no result
+	 * yet; afterwards it is refreshed in the background, by "Check again" and
+	 * when a ClamAV setting changes.
+	 *
+	 * @return array { clamav: { state, label, tone, binary, exec, daemon, enabled, hint, hint_code, error, kind, daemon_ms, scan_ms, slow_only, tested, tested_at, bins }, maldet: { supported, binary, version, linked (bool|null), monitor (inotifywait found; null without maldet), label, tone } }
 	 */
 	public function antivirus_status() {
 		$binary   = $this->clamav_detect();
 		$exec     = self::function_available( 'exec' ) || self::function_available( 'proc_open' );
-		$ready    = (bool) self::call( 'scanner', 'clamav_available', array(), false );
+		$scanner  = self::service( 'scanner' );
 		$info     = self::call( 'scanner', 'clamav_info', array(), array() );
+		$info     = is_array( $info ) ? $info : array();
+		if ( is_admin() && $scanner && method_exists( $scanner, 'clamav_selftest' ) && ! empty( $info['installed'] ) && empty( $info['tested'] ) ) {
+			// First look at a site with ClamAV (or other binaries now): test it once, then use the cached result.
+			$scanner->clamav_selftest( true );
+			$info = (array) $scanner->clamav_info();
+		}
+		$ready    = ! empty( $info['available'] );
 		$daemon   = $ready && ! empty( $info['daemon'] );
 		$settings = self::service( 'settings' );
 		$enabled  = $settings ? (bool) $settings->get( 'clamav_enabled', false ) : false;
+		$test     = isset( $info['selftest'] ) && is_array( $info['selftest'] ) ? $info['selftest'] : null;
+		$d_ms     = isset( $info['daemon_ms'] ) ? $info['daemon_ms'] : null;
+		$s_ms     = isset( $info['scan_ms'] ) ? $info['scan_ms'] : null;
+		$slow     = ! empty( $info['slow_only'] );
+		$forced   = (bool) Network::get_option( Scanner::FORCE_SLOW_OPTION, false );
+		$kind     = '';
+		$error    = isset( $info['error'] ) ? (string) $info['error'] : '';
+		if ( $test ) {
+			foreach ( $test['bins'] as $row ) {
+				if ( empty( $row['ok'] ) && '' !== (string) $row['kind'] ) {
+					$kind = (string) $row['kind'];
+					break;
+				}
+			}
+		}
+		$speed = '';
+		if ( null !== $d_ms ) {
+			/* translators: %s: time per file, for example "45 ms" */
+			$speed = sprintf( __( 'background service, about %s per file', 'cybergate-security' ), self::duration_ms( $d_ms ) );
+		} elseif ( null !== $s_ms ) {
+			/* translators: %s: time per upload, for example "6.6 s" */
+			$speed = sprintf( __( 'about %s per upload', 'cybergate-security' ), self::duration_ms( $s_ms ) );
+		}
 
 		$hidden = false;
-		if ( '' === $binary && ! $ready ) {
+		$hint   = '';
+		$code   = '';
+		if ( '' === $binary && empty( $info['installed'] ) ) {
 			$state  = 'missing';
 			$hidden = self::clamav_hidden();
 			$label  = $hidden ? __( 'Unknown (hosting hides it)', 'cybergate-security' ) : __( 'Not installed', 'cybergate-security' );
 			$tone   = 'muted';
-		} elseif ( ! $ready ) {
+		} elseif ( ! $exec || empty( $info['installed'] ) ) {
 			$state = 'blocked';
 			$label = $exec ? __( 'Installed, cannot run', 'cybergate-security' ) : __( 'Installed, PHP cannot run it', 'cybergate-security' );
 			$tone  = 'medium';
+		} elseif ( ! $ready ) {
+			$state = 'broken';
+			/* translators: %s: error message */
+			$label = '' !== $error ? sprintf( __( 'Installed, not working: %s', 'cybergate-security' ), $error ) : __( 'Installed, not working', 'cybergate-security' );
+			$tone  = 'high';
+			list( $hint, $code ) = self::clamav_fix_hint( $kind );
+		} elseif ( $slow ) {
+			$state = $enabled ? ( $forced ? 'uploads' : 'slow' ) : 'ready_off';
+			/* translators: %s: time per upload, for example "6.6 s" */
+			$label = sprintf( __( 'Works, but slow: no background service (about %s per upload)', 'cybergate-security' ), self::duration_ms( $s_ms ) );
+			$tone  = $enabled && $forced ? 'ok' : 'medium';
+			$hint  = $forced
+				? __( 'Uploads wait for clamscan because "Also use the slow clamscan for uploads" is on. Start clamd for fast scans:', 'cybergate-security' )
+				: __( 'Uploads are not scanned with it while someone waits; held uploads the early guard imports by cron are. Start clamd for fast scans:', 'cybergate-security' );
+			$code  = self::clamd_start_command();
+			if ( 'not_running' !== $kind && '' !== $kind ) {
+				list( $hint, $code ) = self::clamav_fix_hint( $kind );
+			}
 		} elseif ( ! $enabled ) {
 			$state = 'ready_off';
-			$label = __( 'Ready, not in use', 'cybergate-security' );
+			$label = '' !== $speed
+				/* translators: %s: speed, for example "background service, about 45 ms per file" */
+				? sprintf( __( 'Ready (%s)', 'cybergate-security' ), $speed )
+				: __( 'Ready, not in use', 'cybergate-security' );
 			$tone  = 'medium';
 		} elseif ( $daemon ) {
 			$state = 'uploads_scans';
-			$label = __( 'In use for uploads and scans', 'cybergate-security' );
+			$label = '' !== $speed
+				/* translators: %s: speed, for example "background service, about 45 ms per file" */
+				? sprintf( __( 'In use for uploads and scans (%s)', 'cybergate-security' ), $speed )
+				: __( 'In use for uploads and scans', 'cybergate-security' );
 			$tone  = 'ok';
 		} else {
 			$state = 'uploads';
-			$label = __( 'In use for uploads', 'cybergate-security' );
+			$label = '' !== $speed
+				/* translators: %s: speed, for example "about 1.2 s per upload" */
+				? sprintf( __( 'In use for uploads (%s)', 'cybergate-security' ), $speed )
+				: __( 'In use for uploads', 'cybergate-security' );
 			$tone  = 'ok';
 		}
+		if ( ! $daemon && '' === $hint && in_array( $state, array( 'uploads', 'ready_off' ), true ) ) {
+			$hint = __( 'Start clamd so whole-site scans can use ClamAV too:', 'cybergate-security' );
+			$code = self::clamd_start_command();
+		}
+		$clam_info = array(
+			'error'     => $error,
+			'kind'      => $kind,
+			'hint'      => $hint,
+			'hint_code' => $code,
+			'daemon_ms' => $d_ms,
+			'scan_ms'   => $s_ms,
+			'slow_only' => $slow,
+			'forced'    => $forced,
+			'tested'    => null !== $test,
+			'tested_at' => $test ? (int) $test['at'] : 0,
+			'bins'      => $test ? $test['bins'] : array(),
+		);
 
 		$maldet    = self::maldet_detect();
 		$supported = 'Linux' === PHP_OS_FAMILY;
@@ -1072,13 +1180,13 @@ class Sysadmin_Tools {
 				'state'   => $state,
 				'label'   => $label,
 				'tone'    => $tone,
-				'binary'  => '' !== $binary ? $binary : ( isset( $info['binary'] ) ? (string) $info['binary'] : '' ),
+				'binary'  => ! empty( $info['binary'] ) ? wp_normalize_path( (string) $info['binary'] ) : $binary,
 				'exec'    => $exec,
 				'daemon'  => $daemon,
 				'enabled' => $enabled,
 				// state "missing" while open_basedir or disabled exec() hides the answer.
 				'hidden'  => $hidden,
-			),
+			) + $clam_info,
 			'maldet' => array(
 				'supported' => $supported,
 				'binary'    => $maldet,
@@ -1305,6 +1413,77 @@ class Sysadmin_Tools {
 		}
 		$disabled = array_map( 'trim', explode( ',', strtolower( (string) ini_get( 'disable_functions' ) ) ) );
 		return ! in_array( strtolower( $function ), $disabled, true );
+	}
+
+	/**
+	 * "45 ms" below a second, else "6.6 s".
+	 *
+	 * @param int|null $ms Milliseconds.
+	 * @return string
+	 */
+	public static function duration_ms( $ms ) {
+		$ms = max( 0, (int) $ms );
+		if ( $ms < 1000 ) {
+			/* translators: %s: number of milliseconds */
+			return sprintf( __( '%s ms', 'cybergate-security' ), number_format_i18n( max( 1, $ms ) ) );
+		}
+		/* translators: %s: number of seconds */
+		return sprintf( __( '%s s', 'cybergate-security' ), number_format_i18n( $ms / 1000, 1 ) );
+	}
+
+	/**
+	 * Command that starts the ClamAV background service on this server.
+	 *
+	 * @return string
+	 */
+	public static function clamd_start_command() {
+		if ( @is_dir( '/usr/local/cpanel' ) && self::path_allowed( '/usr/local/cpanel' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return '/scripts/restartsrv_clamd';
+		}
+		switch ( Admin\Clamav_Guide::platform() ) {
+			case 'macos':
+				return 'brew services start clamav';
+			case 'rhel':
+				return 'sudo systemctl enable --now clamd@scan';
+			case 'debian':
+				return 'sudo systemctl enable --now clamav-daemon';
+		}
+		return '\\' === DIRECTORY_SEPARATOR ? 'sc start clamd' : 'sudo systemctl enable --now clamav-daemon';
+	}
+
+	/**
+	 * What to do about a failed ClamAV self-test.
+	 *
+	 * @param string $kind Scanner error kind (socket, not_running, config, nodb, nodetect, timeout, other).
+	 * @return array [ text, command ]
+	 */
+	public static function clamav_fix_hint( $kind ) {
+		$platform = Admin\Clamav_Guide::platform();
+		switch ( $kind ) {
+			case 'socket':
+				$user = function_exists( 'posix_getpwuid' ) && function_exists( 'posix_geteuid' ) ? @posix_getpwuid( posix_geteuid() ) : null; // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				$user = is_array( $user ) && ! empty( $user['name'] ) ? $user['name'] : 'www-data';
+				return array(
+					__( 'Let the PHP user use the clamd socket: add it to the clamav group and restart PHP (or set LocalSocketMode 666 in clamd.conf and restart clamd).', 'cybergate-security' ),
+					'sudo usermod -a -G clamav ' . $user,
+				);
+			case 'config':
+				if ( 'macos' === $platform ) {
+					return array(
+						__( 'clamd.conf cannot be read. Create it from the sample, remove the line that says "Example", set LocalSocket, then start the service:', 'cybergate-security' ),
+						"cp \"$(brew --prefix)/etc/clamav/clamd.conf.sample\" \"$(brew --prefix)/etc/clamav/clamd.conf\"\nbrew services start clamav",
+					);
+				}
+				return array( __( 'clamd.conf cannot be read. Fix the file it names (remove the line that says "Example"), then start the service:', 'cybergate-security' ), self::clamd_start_command() );
+			case 'nodb':
+			case 'nodetect':
+				return array( __( 'Download the virus database, then press "Check again":', 'cybergate-security' ), 'macos' === $platform ? 'freshclam' : 'sudo freshclam' );
+			case 'timeout':
+				return array( __( 'ClamAV took too long. Start its background service so each file takes milliseconds instead of seconds:', 'cybergate-security' ), self::clamd_start_command() );
+			case 'not_running':
+				return array( __( 'The background service (clamd) is not running. Start it:', 'cybergate-security' ), self::clamd_start_command() );
+		}
+		return array( __( 'Check the message above on the server, then press "Check again".', 'cybergate-security' ), '' );
 	}
 
 	/**
@@ -1827,60 +2006,130 @@ class Sysadmin_Tools {
 	/* ------------------------------------------------------------------ */
 
 	/**
-	 * Real cron snippets with absolute paths.
+	 * The recommended real cron setup: the one source every screen uses (the
+	 * Environment check, the wizard's Server step, Settings > Advanced > Real
+	 * cron, the hosting panel steps and the developer instructions). A quick
+	 * scan every hour, a full malware scan every night, and WordPress cron
+	 * every 5 minutes. bin/cron.php gets --quiet, --wp and (multisite) --url;
+	 * only its normal output goes to /dev/null, so errors still reach the
+	 * cron mail.
 	 *
-	 * @return array[] Each { id, label, file, code, help }.
+	 * @return array[] Each { id, schedule, when, command, line }.
 	 */
-	public function cron_snippets() {
-		$php     = self::php_command();
-		$cron    = self::shell_arg( wp_normalize_path( WPCYBERSEC_DIR ) . 'bin/cron.php' );
-		$wp      = self::shell_arg( self::abspath() ) . self::cron_url_arg();
-		$wp_cron = self::shell_arg( self::abspath() . '/wp-cron.php' );
-		$path    = self::shell_arg( self::abspath() );
+	public static function cron_jobs() {
+		$php  = self::php_command();
+		$cron = self::shell_arg( wp_normalize_path( WPCYBERSEC_DIR ) . 'bin/cron.php' );
+		$args = ' --quiet --wp=' . self::shell_arg( self::abspath() ) . self::cron_url_arg();
 
 		if ( is_multisite() ) {
 			// "php wp-cron.php" cannot tell which site of a network to load (no
 			// host name on the command line): request the main site's
-			// wp-cron.php over HTTP, where every plugin event lives, and let
-			// WP-CLI run the other sites' events with --url.
-			$main_cron  = "*/5 * * * * curl -s -o /dev/null --max-time 120 " . self::shell_arg( network_site_url( 'wp-cron.php?doing_wp_cron' ) );
-			$wpcli_cron = "*/5 * * * * wp site list --field=url --path={$path} | xargs -I{} wp cron event run --due-now --url={} --path={$path} --quiet";
+			// wp-cron.php over HTTP, where every plugin event lives.
+			$wp_cron = 'curl -s -o /dev/null --max-time 120 ' . self::shell_arg( network_site_url( 'wp-cron.php?doing_wp_cron' ) );
 		} else {
-			$main_cron  = "*/5 * * * * {$php} {$wp_cron} > /dev/null 2>&1";
-			$wpcli_cron = "*/5 * * * * wp cron event run --due-now --path={$wp} --quiet";
+			$wp_cron = $php . ' ' . self::shell_arg( self::abspath() . '/wp-cron.php' ) . ' > /dev/null 2>&1';
 		}
+		$jobs = array(
+			array(
+				'id'       => 'quick',
+				'schedule' => '17 * * * *',
+				'when'     => __( 'Quick scan, every hour (at minute 17)', 'cybergate-security' ),
+				'command'  => $php . ' ' . $cron . $args . ' > /dev/null',
+			),
+			array(
+				'id'       => 'full',
+				'schedule' => '30 3 * * *',
+				'when'     => __( 'Full malware scan, every night (at 3:30)', 'cybergate-security' ),
+				'command'  => $php . ' ' . $cron . ' --full' . $args . ' > /dev/null',
+			),
+			array(
+				'id'       => 'wp_cron',
+				'schedule' => '*/5 * * * *',
+				'when'     => is_multisite()
+					? __( 'WordPress cron of the main site, every 5 minutes', 'cybergate-security' )
+					: __( 'The rest of WordPress cron, every 5 minutes', 'cybergate-security' ),
+				'command'  => $wp_cron,
+			),
+		);
+		foreach ( $jobs as $i => $job ) {
+			$jobs[ $i ]['line'] = $job['schedule'] . ' ' . $job['command'];
+		}
+		return $jobs;
+	}
+
+	/**
+	 * The crontab block of cron_jobs().
+	 *
+	 * @return string
+	 */
+	public static function cron_crontab() {
+		$jobs = self::cron_jobs();
+		return "# CyberGate Security: quick scan every hour, full malware scan every night.\n"
+			. $jobs[0]['line'] . "\n"
+			. $jobs[1]['line'] . "\n"
+			. ( is_multisite() ? "# WordPress cron of the main site every 5 minutes.\n" : "# The rest of WordPress cron every 5 minutes.\n" )
+			. $jobs[2]['line'];
+	}
+
+	/**
+	 * The last step everywhere: switching off WP-Cron on page visits once the
+	 * jobs run (the one-click button appears after the first real cron run).
+	 *
+	 * @return array { text, code }
+	 */
+	public static function cron_disable_step() {
+		$text = __( 'Once the jobs have run (the plugin notices the first run within an hour), switch off WP-Cron on page visits: use the "Switch off visitor-triggered cron" button that then appears in Settings > Advanced > Real cron, or add this line to wp-config.php above "That\'s all, stop editing!":', 'cybergate-security' );
+		if ( is_multisite() ) {
+			$text = __( 'On a multisite network the other sites keep their own WP-Cron, so switch it off only when the WP-CLI variant runs cron for every site. Then use the "Switch off visitor-triggered cron" button in Settings > Advanced > Real cron, or add this line to wp-config.php:', 'cybergate-security' );
+		}
+		return array(
+			'text' => $text,
+			'code' => "define( 'DISABLE_WP_CRON', true );",
+		);
+	}
+
+	/**
+	 * Real cron snippets with absolute paths (the first is cron_crontab()).
+	 *
+	 * @return array[] Each { id, label, file, code, help }.
+	 */
+	public function cron_snippets() {
+		$jobs = self::cron_jobs();
+		$wp   = self::shell_arg( self::abspath() ) . self::cron_url_arg();
+		$path = self::shell_arg( self::abspath() );
+		$off  = self::cron_disable_step();
+
+		$wpcli_cron = is_multisite()
+			? "*/5 * * * * wp site list --field=url --path={$path} | xargs -I{} wp cron event run --due-now --url={} --path={$path} --quiet"
+			: "*/5 * * * * wp cron event run --due-now --path={$wp} --quiet";
 
 		return array(
 			array(
 				'id'    => 'crontab',
-				'label' => __( 'System cron with PHP', 'cybergate-security' ),
+				'label' => __( 'System cron with PHP (recommended)', 'cybergate-security' ),
 				'file'  => __( 'crontab -e (as the web server user)', 'cybergate-security' ),
-				'code'  => "# CyberGate Security: quick scan every hour, full malware scan every night.\n"
-					. "17 * * * * {$php} {$cron} --wp={$wp} > /dev/null 2>&1\n"
-					. "30 3 * * * {$php} {$cron} --full --wp={$wp} > /dev/null 2>&1\n"
-					. ( is_multisite() ? "# Run WordPress cron of the main site every 5 minutes.\n" : "# Run the rest of WordPress cron every 5 minutes.\n" )
-					. $main_cron,
+				'code'  => self::cron_crontab(),
 				'help'  => is_multisite()
 					? __( 'Add these lines to the crontab of the user that owns the site files (often www-data). Only one scan runs at a time, so overlapping runs are harmless. On a multisite network the plugin runs on the main site only; the other sites keep their own WP-Cron, so do not switch WP-Cron off unless the WP-CLI variant below runs it for every site.', 'cybergate-security' )
 					: __( 'Add these lines to the crontab of the user that owns the site files (often www-data). Only one scan runs at a time, so overlapping runs are harmless.', 'cybergate-security' ),
 			),
 			array(
 				'id'    => 'wpcli',
-				'label' => __( 'System cron with WP-CLI', 'cybergate-security' ),
+				'label' => __( 'The same with WP-CLI', 'cybergate-security' ),
 				'file'  => __( 'crontab -e (as the web server user)', 'cybergate-security' ),
-				'code'  => "17 * * * * wp wpcybersec scan --path={$wp} --quiet\n"
-					. "30 3 * * * wp wpcybersec scan --full --path={$wp} --quiet\n"
+				'code'  => $jobs[0]['schedule'] . " wp wpcybersec scan --path={$wp} --quiet\n"
+					. $jobs[1]['schedule'] . " wp wpcybersec scan --full --path={$wp} --quiet\n"
 					. $wpcli_cron,
 				'help'  => is_multisite()
-					? __( 'Use this variant when WP-CLI is installed. Use the full path to wp if cron cannot find it. The last line runs the due WordPress cron events of every site of the network.', 'cybergate-security' )
-					: __( 'Use this variant when WP-CLI is installed. Use the full path to wp if cron cannot find it.', 'cybergate-security' ),
+					? __( 'Use this variant instead when WP-CLI is installed. Use the full path to wp if cron cannot find it. The last line runs the due WordPress cron events of every site of the network.', 'cybergate-security' )
+					: __( 'Use this variant instead when WP-CLI is installed. Use the full path to wp if cron cannot find it.', 'cybergate-security' ),
 			),
 			array(
 				'id'    => 'wpconfig',
 				'label' => __( 'Switch off WP-Cron on page visits', 'cybergate-security' ),
 				'file'  => 'wp-config.php',
-				'code'  => "define( 'DISABLE_WP_CRON', true );",
-				'help'  => __( 'Add this only after the cron lines above are active, above the line "That\'s all, stop editing!".', 'cybergate-security' ),
+				'code'  => $off['code'],
+				'help'  => $off['text'],
 			),
 		);
 	}
@@ -2293,7 +2542,13 @@ class Sysadmin_Tools {
 		} elseif ( ! $av['clamav']['exec'] ) {
 			$rows[] = array( __( 'ClamAV scanner service (clamd)', 'cybergate-security' ), 'unknown', $hidden );
 		} else {
-			$rows[] = array( __( 'ClamAV scanner service (clamd)', 'cybergate-security' ), $av['clamav']['daemon'] ? 'ok' : 'bad', $av['clamav']['daemon'] ? __( 'Reachable', 'cybergate-security' ) : __( 'Not running', 'cybergate-security' ) );
+			$text = $av['clamav']['daemon'] ? __( 'Reachable', 'cybergate-security' ) : __( 'Not running', 'cybergate-security' );
+			if ( ! $av['clamav']['daemon'] && 'socket' === $av['clamav']['kind'] ) {
+				$text = __( 'Running, but PHP may not use its socket', 'cybergate-security' );
+			} elseif ( ! $av['clamav']['daemon'] && 'config' === $av['clamav']['kind'] ) {
+				$text = __( 'Not usable: clamd.conf cannot be read', 'cybergate-security' );
+			}
+			$rows[] = array( __( 'ClamAV scanner service (clamd)', 'cybergate-security' ), $av['clamav']['daemon'] ? 'ok' : 'bad', $text );
 		}
 
 		// maldet installed, with its signature version.
@@ -2617,6 +2872,25 @@ class Sysadmin_Tools {
 			}
 			return;
 		}
+		if ( 'recommended_uploads' === $do ) {
+			// "Use this" on the Protection step: Balanced, but only risky uploads are held.
+			$settings = self::service( 'settings' );
+			if ( $settings ) {
+				$presets = Settings::presets();
+				$values  = array_merge(
+					$presets['balanced'],
+					array(
+						'upload_mode'  => 'hold_risky',
+						'install_mode' => 'hold',
+					)
+				);
+				$values['protection_level'] = $this->match_level( array_merge( $settings->all(), $values ), 'balanced' );
+				$settings->update( $values );
+				self::log( 'settings_saved', __( 'Setup wizard: Balanced protection, holding only risky uploads.', 'cybergate-security' ) );
+				self::flash( __( 'Applied: Balanced protection, but only risky uploads are held. Clean images and documents pass after the malware scan; new plugins and themes still wait for you. You can change it below.', 'cybergate-security' ), 'ok' );
+			}
+			return;
+		}
 		if ( 'send_test' === $do ) {
 			$warnings = array();
 			$values   = $this->collect_notifications( $post, $warnings );
@@ -2634,6 +2908,58 @@ class Sysadmin_Tools {
 				self::flash( __( 'Saved.', 'cybergate-security' ) . ' ' . self::test_sent_message( $settings ? $settings->recipients() : Network::default_recipients() ), 'ok' );
 			}
 		}
+	}
+
+	/**
+	 * Media Library uploads of the last 30 days: how many a day, and the share
+	 * of users who are not administrators (they cannot approve their own files).
+	 * One grouped query on the attachment index, cached for an hour; the main
+	 * site's library on a network.
+	 *
+	 * @return array { days, total, per_day (float), non_admin (int), non_admin_pct (int) }
+	 */
+	public function upload_activity() {
+		$cached = Network::get_transient( 'wpcybersec_upload_activity' );
+		if ( is_array( $cached ) && isset( $cached['per_day'] ) ) {
+			return $cached;
+		}
+		$days   = 30;
+		$result = Network::on_main(
+			static function () use ( $days ) {
+				global $wpdb;
+				$since = wp_date( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS );
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- one grouped count, cached by the caller.
+				$rows = $wpdb->get_results( $wpdb->prepare( "SELECT post_author, COUNT(*) AS n FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_status = 'inherit' AND post_date >= %s GROUP BY post_author ORDER BY n DESC LIMIT 1000", $since ), ARRAY_A );
+				$total     = 0;
+				$non_admin = 0;
+				$ids       = array();
+				foreach ( (array) $rows as $row ) {
+					if ( (int) $row['post_author'] > 0 ) {
+						$ids[] = (int) $row['post_author'];
+					}
+				}
+				if ( $ids && function_exists( 'cache_users' ) ) {
+					cache_users( $ids ); // One query for every author.
+				}
+				foreach ( (array) $rows as $row ) {
+					$n      = (int) $row['n'];
+					$author = (int) $row['post_author'];
+					$total += $n;
+					if ( $author < 1 || ! user_can( $author, 'manage_options' ) ) {
+						$non_admin += $n;
+					}
+				}
+				return array(
+					'days'          => $days,
+					'total'         => $total,
+					'per_day'       => round( $total / $days, 1 ),
+					'non_admin'     => $non_admin,
+					'non_admin_pct' => $total ? (int) round( $non_admin * 100 / $total ) : 0,
+				);
+			}
+		);
+		Network::set_transient( 'wpcybersec_upload_activity', $result, HOUR_IN_SECONDS );
+		return $result;
 	}
 
 	/**
@@ -2661,6 +2987,9 @@ class Sysadmin_Tools {
 					$roles[] = 'administrator';
 				}
 				$values['upload_bypass_roles'] = $roles;
+				if ( isset( $post['upload_mode'] ) && in_array( $post['upload_mode'], array( 'hold_all', 'hold_risky' ), true ) ) {
+					$values['upload_mode'] = $post['upload_mode'];
+				}
 				$values['install_mode']        = ! empty( $post['hold_installs'] ) ? 'hold' : 'off';
 				$values['file_mode']           = ! empty( $post['quarantine_php'] ) ? 'quarantine_exec' : 'report';
 
@@ -2818,6 +3147,15 @@ class Sysadmin_Tools {
 		$warnings = array();
 		$values   = 'advanced' === $tab ? $this->collect_advanced( $post, $old, $warnings ) : $this->collect_general( $post, $old, $warnings );
 		$new      = $settings->update( $values );
+		if ( 'advanced' === $tab && ! empty( $new['clamav_enabled'] ) && empty( $old['clamav_enabled'] ) ) {
+			// The toggle was switched on: refuse it like the one-click button when ClamAV does not work.
+			$clam = $this->antivirus_status()['clamav'];
+			if ( in_array( $clam['state'], array( 'missing', 'blocked', 'broken' ), true ) ) {
+				$new = $settings->update( array( 'clamav_enabled' => false ) );
+				/* translators: %s: why ClamAV does not work */
+				$warnings[] = sprintf( __( 'ClamAV scanning was left off because ClamAV does not work on this server: %s', 'cybergate-security' ), 'broken' === $clam['state'] && '' !== $clam['error'] ? $clam['error'] : $clam['label'] );
+			}
+		}
 
 		self::log(
 			'settings_saved',
@@ -2945,7 +3283,51 @@ class Sysadmin_Tools {
 				$values['clamav_binary'] = $binary;
 			}
 		}
+		if ( isset( $post['clamav_slow_uploads'] ) ) {
+			// Kept outside the settings array: Settings::sanitize() keeps only its own keys.
+			Network::update_option( Scanner::FORCE_SLOW_OPTION, self::post_bool( $post, 'clamav_slow_uploads' ), false );
+		}
 		return $values;
+	}
+
+	/**
+	 * Before "Turn on ClamAV" (Ajax::clamav_enable()): runs the self-test and
+	 * refuses with the reason when no ClamAV binary works. When only a slow
+	 * clamscan works it is turned on here, with a message that says what it
+	 * is used for. Otherwise Ajax::clamav_enable() continues as usual.
+	 */
+	public function ajax_clamav_precheck() {
+		if ( ! check_ajax_referer( Ajax::NONCE, '_ajax_nonce', false ) || ! Admin\Admin::can() ) {
+			return; // Ajax::clamav_enable() answers with its own error.
+		}
+		$scanner  = self::service( 'scanner' );
+		$settings = self::service( 'settings' );
+		if ( ! $scanner || ! method_exists( $scanner, 'clamav_selftest' ) || ! $settings ) {
+			return;
+		}
+		$scanner->clamav_selftest( true );
+		$clam = $this->antivirus_status()['clamav'];
+		if ( in_array( $clam['state'], array( 'missing', 'blocked', 'broken' ), true ) ) {
+			$message = 'broken' === $clam['state']
+				/* translators: %s: why ClamAV does not work */
+				? sprintf( __( 'ClamAV was not turned on because its self-test failed: %s', 'cybergate-security' ), '' !== $clam['error'] ? $clam['error'] : $clam['label'] )
+				/* translators: %s: ClamAV state */
+				: sprintf( __( 'ClamAV was not turned on: %s.', 'cybergate-security' ), $clam['label'] );
+			if ( '' !== $clam['hint'] ) {
+				$message .= ' ' . $clam['hint'] . ( '' !== $clam['hint_code'] ? ' ' . $clam['hint_code'] : '' );
+			}
+			wp_send_json_error( array( 'message' => $message ) );
+		}
+		if ( ! empty( $clam['slow_only'] ) && empty( $clam['forced'] ) ) {
+			$settings->update( array( 'clamav_enabled' => true ) );
+			$message = sprintf(
+				/* translators: %s: time per file, for example "6.6 s" */
+				__( 'ClamAV is on, but only the slow clamscan works here (about %s per file), so uploads are not scanned with it while someone waits; held uploads the early guard imports by cron are. Start the clamd service for fast scans of every upload.', 'cybergate-security' ),
+				self::duration_ms( $clam['scan_ms'] )
+			);
+			self::log( 'clamav_enabled', $message );
+			wp_send_json_success( array( 'message' => $message ) );
+		}
 	}
 
 	/**
@@ -3056,12 +3438,40 @@ class Sysadmin_Tools {
 		);
 		$back    = self::settings_url( 'advanced', array(), 'wpcs-guard' );
 		$manager = self::service( 'guard_manager' );
+		if ( in_array( $op, array( 'ping', 'enable' ), true ) ) {
+			// "Test again" and the one-click install without JavaScript.
+			$hardening = self::service( 'hardening' );
+			if ( ! $hardening || ! method_exists( $hardening, 'run' ) ) {
+				self::flash( __( 'The early guard module is not available in this installation.', 'cybergate-security' ), 'bad' );
+				$this->redirect( $back );
+			}
+			if ( 'ping' === $op ) {
+				$texts = array(
+					'active'   => array( __( 'Live test: PHP loads the early guard.', 'cybergate-security' ), 'ok' ),
+					'inactive' => array( __( 'Live test: the site answered, but PHP did not load the early guard.', 'cybergate-security' ), 'warn' ),
+					'down'     => array( __( 'Live test: the site did not answer (server error).', 'cybergate-security' ), 'bad' ),
+					'unknown'  => array( __( 'Live test: the site did not answer its own test request (a firewall, an HTTP password or a slow server can cause this), so nothing changed.', 'cybergate-security' ), 'info' ),
+				);
+				$result = $hardening->reping( 10 );
+				$text   = isset( $texts[ $result ] ) ? $texts[ $result ] : $texts['unknown'];
+				self::flash( $text[0], $text[1] );
+			} else {
+				$result = $hardening->run( 'guard' );
+				self::flash( is_wp_error( $result ) ? $result->get_error_message() : ( is_string( $result ) ? $result : __( 'Fixed.', 'cybergate-security' ) ), is_wp_error( $result ) ? 'bad' : 'ok' );
+			}
+			$this->redirect( $back );
+		}
 		if ( ! isset( $methods[ $op ] ) ) {
 			self::flash( __( 'Unknown action.', 'cybergate-security' ), 'bad' );
 			$this->redirect( $back );
 		}
 		if ( ! $manager || ! method_exists( $manager, $methods[ $op ] ) ) {
 			self::flash( __( 'The early guard module is not available in this installation.', 'cybergate-security' ), 'bad' );
+			$this->redirect( $back );
+		}
+		if ( 'write_user_ini' === $op && ( ! method_exists( $manager, 'bootstrap_path' ) || ! is_file( $manager->bootstrap_path() ) ) ) {
+			// A prepend line pointing at a missing file would stop every PHP request.
+			self::flash( __( 'Install the guard files first: .user.ini must not point at a file that does not exist.', 'cybergate-security' ), 'bad' );
 			$this->redirect( $back );
 		}
 		try {
@@ -3084,12 +3494,12 @@ class Sysadmin_Tools {
 				Developer_Instructions::clear_failure( 'guard' );
 			}
 			$messages = array(
-				'install'        => __( 'Early guard installed. It starts working once PHP loads it through auto_prepend_file (see the snippets below).', 'cybergate-security' ),
+				'install'        => __( 'The guard files are installed. The guard starts working once PHP loads it through auto_prepend_file (the one-click button or the snippets below).', 'cybergate-security' ),
 				'uninstall'      => __( 'Early guard switched off. If you added auto_prepend_file to the server configuration, remove that line too.', 'cybergate-security' ),
 				'write_user_ini' => __( 'auto_prepend_file was added to .user.ini. PHP picks it up within 5 minutes (user_ini.cache_ttl).', 'cybergate-security' ),
 			);
+			// Guard_Manager logs what it did (guard_installed, guard_user_ini, guard_uninstalled): one entry, not two.
 			self::flash( $messages[ $op ], 'ok' );
-			self::log( 'guard_' . $op, $messages[ $op ] );
 		}
 		$this->redirect( $back );
 	}

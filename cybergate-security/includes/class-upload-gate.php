@@ -845,6 +845,161 @@ class Upload_Gate {
 	}
 
 	/* ------------------------------------------------------------------ */
+	/* Image previews and clean images                                     */
+	/* ------------------------------------------------------------------ */
+
+	/**
+	 * Raster image types that may be previewed: extension => { IMAGETYPE_*, MIME }.
+	 * Never SVG (it can hold scripts).
+	 *
+	 * @return array
+	 */
+	public static function preview_types() {
+		$types = array(
+			'jpg'  => array( IMAGETYPE_JPEG, 'image/jpeg' ),
+			'jpeg' => array( IMAGETYPE_JPEG, 'image/jpeg' ),
+			'jpe'  => array( IMAGETYPE_JPEG, 'image/jpeg' ),
+			'png'  => array( IMAGETYPE_PNG, 'image/png' ),
+			'gif'  => array( IMAGETYPE_GIF, 'image/gif' ),
+		);
+		if ( defined( 'IMAGETYPE_WEBP' ) ) {
+			$types['webp'] = array( IMAGETYPE_WEBP, 'image/webp' );
+		}
+		return $types;
+	}
+
+	/**
+	 * Highest severity of an item: its own or that of its worst match.
+	 *
+	 * @param array $item Item.
+	 * @return int 0-3.
+	 */
+	public static function risk_level( array $item ) {
+		$level = isset( $item['severity'] ) ? (int) $item['severity'] : 0;
+		$hits  = isset( $item['details']['hits'] ) && is_array( $item['details']['hits'] ) ? $item['details']['hits'] : array();
+		foreach ( $hits as $hit ) {
+			if ( is_array( $hit ) && isset( $hit['severity'] ) ) {
+				$level = max( $level, (int) $hit['severity'] );
+			}
+		}
+		return max( 0, min( 3, $level ) );
+	}
+
+	/**
+	 * Whether a held upload may be shown as an image, and what it is.
+	 *
+	 * Only for uploads with a raster image extension whose held copy really is
+	 * that kind of image (getimagesize() and finfo agree with the extension),
+	 * and never for uploads flagged high or critical or held under an
+	 * executable name: a polyglot such as a GIF that is also PHP must not be
+	 * rendered, whatever a browser would make of it.
+	 *
+	 * @param array $item Item.
+	 * @return array { ok: bool, reason: ''|not_image|risky|missing|mismatch, path, mime, ext, width, height }
+	 */
+	public function image_preview( array $item ) {
+		static $cache = array();
+		$key = isset( $item['id'] ) ? (int) $item['id'] . ':' . ( isset( $item['quarantine_path'] ) ? (string) $item['quarantine_path'] : '' ) : '';
+		if ( '' !== $key && isset( $cache[ $key ] ) ) {
+			return $cache[ $key ];
+		}
+		$result = $this->check_image_preview( $item );
+		if ( '' !== $key ) {
+			$cache[ $key ] = $result;
+		}
+		return $result;
+	}
+
+	/**
+	 * @param array $item Item.
+	 * @return array See image_preview().
+	 */
+	private function check_image_preview( array $item ) {
+		$out   = array(
+			'ok'     => false,
+			'reason' => 'not_image',
+			'path'   => '',
+			'mime'   => '',
+			'ext'    => '',
+			'width'  => 0,
+			'height' => 0,
+		);
+		$types = self::preview_types();
+		$name  = isset( $item['path'] ) ? (string) $item['path'] : '';
+		$ext   = strtolower( (string) pathinfo( $name, PATHINFO_EXTENSION ) );
+		if ( ! isset( $item['type'] ) || Store::TYPE_UPLOAD !== $item['type'] || ! isset( $types[ $ext ] ) ) {
+			return $out;
+		}
+		$out['ext'] = $ext;
+		if ( self::risk_level( $item ) >= Store::SEV_HIGH || self::item_is_executable( $item ) || self::name_is_executable( $name ) ) {
+			$out['reason'] = 'risky';
+			return $out;
+		}
+		$out['reason'] = 'missing';
+		if ( ! in_array( isset( $item['status'] ) ? (string) $item['status'] : '', array( Store::STATUS_PENDING, Store::STATUS_QUARANTINED ), true ) ) {
+			return $out;
+		}
+		$path    = isset( $item['quarantine_path'] ) ? wp_normalize_path( (string) $item['quarantine_path'] ) : '';
+		$plugin  = wpcybersec();
+		$storage = $plugin->storage;
+		if ( '' === $path || ! $plugin->quarantine->exists( $item ) || ! Storage::is_within( $path, $storage->quarantine_dir() ) || is_link( $path ) ) {
+			return $out;
+		}
+		$out['reason'] = 'mismatch';
+		$info          = @getimagesize( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- a broken file is simply not an image.
+		if ( ! is_array( $info ) || (int) $info[2] !== (int) $types[ $ext ][0] || empty( $info[0] ) || empty( $info[1] ) ) {
+			return $out;
+		}
+		$mime = '';
+		if ( function_exists( 'finfo_open' ) ) {
+			$finfo = finfo_open( FILEINFO_MIME_TYPE );
+			if ( $finfo ) {
+				$mime = (string) @finfo_file( $finfo, $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				finfo_close( $finfo );
+			}
+			if ( $mime !== $types[ $ext ][1] ) {
+				return $out;
+			}
+		} elseif ( ! isset( $info['mime'] ) || $info['mime'] !== $types[ $ext ][1] ) {
+			return $out;
+		}
+		$out['ok']     = true;
+		$out['reason'] = '';
+		$out['path']   = $path;
+		$out['mime']   = $types[ $ext ][1];
+		$out['width']  = (int) $info[0];
+		$out['height'] = (int) $info[1];
+		return $out;
+	}
+
+	/**
+	 * Whether a pending upload is a clean image that "Allow all clean images"
+	 * may approve: no matches at all, severity info, not held under an
+	 * executable name, held from the Media Library, REST or a sideload (so
+	 * approving imports it), and a held copy that image_preview() verified.
+	 *
+	 * @param array $item Item.
+	 * @return bool
+	 */
+	public function is_clean_image( array $item ) {
+		if ( ! isset( $item['type'], $item['status'] ) || Store::TYPE_UPLOAD !== $item['type'] || Store::STATUS_PENDING !== $item['status'] ) {
+			return false;
+		}
+		$details = isset( $item['details'] ) && is_array( $item['details'] ) ? $item['details'] : array();
+		if ( (int) $item['severity'] > 0 || ! empty( $details['hits'] ) || ! empty( $details['not_held'] ) ) {
+			return false;
+		}
+		// Only uploads that approving imports into the Media Library (early guard
+		// uploads are only allowlisted; the sender has to send them again).
+		$context = isset( $details['context'] ) ? (string) $details['context'] : self::context_from_source( (string) $item['source'] );
+		if ( ! in_array( $context, array( 'media', 'rest', 'sideload' ), true ) ) {
+			return false;
+		}
+		$preview = $this->image_preview( $item );
+		return ! empty( $preview['ok'] );
+	}
+
+	/* ------------------------------------------------------------------ */
 	/* Helpers                                                             */
 	/* ------------------------------------------------------------------ */
 

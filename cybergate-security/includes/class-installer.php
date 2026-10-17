@@ -38,7 +38,7 @@ class Installer {
 		unset( $network_wide );
 		self::install();
 		// Read by Admin on the next admin page load to open the setup wizard.
-		Network::update_option( self::REDIRECT_OPTION, get_current_user_id() ? get_current_user_id() : 1, false );
+		Network::update_option( self::REDIRECT_OPTION, get_current_user_id() ? get_current_user_id() : 1 ); // Autoloaded (Network::STATE_OPTIONS).
 		if ( Network::get_option( 'wpcybersec_guard_installed' ) ) {
 			Guard_Config::set_enabled( true );
 		} else {
@@ -158,6 +158,7 @@ class Installer {
 		User_Watch::seed();
 
 		Network::update_option( self::DB_OPTION, WPCYBERSEC_DB_VERSION, true );
+		self::autoload_state_options();
 
 		// Per-site tables and options of the other sites (bounded; the rest
 		// continues on later admin, cron and CLI requests, see Plugin::boot()).
@@ -176,7 +177,51 @@ class Installer {
 			if ( $old && version_compare( (string) $old, '3', '<' ) ) {
 				self::add_default_exclusion( 'error_log' );
 			}
+		} elseif ( ! Network::active() && ! get_option( Network::AUTOLOAD_FLAG ) ) {
+			self::autoload_state_options();
 		}
+	}
+
+	/**
+	 * Single sites: stores the small state options of Network::STATE_OPTIONS
+	 * with autoload on (older versions wrote several with autoload off, so
+	 * every admin page read them with one query each), then sets
+	 * Network::AUTOLOAD_FLAG, after which Network::prime() treats a state
+	 * option missing from the autoloaded set as not existing. Runs once, from
+	 * install() and maybe_upgrade(). Network options (multisite) have no
+	 * autoload flag; Network::prime() reads them in one query.
+	 */
+	public static function autoload_state_options() {
+		if ( Network::active() ) {
+			return;
+		}
+		global $wpdb;
+		$names = Network::STATE_OPTIONS;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- core options table, one placeholder per fixed name; read once on upgrade.
+		$rows = (array) $wpdb->get_results( $wpdb->prepare( "SELECT option_name, autoload FROM {$wpdb->options} WHERE option_name IN (" . implode( ',', array_fill( 0, count( $names ), '%s' ) ) . ')', $names ) );
+		$on   = function_exists( 'wp_autoload_values_to_autoload' ) ? wp_autoload_values_to_autoload() : array( 'yes' );
+		$fix  = array();
+		foreach ( $rows as $row ) {
+			if ( ! in_array( (string) $row->autoload, $on, true ) ) {
+				$fix[] = (string) $row->option_name;
+			}
+		}
+		if ( $fix ) {
+			if ( function_exists( 'wp_set_option_autoload_values' ) ) {
+				wp_set_option_autoload_values( array_fill_keys( $fix, true ) ); // WordPress 6.4+.
+			} else {
+				// WordPress 6.0-6.3 have no API that changes the autoload flag of an
+				// existing option without rewriting its value; an UPDATE changes only
+				// the flag, so the value is never missing for a concurrent request.
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- core options table, one placeholder per fixed name.
+				$wpdb->query( $wpdb->prepare( "UPDATE {$wpdb->options} SET autoload = 'yes' WHERE option_name IN (" . implode( ',', array_fill( 0, count( $fix ), '%s' ) ) . ')', $fix ) );
+				foreach ( $fix as $name ) {
+					wp_cache_delete( $name, 'options' );
+				}
+				wp_cache_delete( 'alloptions', 'options' );
+			}
+		}
+		update_option( Network::AUTOLOAD_FLAG, '1', true );
 	}
 
 	/**

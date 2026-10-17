@@ -12,6 +12,9 @@
  *   - menu and admin bar count updates after decisions
  *   - dashboard refresh after a scan finishes ([data-wpcs-dashboard])
  *   - "+N -M lines" summary loaded when a details row opens ([data-wpcs-diff-summary])
+ *   - bulk Allow / Mark safe of rows flagged high or critical asks first (tr[data-risk])
+ *   - "Allow all clean images" ([data-wpcs-allow-clean]): AJAX clean_images, a confirmation
+ *     with the count, then allow_clean in batches with a progress bar
  *   - changes view refresh after a decision ([data-wpcs-changes])
  */
 (function () {
@@ -296,7 +299,6 @@
 			e.preventDefault();
 
 			var select = form.querySelector('select[name="bulk_action"]');
-			var apply = form.querySelector('[name="wpcs_bulk_apply"]');
 			var action = select ? select.value : '';
 			if (!action) {
 				api.toast(t('chooseAction', 'Choose a bulk action first.'), true);
@@ -312,71 +314,216 @@
 			var ids = boxes.map(function (b) {
 				return b.value;
 			});
-			if (action === 'delete' && !window.confirm(tn('confirmDelete', ids.length, 'Delete %s items permanently?'))) {
-				return;
-			}
-			if (action === 'deny' && !window.confirm(tn('confirmDeny', ids.length, 'Deny %s items?'))) {
-				return;
-			}
-
-			var rows = ids
-				.map(function (id) {
-					return document.querySelector('tr[data-item-id="' + parseInt(id, 10) + '"]');
-				})
-				.filter(Boolean);
-			rows.forEach(function (row) {
-				row.classList.add('is-busy');
-			});
-			if (apply) {
-				apply.disabled = true;
-			}
-
-			api.bulk(action, ids)
-				.then(function (res) {
-					var failed = {};
-					(res.errors || []).forEach(function (msg) {
-						var m = /^#(\d+):/.exec(String(msg));
-						if (m) {
-							failed[m[1]] = true;
-						}
-					});
-					var status = NEXT_STATUS[action];
-					rows.forEach(function (row) {
-						var id = row.getAttribute('data-item-id');
-						if (failed[id]) {
-							row.classList.remove('is-busy');
-							return;
-						}
-						var held = heldAfter(action);
-						applyRowState(row, status, availableAfter(status), held);
-					});
-					toArray(document.querySelectorAll('.wpcs-items')).forEach(syncSelectAll);
-					updateMenuCounts(res.counts);
-
-					var done = parseInt(res.done, 10) || 0;
-					var errors = res.errors || [];
-					var msg = done ? tn('bulkDone', done, '%s items updated.') : '';
-					if (errors.length) {
-						msg += (msg ? ' ' : '') + tn('bulkFailed', errors.length, '%s items could not be changed:') + ' ' + errors.slice(0, 3).join(' ');
-						api.toast(msg, true);
-					} else {
-						api.toast(msg);
-					}
-					if (select) {
-						select.value = '';
-					}
-				})
-				.catch(function (err) {
-					rows.forEach(function (row) {
-						row.classList.remove('is-busy');
-					});
-					api.toast(err.message, true);
-				})
-				.then(function () {
-					if (apply) {
-						apply.disabled = false;
+			if (action === 'delete' || action === 'deny') {
+				api.confirmDialog({
+					title: action === 'delete' ? tn('confirmDelete', ids.length, 'Delete %s items permanently?') : tn('confirmDeny', ids.length, 'Deny %s items?'),
+					confirm: select.options[select.selectedIndex].text,
+					cancel: t('cancel', 'Cancel'),
+					tone: 'danger'
+				}).then(function (confirmed) {
+					if (confirmed) {
+						runBulk(form, action, ids, null);
 					}
 				});
+				return;
+			}
+			var risky = (action === 'approve' || action === 'ignore') ? riskyRows(ids) : [];
+			if (risky.length) {
+				var first = risky[0].querySelector('[data-wpcs-action="' + action + '"][data-wpcs-risk]');
+				api.confirmDialog({
+					title: tn(action === 'ignore' ? 'riskBulkSafe' : 'riskBulkAllow', risky.length, 'Allow %s risky items anyway?'),
+					verdict: risky.length === 1 && first ? first.getAttribute('data-risk-verdict') : api.sprintf(t('riskBulkVerdict', '%1$s of the %2$s selected items were flagged high or critical.'), api.number(risky.length), api.number(ids.length)),
+					text: first ? first.getAttribute('data-risk-text') : '',
+					confirm: action === 'ignore' ? t('riskSafeYes', 'Mark safe anyway') : t('riskAllowYes', 'Allow anyway'),
+					cancel: t('cancel', 'Cancel'),
+					tone: 'danger'
+				}).then(function (confirmed) {
+					if (confirmed) {
+						runBulk(form, action, ids, { risk_ok: 1 });
+					}
+				});
+				return;
+			}
+			runBulk(form, action, ids, null);
+		});
+	}
+
+	/* Selected rows flagged high or critical (Reports_Page sets data-risk). */
+	function riskyRows(ids) {
+		return ids
+			.map(function (id) {
+				return document.querySelector('tr[data-item-id="' + parseInt(id, 10) + '"]');
+			})
+			.filter(function (row) {
+				return row && (parseInt(row.getAttribute('data-risk'), 10) || 0) >= 2;
+			});
+	}
+
+	function runBulk(form, action, ids, extra) {
+		var select = form.querySelector('select[name="bulk_action"]');
+		var apply = form.querySelector('[name="wpcs_bulk_apply"]');
+		var rows = ids
+			.map(function (id) {
+				return document.querySelector('tr[data-item-id="' + parseInt(id, 10) + '"]');
+			})
+			.filter(Boolean);
+		rows.forEach(function (row) {
+			row.classList.add('is-busy');
+		});
+		if (apply) {
+			apply.disabled = true;
+		}
+
+		api.bulk(action, ids, extra)
+			.then(function (res) {
+				var failed = {};
+				(res.errors || []).forEach(function (msg) {
+					var m = /^#(\d+):/.exec(String(msg));
+					if (m) {
+						failed[m[1]] = true;
+					}
+				});
+				var status = NEXT_STATUS[action];
+				rows.forEach(function (row) {
+					var id = row.getAttribute('data-item-id');
+					if (failed[id]) {
+						row.classList.remove('is-busy');
+						return;
+					}
+					var held = heldAfter(action);
+					applyRowState(row, status, availableAfter(status), held);
+				});
+				toArray(document.querySelectorAll('.wpcs-items')).forEach(syncSelectAll);
+				updateMenuCounts(res.counts);
+
+				var done = parseInt(res.done, 10) || 0;
+				var errors = res.errors || [];
+				var msg = done ? tn('bulkDone', done, '%s items updated.') : '';
+				if (errors.length) {
+					msg += (msg ? ' ' : '') + tn('bulkFailed', errors.length, '%s items could not be changed:') + ' ' + errors.slice(0, 3).join(' ');
+					api.toast(msg, true);
+				} else {
+					api.toast(msg);
+				}
+				if (select) {
+					select.value = '';
+				}
+			})
+			.catch(function (err) {
+				rows.forEach(function (row) {
+					row.classList.remove('is-busy');
+				});
+				api.toast(err.message, true);
+			})
+			.then(function () {
+				if (apply) {
+					apply.disabled = false;
+				}
+			});
+	}
+
+	/* ---------------- Allow all clean images ---------------- */
+
+	function progressBox(anchor) {
+		var box = document.createElement('div');
+		box.className = 'wpcs-progress wpcs-clean-progress';
+		box.innerHTML = '<div class="wpcs-progress__track"><div class="wpcs-progress__bar"></div></div>'
+			+ '<div class="wpcs-progress__label"><span class="wpcs-progress__text" role="status" aria-live="polite"></span></div>';
+		anchor.parentNode.insertBefore(box, anchor.nextSibling);
+		return {
+			set: function (doneCount, total) {
+				var pct = total ? Math.round((doneCount / total) * 100) : 100;
+				box.querySelector('.wpcs-progress__bar').style.width = pct + '%';
+				box.querySelector('.wpcs-progress__text').textContent = api.sprintf(t('cleanProgress', '%1$s of %2$s images done'), api.number(doneCount), api.number(total));
+			}
+		};
+	}
+
+	function runClean(ids) {
+		var total = ids.length;
+		var queue = ids.slice();
+		var handled = 0;
+		var approved = 0;
+		var errors = [];
+		var toolbar = document.querySelector('.wpcs-toolbar') || document.querySelector('.wpcs-tabs');
+		var progress = progressBox(toolbar);
+		progress.set(0, total);
+
+		function next() {
+			if (!queue.length) {
+				return Promise.resolve();
+			}
+			var batch = queue.splice(0, 5);
+			return api.ajax('allow_clean', { ids: batch }).then(function (res) {
+				var left = res.remaining || [];
+				queue = left.concat(queue);
+				handled += batch.length - left.length;
+				approved += parseInt(res.done, 10) || 0;
+				errors = errors.concat(res.errors || []);
+				(res.approved || []).forEach(function (id) {
+					var row = document.querySelector('tr[data-item-id="' + parseInt(id, 10) + '"]');
+					if (row) {
+						applyRowState(row, 'approved', [], false);
+					}
+				});
+				updateMenuCounts(res.counts);
+				progress.set(handled, total);
+				return next();
+			});
+		}
+
+		return next().then(function () {
+			var msg = tn('cleanDone', approved, '%s images were allowed and added to the Media Library.');
+			if (errors.length) {
+				api.toast(msg + ' ' + tn('bulkFailed', errors.length, '%s items could not be changed:') + ' ' + errors.slice(0, 3).join(' '), true);
+			} else {
+				api.toast(msg);
+			}
+			// The list shows the rows that are left.
+			setTimeout(function () {
+				window.location.reload();
+			}, errors.length ? 6000 : 1800);
+		});
+	}
+
+	function bindAllowClean() {
+		document.addEventListener('click', function (e) {
+			var btn = e.target.closest('[data-wpcs-allow-clean]');
+			if (!btn) {
+				return;
+			}
+			e.preventDefault();
+			if (btn.disabled) {
+				return;
+			}
+			btn.disabled = true;
+			btn.setAttribute('aria-busy', 'true');
+			var finish = function () {
+				btn.disabled = false;
+				btn.removeAttribute('aria-busy');
+			};
+			api.ajax('clean_images')
+				.then(function (res) {
+					var ids = (res && res.ids) || [];
+					if (!ids.length) {
+						api.toast(t('cleanNone', 'No clean images are waiting. Images with findings, and files that are not verified JPEG, PNG, GIF or WebP images, are left for you to review one by one.'));
+						return null;
+					}
+					return api.confirmDialog({
+						title: tn('cleanTitle', ids.length, 'Allow %s clean images?'),
+						verdict: res.more ? t('cleanMore', 'Only the first part of a long list was checked; run it again for the rest.') : '',
+						text: t('cleanText', 'Only uploads with no findings whose content was verified as a JPEG, PNG, GIF or WebP image are included. Each one is added to the Media Library and its fingerprint is remembered, like a single Allow.'),
+						confirm: tn('cleanYes', ids.length, 'Allow %s images'),
+						cancel: t('cancel', 'Cancel'),
+						tone: 'ok'
+					}).then(function (confirmed) {
+						return confirmed ? runClean(ids) : null;
+					});
+				})
+				.catch(function (err) {
+					api.toast(err.message, true);
+				})
+				.then(finish);
 		});
 	}
 
@@ -450,6 +597,7 @@
 		bindSelection();
 		bindItemUpdates();
 		bindBulk();
+		bindAllowClean();
 		bindAutosubmit();
 		bindFreeze();
 		bindDashboardRefresh();

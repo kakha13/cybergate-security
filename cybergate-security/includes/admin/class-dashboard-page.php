@@ -722,11 +722,21 @@ class Dashboard_Page {
 			$this->prow( 'shield', $title, __( 'The guard module is not available.', 'cybergate-security' ), __( 'Unavailable', 'cybergate-security' ), 'muted' );
 			return;
 		}
+		$manager = Admin::service( 'guard_manager' );
+		if ( method_exists( $manager, 'maybe_reping' ) && ! $manager::request_can_tell() ) {
+			// This request cannot see the guard (development server): a short live test at most every 6 hours.
+			$manager->maybe_reping( 3 );
+		}
 		$status = Admin::call( 'guard_manager', 'status', array(), array() );
 		$status = is_array( $status ) ? $status : array();
+		$live   = method_exists( $manager, 'live_state' ) ? $manager->live_state( $status ) : array( 'state' => ! empty( $status['active'] ) ? 'active' : '' );
 
-		if ( ! empty( $status['active'] ) ) {
-			$this->prow( 'shield', $title, __( 'Holds uploads sent to any PHP script on the server, before WordPress loads.', 'cybergate-security' ), __( 'Active', 'cybergate-security' ), 'ok' );
+		if ( 'active' === $live['state'] || 'confirmed' === $live['state'] ) {
+			$desc = __( 'Holds uploads sent to any PHP script on the server, before WordPress loads.', 'cybergate-security' );
+			if ( 'confirmed' === $live['state'] ) {
+				$desc .= ' ' . __( 'This page cannot see it by itself, so the last live test tells.', 'cybergate-security' );
+			}
+			$this->prow( 'shield', $title, $desc, 'confirmed' === $live['state'] ? $live['label'] : __( 'Active', 'cybergate-security' ), 'ok' );
 		} elseif ( ! empty( $status['installed'] ) ) {
 			$desc = ! empty( $status['conflict'] )
 				/* translators: %s: file path */
@@ -767,6 +777,11 @@ class Dashboard_Page {
 		if ( in_array( $clam['state'], array( 'uploads', 'uploads_scans' ), true ) ) {
 			$badge = 'uploads_scans' === $clam['state'] ? __( 'Uploads and scans', 'cybergate-security' ) : __( 'Uploads', 'cybergate-security' );
 			$this->prow( 'sos', $title, implode( ' ', $parts ), $badge, 'ok' );
+			return;
+		}
+		if ( 'broken' === $clam['state'] || 'slow' === $clam['state'] ) {
+			// The self-test failed, or only a clamscan works that is too slow for uploads.
+			$this->prow( 'sos', $title, implode( ' ', $parts ) . ( ! empty( $clam['hint'] ) ? ' ' . $clam['hint'] . ( ! empty( $clam['hint_code'] ) ? ' ' . $clam['hint_code'] : '' ) : '' ), 'broken' === $clam['state'] ? __( 'Not working', 'cybergate-security' ) : __( 'Slow', 'cybergate-security' ), 'broken' === $clam['state'] ? 'high' : 'medium', $link );
 			return;
 		}
 		$this->prow( 'sos', $title, implode( ' ', $parts ) . ' ' . __( 'Optional: they know many more existing infections, but do not block attacks.', 'cybergate-security' ), 'blocked' === $clam['state'] ? __( 'Cannot run', 'cybergate-security' ) : ( ! empty( $clam['hidden'] ) ? __( 'Unknown', 'cybergate-security' ) : __( 'Not installed', 'cybergate-security' ) ), 'muted', $link );

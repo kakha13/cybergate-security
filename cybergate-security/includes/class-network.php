@@ -40,6 +40,42 @@ class Network {
 	/** Table suffixes the plugin owns. */
 	const TABLES = array( 'items', 'manifest', 'allowlist', 'log' );
 
+	/**
+	 * Small state options read on most admin requests. On a single site they
+	 * are always autoloaded (update_option() / add_option() here force it, and
+	 * Installer::autoload_state_options() fixes rows written by older
+	 * versions), and the ones that do not exist are marked missing in the
+	 * request cache from the autoloaded set (prime()), so neither a value nor
+	 * a missing option costs a query. On multisite they are read from the
+	 * network options table in one query (prime()). Write them only through
+	 * this class.
+	 */
+	const STATE_OPTIONS = array(
+		'wpcybersec_guard_installed',
+		'wpcybersec_guard_chain',
+		'wpcybersec_front_root',
+		'wpcybersec_data_dir',
+		'wpcybersec_data_fallback',
+		'wpcybersec_data_move',
+		'wpcybersec_storage_status',
+		'wpcybersec_activation_redirect',
+		'wpcybersec_counts',
+	);
+
+	/** Single sites: autoloaded once the state options were made autoloaded (Installer). */
+	const AUTOLOAD_FLAG = 'wpcybersec_autoload_v';
+
+	/** Network options read on most admin requests besides STATE_OPTIONS (multisite priming only). */
+	const NETWORK_PRIME = array(
+		'wpcybersec_settings',
+		'wpcybersec_db_version',
+		'wpcybersec_autoload_v',
+		self::MIGRATION_OPTION,
+	);
+
+	/** @var bool Whether prime() ran in this request. */
+	private static $primed = false;
+
 	/** @var string[]|null Per-request cache of home_paths(). */
 	private static $home_paths = null;
 
@@ -62,18 +98,115 @@ class Network {
 	 * @return mixed
 	 */
 	public static function get_option( $name, $default = false ) {
+		if ( ! self::$primed ) {
+			self::prime();
+		}
 		return self::active() ? get_site_option( $name, $default ) : get_option( $name, $default );
+	}
+
+	/**
+	 * Loads the state options into the request cache once, so reading them
+	 * costs no query on a single site and one query on multisite.
+	 *
+	 * Single site: every row of STATE_OPTIONS is autoloaded (once AUTOLOAD_FLAG
+	 * says the rows of older versions were fixed), so a name missing from the
+	 * autoloaded set does not exist; it goes into core's "notoptions" cache like
+	 * after a failed lookup. Skipped with a persistent object cache, which
+	 * already remembers missing options between requests (and could be changed
+	 * by another request meanwhile).
+	 *
+	 * Multisite: one query for STATE_OPTIONS and NETWORK_PRIME
+	 * (wp_prime_network_option_caches() on WordPress 6.6+, the same query here
+	 * on older versions).
+	 */
+	public static function prime() {
+		if ( self::$primed ) {
+			return;
+		}
+		self::$primed = true;
+		if ( ! function_exists( 'wp_cache_get' ) || ( function_exists( 'wp_installing' ) && wp_installing() ) ) {
+			return;
+		}
+		if ( self::active() ) {
+			self::prime_network( array_merge( self::STATE_OPTIONS, self::NETWORK_PRIME ) );
+			return;
+		}
+		if ( wp_using_ext_object_cache() || ! function_exists( 'wp_load_alloptions' ) ) {
+			return;
+		}
+		$all = wp_load_alloptions();
+		if ( ! is_array( $all ) || ! isset( $all[ self::AUTOLOAD_FLAG ] ) ) {
+			return; // Rows of an older version may still be stored without autoload.
+		}
+		$notoptions = wp_cache_get( 'notoptions', 'options' );
+		$notoptions = is_array( $notoptions ) ? $notoptions : array();
+		$changed    = false;
+		foreach ( self::STATE_OPTIONS as $name ) {
+			if ( ! isset( $all[ $name ] ) && ! isset( $notoptions[ $name ] ) && false === wp_cache_get( $name, 'options' ) ) {
+				$notoptions[ $name ] = true;
+				$changed             = true;
+			}
+		}
+		if ( $changed ) {
+			wp_cache_set( 'notoptions', $notoptions, 'options' );
+		}
+	}
+
+	/**
+	 * Multisite: reads network options into the request cache in one query.
+	 *
+	 * @param string[] $names Option names.
+	 */
+	private static function prime_network( array $names ) {
+		$network = function_exists( 'get_current_network_id' ) ? (int) get_current_network_id() : 1;
+		if ( function_exists( 'wp_prime_network_option_caches' ) ) {
+			wp_prime_network_option_caches( $network, $names );
+			return;
+		}
+		if ( wp_using_ext_object_cache() ) {
+			return; // The persistent cache keeps values and misses between requests.
+		}
+		global $wpdb;
+		$keys = array();
+		foreach ( $names as $name ) {
+			if ( false === wp_cache_get( $network . ':' . $name, 'site-options' ) ) {
+				$keys[] = $name;
+			}
+		}
+		$notoptions = wp_cache_get( $network . ':notoptions', 'site-options' );
+		$notoptions = is_array( $notoptions ) ? $notoptions : array();
+		$keys       = array_values( array_diff( $keys, array_keys( $notoptions ) ) );
+		if ( ! $keys || empty( $wpdb->sitemeta ) ) {
+			return;
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- core sitemeta table, one placeholder per name; WordPress 6.0-6.5 have no wp_prime_network_option_caches().
+		$rows  = (array) $wpdb->get_results( $wpdb->prepare( "SELECT meta_key, meta_value FROM {$wpdb->sitemeta} WHERE site_id = %d AND meta_key IN (" . implode( ',', array_fill( 0, count( $keys ), '%s' ) ) . ')', array_merge( array( $network ), $keys ) ) );
+		$found = array();
+		foreach ( $rows as $row ) {
+			$found[ (string) $row->meta_key ] = true;
+			wp_cache_set( $network . ':' . $row->meta_key, maybe_unserialize( $row->meta_value ), 'site-options' );
+		}
+		foreach ( $keys as $key ) {
+			if ( ! isset( $found[ $key ] ) ) {
+				$notoptions[ $key ] = true;
+			}
+		}
+		wp_cache_set( $network . ':notoptions', $notoptions, 'site-options' );
 	}
 
 	/**
 	 * @param string    $name     Option name.
 	 * @param mixed     $value    Value.
 	 * @param bool|null $autoload Autoload on a single site (network options have no autoload flag).
+	 *                            Always on for STATE_OPTIONS.
 	 * @return bool
 	 */
 	public static function update_option( $name, $value, $autoload = null ) {
 		if ( self::active() ) {
 			return update_site_option( $name, $value );
+		}
+		if ( in_array( $name, self::STATE_OPTIONS, true ) ) {
+			$autoload = true;
 		}
 		return null === $autoload ? update_option( $name, $value ) : update_option( $name, $value, $autoload );
 	}
@@ -94,6 +227,9 @@ class Network {
 		if ( self::active() ) {
 			return add_site_option( $name, $value );
 		}
+		if ( in_array( $name, self::STATE_OPTIONS, true ) ) {
+			$autoload = true;
+		}
 		return add_option( $name, $value, '', $autoload );
 	}
 
@@ -102,7 +238,18 @@ class Network {
 	 * @return bool
 	 */
 	public static function delete_option( $name ) {
-		return self::active() ? delete_site_option( $name ) : delete_option( $name );
+		if ( self::active() ) {
+			return delete_site_option( $name );
+		}
+		$deleted = delete_option( $name );
+		if ( $deleted && in_array( $name, self::STATE_OPTIONS, true ) && ! wp_using_ext_object_cache() ) {
+			// Core does not remember the deletion: the next read in this request would query.
+			$notoptions          = wp_cache_get( 'notoptions', 'options' );
+			$notoptions          = is_array( $notoptions ) ? $notoptions : array();
+			$notoptions[ $name ] = true;
+			wp_cache_set( 'notoptions', $notoptions, 'options' );
+		}
+		return $deleted;
 	}
 
 	/**
@@ -548,7 +695,7 @@ class Network {
 	 * @return bool
 	 */
 	public static function migration_pending() {
-		return self::active() && 'done' !== get_site_option( self::MIGRATION_OPTION, '' );
+		return self::active() && 'done' !== self::get_option( self::MIGRATION_OPTION, '' );
 	}
 
 	/**
@@ -726,6 +873,9 @@ class Network {
 					}
 				}
 			} while ( count( $rows ) >= 500 );
+			if ( $counts['items'] ) {
+				Store::flush_counts();
+			}
 		}
 		foreach ( $old as $table ) {
 			$wpdb->query( "DROP TABLE IF EXISTS {$table}" );

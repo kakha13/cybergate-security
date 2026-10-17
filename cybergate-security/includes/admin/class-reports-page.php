@@ -468,6 +468,10 @@ class Reports_Page {
 			}
 			echo '</select> <button type="submit" class="button" name="wpcs_bulk_apply" value="1">' . esc_html__( 'Apply', 'cybergate-security' ) . '</button>';
 		}
+		if ( 'pending' === $this->tab && $total > 0 && in_array( $this->filters['type'], array( '', Store::TYPE_UPLOAD ), true ) ) {
+			// Busy sites: approve every held photo without findings in one go (admin.js, AJAX clean_images + allow_clean).
+			echo ' <button type="button" class="button wpcs-allow-clean" data-wpcs-allow-clean title="' . esc_attr__( 'Allow every waiting upload that is a verified JPEG, PNG, GIF or WebP image with no findings, and add it to the Media Library', 'cybergate-security' ) . '"><span class="dashicons dashicons-format-gallery" aria-hidden="true"></span> ' . esc_html__( 'Allow all clean images', 'cybergate-security' ) . '</button>';
+		}
 		echo '</form>';
 
 		echo '<form class="wpcs-filters" method="get" action="' . esc_url( Admin::admin_page_base() ) . '">';
@@ -586,7 +590,7 @@ class Reports_Page {
 		if ( ! $available ) {
 			$classes[] = 'is-done';
 		}
-		echo '<tr class="' . esc_attr( implode( ' ', $classes ) ) . '" data-item-id="' . esc_attr( (string) $id ) . '" data-type="' . esc_attr( $type ) . '" data-held="' . ( $held ? '1' : '0' ) . '">';
+		echo '<tr class="' . esc_attr( implode( ' ', $classes ) ) . '" data-item-id="' . esc_attr( (string) $id ) . '" data-type="' . esc_attr( $type ) . '" data-held="' . ( $held ? '1' : '0' ) . '" data-risk="' . esc_attr( (string) ( Admin::needs_risk_confirm( $item ) ? Admin::risk_level( $item ) : 0 ) ) . '">';
 
 		// Checkbox.
 		echo '<th scope="row" class="wpcs-cb-cell"><input type="checkbox" class="wpcs-cb-item" name="ids[]" value="' . esc_attr( (string) $id ) . '" form="' . esc_attr( self::FORM_ID ) . '"'
@@ -854,7 +858,99 @@ class Reports_Page {
 		list( $who, $context ) = $this->source_parts( $item, $details );
 		$html .= '<span class="wpcs-sub wpcs-narrow-when">' . esc_html( Admin::ago( Admin::utc_ts( $item['created_at'] ) ) ) . '</span>';
 		$html .= '<span class="wpcs-sub wpcs-narrow-source">' . esc_html( $who . ', ' . $context ) . '</span>';
+
+		$thumb = $this->thumb_html( $item );
+		if ( '' !== $thumb ) {
+			$html = '<div class="wpcs-item-media">' . $thumb . '<div class="wpcs-item-media__body">' . $html . '</div></div>';
+		}
 		return $html;
+	}
+
+	/**
+	 * Upload_Gate::image_preview() of an item ({ ok: false } when unavailable).
+	 *
+	 * @param array $item Item.
+	 * @return array
+	 */
+	private function preview( array $item ) {
+		if ( Store::TYPE_UPLOAD !== $item['type'] ) {
+			return array(
+				'ok'     => false,
+				'reason' => 'not_image',
+			);
+		}
+		$preview = Admin::call( 'upload_gate', 'image_preview', array( $item ), null );
+		return is_array( $preview ) ? $preview : array(
+			'ok'     => false,
+			'reason' => 'not_image',
+		);
+	}
+
+	/**
+	 * Small fixed-size thumbnail of a held image upload (lazy loaded from
+	 * Admin::handle_preview()), or a placeholder when the upload was flagged
+	 * high or critical or its content is not the image its name says.
+	 *
+	 * @param array $item Item.
+	 * @return string HTML ('' for anything that is not an image upload with a held copy).
+	 */
+	private function thumb_html( array $item ) {
+		$preview = $this->preview( $item );
+		if ( ! empty( $preview['ok'] ) ) {
+			return '<img class="wpcs-thumb" src="' . esc_url( Admin::preview_url( (int) $item['id'] ) ) . '" width="48" height="48" loading="lazy" decoding="async" alt="">';
+		}
+		$reason = isset( $preview['reason'] ) ? (string) $preview['reason'] : '';
+		if ( 'risky' === $reason ) {
+			$label = __( 'No preview for risky files', 'cybergate-security' );
+			$icon  = 'hidden';
+		} elseif ( 'mismatch' === $reason ) {
+			$label = __( 'No preview: the content is not a valid image of this type', 'cybergate-security' );
+			$icon  = 'warning';
+		} else {
+			return '';
+		}
+		return '<span class="wpcs-thumb wpcs-thumb--none" role="img" aria-label="' . esc_attr( $label ) . '" title="' . esc_attr( $label ) . '"><span class="dashicons dashicons-' . esc_attr( $icon ) . '" aria-hidden="true"></span></span>';
+	}
+
+	/**
+	 * Larger preview in the expanded details of an image upload.
+	 *
+	 * @param array $item Item.
+	 * @return string HTML ('' when there is nothing to show).
+	 */
+	private function preview_html( array $item ) {
+		$preview = $this->preview( $item );
+		$reason  = isset( $preview['reason'] ) ? (string) $preview['reason'] : '';
+		if ( empty( $preview['ok'] ) ) {
+			if ( 'risky' !== $reason && 'mismatch' !== $reason ) {
+				return '';
+			}
+			$text = 'risky' === $reason
+				? __( 'No preview for risky files. A file flagged high or critical, or held under a name the server could run, is never shown in the browser. Download it to inspect it in a safe place.', 'cybergate-security' )
+				: __( 'No preview: the content is not a valid image of the type its name says. Download it to inspect it in a safe place.', 'cybergate-security' );
+			return '<div class="wpcs-preview wpcs-preview--none"><span class="dashicons dashicons-' . esc_attr( 'risky' === $reason ? 'hidden' : 'warning' ) . '" aria-hidden="true"></span><p>' . esc_html( $text ) . '</p></div>';
+		}
+		$w     = max( 1, (int) $preview['width'] );
+		$h     = max( 1, (int) $preview['height'] );
+		$scale = min( 1, 360 / $w, 270 / $h );
+		$dw    = max( 1, (int) round( $w * $scale ) );
+		$dh    = max( 1, (int) round( $h * $scale ) );
+		$url   = Admin::preview_url( (int) $item['id'] );
+		$name  = wp_basename( (string) $item['path'] );
+		return '<figure class="wpcs-preview">'
+			/* translators: %s: file name */
+			. '<a href="' . esc_url( $url ) . '" target="_blank" rel="noopener noreferrer" aria-label="' . esc_attr( sprintf( __( 'Open the full preview of %s in a new tab', 'cybergate-security' ), $name ) ) . '">'
+			/* translators: %s: file name */
+			. '<img src="' . esc_url( $url ) . '" width="' . esc_attr( (string) $dw ) . '" height="' . esc_attr( (string) $dh ) . '" loading="lazy" decoding="async" alt="' . esc_attr( sprintf( __( 'Preview of %s', 'cybergate-security' ), $name ) ) . '"></a>'
+			. '<figcaption>' . esc_html(
+				sprintf(
+					/* translators: 1: width in pixels, 2: height in pixels, 3: image type such as image/jpeg */
+					__( '%1$s x %2$s pixels, %3$s (content verified)', 'cybergate-security' ),
+					number_format_i18n( $w ),
+					number_format_i18n( $h ),
+					(string) $preview['mime']
+				)
+			) . '</figcaption></figure>';
 	}
 
 	/**
@@ -1144,13 +1240,39 @@ class Reports_Page {
 			/* translators: %s: file name */
 			: sprintf( __( 'Delete %s from the server permanently? This cannot be undone.', 'cybergate-security' ), $name );
 
-		$html = '<div class="wpcs-actions">';
+		// Flagged high or critical: the safe decision (deny, quarantine, or the
+		// official copy of a critical file) comes first as the primary button;
+		// Allow and Mark safe become plain buttons that ask before acting.
+		$risky   = Admin::needs_risk_confirm( $item );
+		$primary = '';
+		if ( $risky ) {
+			foreach ( array( 'deny', 'quarantine', 'restore_official' ) as $safe ) {
+				if ( in_array( $safe, $set, true ) && in_array( $safe, $available, true ) ) {
+					$primary = $safe;
+					break;
+				}
+			}
+			if ( '' !== $primary ) {
+				$set = array_values( array_merge( array( $primary ), array_diff( $set, array( $primary ) ) ) );
+			}
+			$labels['approve'][2] = '';
+			$labels['ignore'][2]  = '';
+		}
+
+		$html = '<div class="wpcs-actions' . ( $risky ? ' wpcs-actions--risky' : '' ) . '">';
 		foreach ( $set as $action ) {
 			$label   = $labels[ $action ];
-			$classes = 'button button-small wpcs-act wpcs-act--' . $action . ( $label[2] ? ' ' . $label[2] : '' ) . ( in_array( $action, $available, true ) ? '' : ' wpcs-hidden' );
+			$classes = 'button button-small wpcs-act wpcs-act--' . $action . ( $label[2] ? ' ' . $label[2] : '' ) . ( $action === $primary ? ' wpcs-btn-block' : '' ) . ( in_array( $action, $available, true ) ? '' : ' wpcs-hidden' );
+			$ask     = $risky && in_array( $action, array( 'approve', 'ignore' ), true );
+			$confirm = $ask ? Admin::risk_confirm_text( $item, $action ) : array();
 			$html   .= '<button type="submit" form="' . esc_attr( self::FORM_ID ) . '" name="wpcs_single" value="' . esc_attr( $action . ':' . $id ) . '"'
 				. ' class="' . esc_attr( $classes ) . '" data-wpcs-action="' . esc_attr( $action ) . '" data-id="' . esc_attr( (string) $id ) . '"'
 				. ' title="' . esc_attr( $titles[ $action ] ) . '"'
+				. ( $ask
+					? ' data-wpcs-risk="' . esc_attr( (string) Admin::risk_level( $item ) ) . '" data-risk-title="' . esc_attr( $confirm['title'] ) . '"'
+						. ' data-risk-verdict="' . esc_attr( $confirm['verdict'] ) . '" data-risk-text="' . esc_attr( $confirm['text'] ) . '"'
+						. ' data-risk-confirm="' . esc_attr( $confirm['confirm'] ) . '" data-risk-cancel="' . esc_attr__( 'Cancel', 'cybergate-security' ) . '"'
+					: '' )
 				. ( 'delete' === $action ? ' data-confirm="' . esc_attr( $confirm_delete ) . '"' : '' )
 				/* translators: %s: file name */
 				. ( 'restore_official' === $action ? ' data-confirm="' . esc_attr( sprintf( __( 'Replace %s with the official WordPress file? The current version is kept as a copy, so the changes can still be viewed.', 'cybergate-security' ), $name ) ) . '"' : '' )
@@ -1239,6 +1361,8 @@ class Reports_Page {
 		$name = basename( (string) $item['path'] );
 
 		echo '<div class="wpcs-details">';
+
+		echo $this->preview_html( $item ); // phpcs:ignore WordPress.Security.EscapeOutput -- built with escaping.
 
 		$button = Diff::view_button( $item, $this->has_held_copy( $item ) );
 		if ( $button ) {

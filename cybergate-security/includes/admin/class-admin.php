@@ -50,6 +50,9 @@ class Admin {
 	const META_DISMISS_PENDING = 'wpcybersec_dismiss_pending';
 	const META_DISMISS_STORAGE = 'wpcybersec_dismiss_storage';
 
+	/** User meta: result of the "Move the data" button, shown once on the next page. */
+	const META_STORAGE_MOVE = 'wpcybersec_storage_move';
+
 	/** @var array|null Per-request cache of Store::counts(). */
 	private static $counts = null;
 
@@ -110,6 +113,7 @@ class Admin {
 		add_filter( 'removable_query_args', array( $this, 'removable_query_args' ) );
 
 		add_action( 'admin_post_wpcybersec_download', array( $this, 'handle_download' ) );
+		add_action( 'admin_post_wpcybersec_preview', array( $this, 'handle_preview' ) );
 		add_action( 'admin_post_wpcybersec_allowlist_remove', array( $this, 'handle_allowlist_remove' ) );
 		add_action( 'admin_post_wpcybersec_reports_bulk', array( $this, 'handle_reports_bulk' ) );
 		add_action( 'admin_post_wpcybersec_dismiss_notice', array( $this, 'handle_dismiss_notice' ) );
@@ -342,6 +346,31 @@ class Admin {
 					'refreshing'     => __( 'Scan finished. Refreshing the dashboard...', 'cybergate-security' ),
 					/* translators: %s: number of items */
 					'menuCount'      => __( '%s items need your review', 'cybergate-security' ),
+					'cancel'           => __( 'Cancel', 'cybergate-security' ),
+					'riskAllowYes'     => __( 'Allow anyway', 'cybergate-security' ),
+					'riskSafeYes'      => __( 'Mark safe anyway', 'cybergate-security' ),
+					'riskBulkAllowOne' => __( 'Allow 1 risky item anyway?', 'cybergate-security' ),
+					/* translators: %s: number of items */
+					'riskBulkAllow'    => __( 'Allow %s risky items anyway?', 'cybergate-security' ),
+					'riskBulkSafeOne'  => __( 'Mark 1 risky item as safe anyway?', 'cybergate-security' ),
+					/* translators: %s: number of items */
+					'riskBulkSafe'     => __( 'Mark %s risky items as safe anyway?', 'cybergate-security' ),
+					/* translators: 1: number of risky items, 2: number of selected items */
+					'riskBulkVerdict'  => __( '%1$s of the %2$s selected items were flagged high or critical.', 'cybergate-security' ),
+					'cleanTitleOne'    => __( 'Allow 1 clean image?', 'cybergate-security' ),
+					/* translators: %s: number of images */
+					'cleanTitle'       => __( 'Allow %s clean images?', 'cybergate-security' ),
+					'cleanYesOne'      => __( 'Allow 1 image', 'cybergate-security' ),
+					/* translators: %s: number of images */
+					'cleanYes'         => __( 'Allow %s images', 'cybergate-security' ),
+					'cleanText'        => __( 'Only uploads with no findings whose content was verified as a JPEG, PNG, GIF or WebP image are included. Each one is added to the Media Library and its fingerprint is remembered, like a single Allow.', 'cybergate-security' ),
+					'cleanMore'        => __( 'This is the first part of a long list; run it again afterwards for the rest.', 'cybergate-security' ),
+					'cleanNone'        => __( 'No clean images are waiting. Images with findings, and files that are not verified JPEG, PNG, GIF or WebP images, are left for you to review one by one.', 'cybergate-security' ),
+					/* translators: 1: images done, 2: images in total */
+					'cleanProgress'    => __( '%1$s of %2$s images done', 'cybergate-security' ),
+					'cleanDoneOne'     => __( '1 image was allowed and added to the Media Library.', 'cybergate-security' ),
+					/* translators: %s: number of images */
+					'cleanDone'        => __( '%s images were allowed and added to the Media Library.', 'cybergate-security' ),
 				),
 			)
 		);
@@ -797,9 +826,12 @@ class Admin {
 			return;
 		}
 		$user_id = get_current_user_id();
-		$result  = get_transient( 'wpcybersec_storage_move_' . $user_id );
+		// User meta of the current user is already in the request cache (a transient cost a query on every page).
+		$result = get_user_meta( $user_id, self::META_STORAGE_MOVE, true );
 		if ( is_array( $result ) && isset( $result['ok'], $result['message'] ) ) {
-			delete_transient( 'wpcybersec_storage_move_' . $user_id );
+			delete_user_meta( $user_id, self::META_STORAGE_MOVE );
+		}
+		if ( is_array( $result ) && isset( $result['ok'], $result['message'] ) && ( empty( $result['until'] ) || (int) $result['until'] > time() ) ) {
 			echo '<div class="notice ' . esc_attr( $result['ok'] ? 'notice-success' : 'notice-error' ) . ' is-dismissible wpcs-admin-notice"><p>' . esc_html( (string) $result['message'] ) . '</p></div>';
 		}
 		try {
@@ -869,13 +901,14 @@ class Admin {
 			}
 			\WPCyberSecurity\Storage::reset();
 		}
-		set_transient(
-			'wpcybersec_storage_move_' . get_current_user_id(),
+		update_user_meta(
+			get_current_user_id(),
+			self::META_STORAGE_MOVE,
 			array(
 				'ok'      => ! is_wp_error( $result ),
 				'message' => is_wp_error( $result ) ? $result->get_error_message() : ( is_string( $result ) ? $result : __( 'Moved.', 'cybergate-security' ) ),
-			),
-			5 * MINUTE_IN_SECONDS
+				'until'   => time() + 5 * MINUTE_IN_SECONDS,
+			)
 		);
 		$this->redirect_back( self::page_url( self::PAGE_DASHBOARD ), array() );
 	}
@@ -958,21 +991,8 @@ class Admin {
 	 * @return int
 	 */
 	private static function newest_open_item_id() {
-		$result = self::call(
-			'store',
-			'items_query',
-			array(
-				array(
-					'type'     => array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL, Store::TYPE_FILE, Store::TYPE_THREAT, Store::TYPE_USER ),
-					'status'   => Store::STATUS_PENDING,
-					'orderby'  => 'id',
-					'order'    => 'DESC',
-					'per_page' => 1,
-				),
-			),
-			array()
-		);
-		return ! empty( $result['rows'][0]['id'] ) ? (int) $result['rows'][0]['id'] : 0;
+		// Cached with the counts (Store::counts()), so the notice costs no query.
+		return (int) self::call( 'store', 'newest_open_id', array(), 0 );
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -1146,6 +1166,170 @@ class Admin {
 	}
 
 	/**
+	 * Address of the image preview of a held upload (admin-post with a nonce
+	 * bound to the item and the user's session).
+	 *
+	 * @param int $id Item id.
+	 * @return string Unescaped URL.
+	 */
+	public static function preview_url( $id ) {
+		$id = (int) $id;
+		return wp_nonce_url(
+			add_query_arg(
+				array(
+					'action' => 'wpcybersec_preview',
+					'id'     => $id,
+				),
+				admin_url( 'admin-post.php' )
+			),
+			'wpcybersec_preview_' . $id
+		);
+	}
+
+	/**
+	 * Streams the held copy of an upload as an image, for the thumbnails and
+	 * the preview on the Reports page. Only after Upload_Gate::image_preview()
+	 * verified that the copy really is the raster image its name says
+	 * (getimagesize() and finfo), and never for uploads flagged high or
+	 * critical. The response cannot run anything even if a browser tried to
+	 * read it as a document: nosniff, a sandbox CSP that allows nothing, and
+	 * an inline image disposition.
+	 */
+	public function handle_preview() {
+		// phpcs:disable WordPress.Security.NonceVerification.Recommended -- verified right below.
+		$id    = isset( $_GET['id'] ) ? absint( wp_unslash( $_GET['id'] ) ) : 0;
+		$nonce = isset( $_GET['_wpnonce'] ) ? sanitize_key( wp_unslash( $_GET['_wpnonce'] ) ) : '';
+		// phpcs:enable
+		if ( ! self::can() || ! $id || ! wp_verify_nonce( $nonce, 'wpcybersec_preview_' . $id ) ) {
+			self::preview_refused( 403 );
+		}
+		$item = self::call( 'store', 'item_get', array( $id ) );
+		$gate = self::service( 'upload_gate' );
+		if ( ! is_array( $item ) || ! is_object( $gate ) || ! method_exists( $gate, 'image_preview' ) ) {
+			self::preview_refused( 404 );
+		}
+		$preview = $gate->image_preview( $item );
+		if ( empty( $preview['ok'] ) ) {
+			self::preview_refused( 'missing' === $preview['reason'] ? 404 : 403 );
+		}
+		$size = @filesize( $preview['path'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( false === $size ) {
+			self::preview_refused( 404 );
+		}
+		foreach ( array( 'Expires', 'Pragma', 'Last-Modified' ) as $header ) {
+			header_remove( $header );
+		}
+		header( 'Content-Type: ' . $preview['mime'] );
+		header( 'Content-Length: ' . (int) $size );
+		header( 'Content-Disposition: inline; filename="preview.' . $preview['ext'] . '"' );
+		header( 'X-Content-Type-Options: nosniff' );
+		header( "Content-Security-Policy: default-src 'none'; sandbox" );
+		header( 'Cross-Origin-Resource-Policy: same-origin' );
+		header( 'Cache-Control: private, max-age=600' );
+		header( 'Referrer-Policy: no-referrer' );
+		readfile( $preview['path'] ); // phpcs:ignore WordPress.WP.AlternativeFunctions -- streams a verified image from the quarantine folder.
+		exit;
+	}
+
+	/**
+	 * Ends a refused preview request without an HTML page (it is loaded as an image).
+	 *
+	 * @param int $code HTTP status.
+	 */
+	private static function preview_refused( $code ) {
+		status_header( (int) $code );
+		header( 'Content-Type: text/plain; charset=utf-8' );
+		header( 'X-Content-Type-Options: nosniff' );
+		header( 'Cache-Control: no-store, private' );
+		exit;
+	}
+
+	/**
+	 * Highest severity of an item (its own or its worst match).
+	 *
+	 * @param array $item Item.
+	 * @return int 0-3.
+	 */
+	public static function risk_level( array $item ) {
+		return \WPCyberSecurity\Upload_Gate::risk_level( $item );
+	}
+
+	/**
+	 * Whether allowing (or marking safe) this item must be confirmed first:
+	 * flagged high or critical. Administrator accounts have their own
+	 * decision (trust the account) and are not covered.
+	 *
+	 * @param array $item Item.
+	 * @return bool
+	 */
+	public static function needs_risk_confirm( array $item ) {
+		return isset( $item['type'] ) && Store::TYPE_USER !== $item['type'] && self::risk_level( $item ) >= Store::SEV_HIGH;
+	}
+
+	/**
+	 * Name of the worst finding of an item ("PHP code hidden in an image file").
+	 *
+	 * @param array $item Item.
+	 * @return string
+	 */
+	public static function risk_verdict( array $item ) {
+		$best  = '';
+		$level = -1;
+		$hits  = isset( $item['details']['hits'] ) && is_array( $item['details']['hits'] ) ? $item['details']['hits'] : array();
+		foreach ( $hits as $hit ) {
+			if ( ! is_array( $hit ) ) {
+				continue;
+			}
+			$sev = isset( $hit['severity'] ) ? (int) $hit['severity'] : 0;
+			if ( $sev > $level ) {
+				$level = $sev;
+				$best  = ! empty( $hit['title'] ) ? (string) $hit['title'] : ( ! empty( $hit['sig'] ) ? (string) $hit['sig'] : '' );
+			}
+		}
+		if ( '' !== $best ) {
+			return $best;
+		}
+		$checksum = isset( $item['details']['checksum'] ) ? (string) $item['details']['checksum'] : '';
+		if ( 'mismatch' === $checksum ) {
+			return __( 'Differs from the official WordPress.org file', 'cybergate-security' );
+		}
+		return __( 'Flagged by the scanner', 'cybergate-security' );
+	}
+
+	/**
+	 * Text of the confirmation before allowing (or marking safe) a risky item.
+	 *
+	 * @param array  $item   Item.
+	 * @param string $action approve | ignore.
+	 * @return array { title, verdict, text, confirm }
+	 */
+	public static function risk_confirm_text( array $item, $action = 'approve' ) {
+		$name    = Store::TYPE_INSTALL === $item['type'] && ! empty( $item['details']['name'] ) ? (string) $item['details']['name'] : wp_basename( (string) $item['path'] );
+		$verdict = sprintf(
+			/* translators: 1: severity (Critical, High), 2: finding, e.g. "PHP code hidden in an image file" */
+			__( '%1$s: %2$s', 'cybergate-security' ),
+			Store::severity_label( self::risk_level( $item ) ),
+			self::risk_verdict( $item )
+		);
+		if ( 'ignore' === $action ) {
+			return array(
+				/* translators: %s: file name */
+				'title'   => sprintf( __( 'Mark %s as safe anyway?', 'cybergate-security' ), $name ),
+				'verdict' => $verdict,
+				'text'    => __( 'Marking it safe remembers its SHA-256 fingerprint for good: this exact content is never reported again. Only continue if you know it and are sure the finding is a false positive.', 'cybergate-security' ),
+				'confirm' => __( 'Mark safe anyway', 'cybergate-security' ),
+			);
+		}
+		return array(
+			/* translators: %s: file name */
+			'title'   => sprintf( __( 'Allow %s anyway?', 'cybergate-security' ), $name ),
+			'verdict' => $verdict,
+			'text'    => __( 'Allowing it remembers its SHA-256 fingerprint for good: this exact file is never held or reported again, wherever it appears on the site. Only continue if you know the file and trust where it came from.', 'cybergate-security' ),
+			'confirm' => __( 'Allow anyway', 'cybergate-security' ),
+		);
+	}
+
+	/**
 	 * Removes one allowlist entry.
 	 */
 	public function handle_allowlist_remove() {
@@ -1192,6 +1376,16 @@ class Admin {
 			$this->redirect_back( $fallback, array( 'wpcs_msg' => 'no_items' ) );
 		}
 
+		// Allowing something flagged high or critical is confirmed first (the
+		// Reports page asks in a dialog; without JavaScript this page asks).
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified above.
+		if ( in_array( $action, array( 'approve', 'ignore' ), true ) && empty( $_POST['wpcs_risk_ok'] ) ) {
+			$risky = self::risky_items( $ids );
+			if ( $risky ) {
+				$this->confirm_risky_page( $action, $ids, $risky, $tab );
+			}
+		}
+
 		$result = self::call( 'decisions', 'bulk', array( $action, $ids ), null );
 		if ( ! is_array( $result ) ) {
 			$this->redirect_back( $fallback, array( 'wpcs_msg' => 'failed' ) );
@@ -1208,6 +1402,59 @@ class Admin {
 				'wpcs_failed' => count( $errors ),
 			)
 		);
+	}
+
+	/**
+	 * Items among $ids that need a confirmation before they are allowed.
+	 *
+	 * @param int[] $ids Item ids.
+	 * @return array[] Items.
+	 */
+	public static function risky_items( array $ids ) {
+		$out = array();
+		foreach ( array_slice( array_values( array_unique( array_map( 'intval', $ids ) ) ), 0, 500 ) as $id ) {
+			$item = $id > 0 ? self::call( 'store', 'item_get', array( $id ) ) : null;
+			if ( is_array( $item ) && self::needs_risk_confirm( $item ) ) {
+				$out[] = $item;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Confirmation page of the no-JavaScript path before allowing items that
+	 * were flagged high or critical. Posts the same request again with
+	 * wpcs_risk_ok, or goes back.
+	 *
+	 * @param string  $action approve | ignore.
+	 * @param int[]   $ids    Every selected id.
+	 * @param array[] $risky  The risky items among them.
+	 * @param string  $tab    Reports tab to return to.
+	 */
+	private function confirm_risky_page( $action, array $ids, array $risky, $tab ) {
+		$first = self::risk_confirm_text( $risky[0], $action );
+		$html  = '<h1>' . esc_html( 1 === count( $risky ) ? $first['title'] : sprintf(
+			/* translators: %s: number of items */
+			'ignore' === $action ? __( 'Mark %s risky items as safe anyway?', 'cybergate-security' ) : __( 'Allow %s risky items anyway?', 'cybergate-security' ),
+			number_format_i18n( count( $risky ) )
+		) ) . '</h1><ul>';
+		foreach ( array_slice( $risky, 0, 20 ) as $item ) {
+			$text  = self::risk_confirm_text( $item, $action );
+			$html .= '<li><strong>' . esc_html( wp_basename( (string) $item['path'] ) ) . '</strong>: ' . esc_html( $text['verdict'] ) . '</li>';
+		}
+		$html .= '</ul><p>' . esc_html( $first['text'] ) . '</p>';
+		$html .= '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '">';
+		$html .= '<input type="hidden" name="action" value="wpcybersec_reports_bulk">';
+		$html .= '<input type="hidden" name="_wpnonce" value="' . esc_attr( wp_create_nonce( 'wpcybersec_reports_bulk' ) ) . '">';
+		$html .= '<input type="hidden" name="tab" value="' . esc_attr( $tab ) . '">';
+		$html .= '<input type="hidden" name="bulk_action" value="' . esc_attr( $action ) . '">';
+		$html .= '<input type="hidden" name="wpcs_risk_ok" value="1">';
+		foreach ( $ids as $id ) {
+			$html .= '<input type="hidden" name="ids[]" value="' . esc_attr( (string) (int) $id ) . '">';
+		}
+		$html .= '<p><a class="button button-primary" href="' . esc_url( self::page_url( self::PAGE_REPORTS, array( 'tab' => $tab ) ) ) . '">' . esc_html__( 'Cancel', 'cybergate-security' ) . '</a> ';
+		$html .= '<button type="submit" class="button">' . esc_html( $first['confirm'] ) . '</button></p></form>';
+		wp_die( $html, esc_html__( 'Confirm', 'cybergate-security' ), array( 'response' => 200 ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- built with escaping above.
 	}
 
 	/**

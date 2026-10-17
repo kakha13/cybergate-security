@@ -35,6 +35,15 @@ class Guard_Manager {
 	const MARKER           = 'CyberGate Security Guard';
 	const FRONT_OPTION     = 'wpcybersec_front_root';
 
+	/** Last live test of the guard: { at, result active|inactive|down, tried }. */
+	const PING_OPTION = 'wpcybersec_guard_ping_result';
+
+	/** A live test older than this is repeated in the background. */
+	const PING_TTL = 6 * HOUR_IN_SECONDS;
+
+	/** Log events that the one-click install replaces with one summary entry (set_quiet()). */
+	const QUIET_EVENTS = array( 'guard_installed', 'guard_install_failed', 'guard_user_ini', 'guard_htaccess', 'guard_uninstalled' );
+
 	/** Lines imported per cron run, and its time budget (seconds); the rest waits for the next run. */
 	const IMPORT_BATCH   = 200;
 	const IMPORT_SECONDS = 20;
@@ -52,6 +61,12 @@ class Guard_Manager {
 	/**
 	 * Nothing heavy here; see register().
 	 */
+	/** @var bool Leave the QUIET_EVENTS out of the activity log (set_quiet()). */
+	private $quiet = false;
+
+	/** @var bool An import is running: its log entries belong to the visitor, not to the signed-in user. */
+	private $importing = false;
+
 	public function __construct() {}
 
 	/**
@@ -64,6 +79,11 @@ class Guard_Manager {
 		add_action( 'wp_delete_site', array( $this, 'on_sites_changed' ), 200, 0 );
 		add_action( self::IMPORT_HOOK, array( $this, 'cron_import' ) );
 		add_action( 'admin_init', array( $this, 'admin_init' ) );
+		// Admin pages: import before the menu badge and the Reports counts are computed
+		// (admin_menu runs before admin_init). AJAX requests import on admin_init.
+		if ( is_admin() && ! wp_doing_ajax() ) {
+			add_action( 'init', array( $this, 'early_import' ), 1 );
+		}
 		add_action( 'wpcybersec_settings_updated', array( $this, 'on_settings_updated' ), 10, 0 );
 		add_action( 'wpcybersec_allowlist_changed', array( $this, 'on_allowlist_changed' ), 10, 0 );
 
@@ -123,9 +143,22 @@ class Guard_Manager {
 				$this->ensure_cron();
 			}
 			$this->heal_bootstrap();
+			$this->observe();
 		} elseif ( Admin\Admin::can() ) {
 			$this->refresh_leftover_bootstrap();
 		}
+	}
+
+	/**
+	 * init (admin pages only, priority 1): the same bounded import as
+	 * admin_init(), early enough that the menu badge and the counts of the page
+	 * already include what the guard held. Costs one stat when nothing waits.
+	 */
+	public function early_import() {
+		if ( ! $this->has_pending() || ! Admin\Admin::can() ) {
+			return;
+		}
+		$this->import_spool( self::ADMIN_BATCH, self::ADMIN_SECONDS, true );
 	}
 
 	/**
@@ -715,6 +748,7 @@ class Guard_Manager {
 	public function uninstall( $keep_bootstrap = false ) {
 		Guard_Config::set_enabled( false );
 		Network::delete_option( self::INSTALLED_OPTION );
+		Network::delete_option( self::PING_OPTION ); // A live test of the old install says nothing now.
 		Network::clear_hook( self::IMPORT_HOOK );
 
 		// Import whatever is still waiting so nothing held is lost.
@@ -848,9 +882,17 @@ class Guard_Manager {
 			$snippet = $this->include_snippet();
 		}
 
+		$installed = $this->is_installed();
+		$active    = defined( 'WPCYBERSEC_GUARD_ACTIVE' );
+		$can_tell  = self::request_can_tell();
+		$ping      = $this->last_ping();
 		return array(
-			'installed'           => $this->is_installed(),
-			'active'              => defined( 'WPCYBERSEC_GUARD_ACTIVE' ),
+			'installed'           => $installed,
+			'active'              => $active,
+			// This request cannot tell (WP-CLI, cron, development server): the last live test can.
+			'can_tell'            => $can_tell,
+			'ping'                => $ping,
+			'confirmed'           => ! $active && ! $can_tell && $installed && $ping && 'active' === $ping['result'],
 			'enabled'             => ! empty( $config['enabled'] ),
 			'bootstrap_path'      => $bootstrap,
 			'bootstrap_exists'    => is_file( $bootstrap ),
@@ -1362,7 +1404,8 @@ class Guard_Manager {
 		$work  = $this->work_file();
 		clearstatcache( true, $spool );
 		clearstatcache( true, $work );
-		return ( @is_file( $spool ) && (int) @filesize( $spool ) > 0 ) || @is_file( $work ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		// filesize() is false for a missing spool: one stat each.
+		return (int) @filesize( $spool ) > 0 || @file_exists( $work ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 	}
 
 	/**
@@ -1371,6 +1414,144 @@ class Guard_Manager {
 	public function cron_import() {
 		$this->cleanup_partial_copies();
 		$this->import_spool();
+		$this->maybe_reping( 10 );
+	}
+
+	/* ------------------------------------------------------------------ */
+	/* Live state                                                          */
+	/* ------------------------------------------------------------------ */
+
+	/**
+	 * Whether this request can see whether PHP loads the guard: WP-CLI, cron
+	 * runs from the command line and PHP's built-in development server never
+	 * read .user.ini or .htaccess, so "not active here" means nothing there.
+	 *
+	 * @return bool
+	 */
+	public static function request_can_tell() {
+		return ! in_array( PHP_SAPI, array( 'cli', 'cli-server', 'phpdbg', 'embed' ), true );
+	}
+
+	/**
+	 * Stores the result of a live test. "unknown" (the site did not answer its
+	 * own test request) keeps the previous result and only notes the try.
+	 *
+	 * @param string $result active | inactive | down | unknown.
+	 */
+	public function record_ping( $result ) {
+		$last = $this->last_ping();
+		if ( ! in_array( $result, array( 'active', 'inactive', 'down' ), true ) ) {
+			$last          = $last ? $last : array( 'at' => 0, 'result' => '' );
+			$last['tried'] = time();
+			Network::update_option( self::PING_OPTION, $last, false );
+			return;
+		}
+		Network::update_option(
+			self::PING_OPTION,
+			array(
+				'at'     => time(),
+				'result' => $result,
+				'tried'  => time(),
+			),
+			false
+		);
+	}
+
+	/**
+	 * @return array|null { at, result, tried } of the last live test.
+	 */
+	public function last_ping() {
+		$ping = Network::get_option( self::PING_OPTION, array() );
+		if ( ! is_array( $ping ) || ! isset( $ping['at'], $ping['result'] ) ) {
+			return null;
+		}
+		return array(
+			'at'     => (int) $ping['at'],
+			'result' => (string) $ping['result'],
+			'tried'  => isset( $ping['tried'] ) ? (int) $ping['tried'] : (int) $ping['at'],
+		);
+	}
+
+	/**
+	 * Web requests see the answer themselves: remember it (at most hourly,
+	 * or at once when it changed), so WP-CLI and cron can show it.
+	 */
+	private function observe() {
+		if ( ! self::request_can_tell() || wp_doing_ajax() ) {
+			return;
+		}
+		$seen = defined( 'WPCYBERSEC_GUARD_ACTIVE' ) ? 'active' : 'inactive';
+		$last = $this->last_ping();
+		if ( ! $last || $last['result'] !== $seen || $last['at'] < time() - HOUR_IN_SECONDS ) {
+			$this->record_ping( $seen );
+		}
+	}
+
+	/**
+	 * Repeats the live test when the last one is older than PING_TTL (at most
+	 * one try per PING_TTL, also when the site did not answer).
+	 *
+	 * @param int $timeout Seconds per test request.
+	 */
+	public function maybe_reping( $timeout = 10 ) {
+		if ( ! $this->is_installed() ) {
+			return;
+		}
+		if ( self::request_can_tell() ) {
+			$this->observe();
+			return;
+		}
+		$last = $this->last_ping();
+		if ( $last && max( $last['at'], $last['tried'] ) > time() - self::PING_TTL ) {
+			return;
+		}
+		$hardening = wpcybersec()->hardening;
+		if ( is_object( $hardening ) && method_exists( $hardening, 'reping' ) ) {
+			$hardening->reping( $timeout );
+		}
+	}
+
+	/**
+	 * What to show for the guard: this request's answer when it can tell,
+	 * else the last live test.
+	 *
+	 * @param array|null $status status() (computed when null).
+	 * @return array { state active|confirmed|installed|off, label, tone, at }
+	 */
+	public function live_state( $status = null ) {
+		$status = is_array( $status ) ? $status : $this->status();
+		if ( ! empty( $status['active'] ) ) {
+			return array(
+				'state' => 'active',
+				'label' => __( 'Active', 'cybergate-security' ),
+				'tone'  => 'ok',
+				'at'    => time(),
+			);
+		}
+		if ( ! empty( $status['confirmed'] ) ) {
+			$at = (int) $status['ping']['at'];
+			return array(
+				'state' => 'confirmed',
+				/* translators: %s: time ago, for example "5 minutes ago" */
+				'label' => sprintf( __( 'Active (confirmed by a live test %s)', 'cybergate-security' ), Admin\Admin::ago( $at ) ),
+				'tone'  => 'ok',
+				'at'    => $at,
+			);
+		}
+		if ( ! empty( $status['installed'] ) ) {
+			return array(
+				'state' => 'installed',
+				'label' => __( 'Installed, not loaded yet', 'cybergate-security' ),
+				'tone'  => 'medium',
+				'at'    => 0,
+			);
+		}
+		return array(
+			'state' => 'off',
+			'label' => __( 'Not installed', 'cybergate-security' ),
+			'tone'  => 'muted',
+			'at'    => 0,
+		);
 	}
 
 	/**
@@ -1400,7 +1581,8 @@ class Guard_Manager {
 			return 0; // Another request is importing right now.
 		}
 
-		$imported = 0;
+		$imported        = 0;
+		$this->importing = true;
 		try {
 			$deadline = microtime( true ) + $max_seconds;
 			$done     = 0;
@@ -1477,6 +1659,7 @@ class Guard_Manager {
 				}
 			}
 		} finally {
+			$this->importing = false;
 			$this->release_import_lock( $lock );
 		}
 		return $imported;
@@ -1807,6 +1990,7 @@ class Guard_Manager {
 				'item_id'  => $id,
 				'sha256'   => $sha256,
 				'severity' => $severity,
+				'ip'       => $ip,
 			)
 		);
 
@@ -1988,12 +2172,44 @@ class Guard_Manager {
 	/**
 	 * @param string $event   Event.
 	 * @param string $message Message.
-	 * @param array  $context Context.
+	 * @param array  $context Context ('ip': the visitor's address, for entries of an import).
+	 * @return int Log id (0 when nothing was logged).
 	 */
 	private function log( $event, $message, array $context = array() ) {
-		$logger = wpcybersec()->logger;
-		if ( $logger ) {
-			$logger->log( $event, $message, $context );
+		if ( $this->quiet && in_array( $event, self::QUIET_EVENTS, true ) ) {
+			return 0;
 		}
+		$logger = wpcybersec()->logger;
+		if ( ! $logger ) {
+			return 0;
+		}
+		$id = (int) $logger->log( $event, $message, $context );
+		if ( $id && $this->importing ) {
+			// The import runs in whatever request comes next (often an administrator's page
+			// load), but what it records happened in the visitor's request: no user, the
+			// visitor's address (the item shows "Visitor, Early guard" too).
+			global $wpdb;
+			$wpdb->update( // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+				Store::table( 'log' ),
+				array(
+					'user_id' => 0,
+					'ip'      => isset( $context['ip'] ) ? (string) $context['ip'] : '',
+				),
+				array( 'id' => $id ),
+				array( '%d', '%s' ),
+				array( '%d' )
+			);
+		}
+		return $id;
+	}
+
+	/**
+	 * Leaves the install and wiring entries (QUIET_EVENTS) out of the activity
+	 * log while the one-click install runs, which logs one summary instead.
+	 *
+	 * @param bool $quiet On or off.
+	 */
+	public function set_quiet( $quiet ) {
+		$this->quiet = (bool) $quiet;
 	}
 }

@@ -49,14 +49,24 @@ class Clamav_Guide {
 	 * @param string $detected Detected binary ('' when none).
 	 * @param bool   $exec     exec()/proc_open() available.
 	 * @param bool   $daemon   clamd daemon reachable.
+	 * @param array  $clam     Sysadmin_Tools::antivirus_status()['clamav'] (self-test result), optional.
 	 */
-	private static function status( $detected, $exec, $daemon ) {
+	private static function status( $detected, $exec, $daemon, array $clam = array() ) {
+		$state = isset( $clam['state'] ) ? (string) $clam['state'] : '';
 		if ( ! $exec ) {
 			Settings_Page::notice( __( 'PHP is not allowed to run programs on this server (exec and proc_open are disabled), so the plugin cannot call ClamAV even when it is installed. Ask your host to allow proc_open for this site, or skip ClamAV: the plugin\'s own signatures and checksums keep working.', 'cybergate-security' ), 'warn' );
 			return;
 		}
 		if ( '' === $detected ) {
 			Settings_Page::notice( __( 'ClamAV is not installed on this server. Follow the steps for your server below, then press "Check again".', 'cybergate-security' ), 'info' );
+			return;
+		}
+		if ( 'broken' === $state ) {
+			Settings_Page::notice( __( 'ClamAV is installed, but its self-test failed, so the plugin does not use it. The steps for your server below show how to set it up; press "Check again" afterwards.', 'cybergate-security' ), 'warn' );
+			return;
+		}
+		if ( ! $daemon && ! empty( $clam['slow_only'] ) ) {
+			Settings_Page::notice( __( 'ClamAV works, but its background service (clamd) is not running, so every file takes seconds. Start the service (step 3 below) so uploads and whole-site scans can use it.', 'cybergate-security' ), 'info' );
 			return;
 		}
 		if ( ! $daemon ) {
@@ -71,14 +81,15 @@ class Clamav_Guide {
 	 *
 	 * @param string $detected Detected binary path.
 	 * @param bool   $exec     exec()/proc_open() available.
-	 * @param bool   $daemon   clamd reachable.
+	 * @param bool   $daemon   clamd reachable (its self-test passed).
+	 * @param array  $clam     Sysadmin_Tools::antivirus_status()['clamav'], optional.
 	 */
-	public static function render( $detected, $exec, $daemon ) {
+	public static function render( $detected, $exec, $daemon, array $clam = array() ) {
 		$platform = self::platform();
 		$ready    = '' !== $detected && $exec && $daemon;
 
 		echo '<div class="wpcs-clamav-guide">';
-		self::status( $detected, $exec, $daemon );
+		self::status( $detected, $exec, $daemon, $clam );
 
 		echo '<p class="wpcs-sub">' . esc_html__( 'What it adds: ClamAV recognises millions of known malicious files (web shells, phishing kits, infected uploads) that pattern checks can miss. What it does not do: it does not block attacks. Think of it as a second opinion that finds more.', 'cybergate-security' ) . '</p>';
 

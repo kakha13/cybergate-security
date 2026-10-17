@@ -1137,6 +1137,10 @@ class Settings_Page {
 	 * @param Sysadmin_Tools $tools Tools.
 	 */
 	private function section_antivirus( array $s, Sysadmin_Tools $tools ) {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read only: "Check again" runs the ClamAV self-test now.
+		if ( ! empty( $_GET['recheck'] ) ) {
+			Sysadmin_Tools::call( 'scanner', 'clamav_selftest', array( true ), null );
+		}
 		$av     = $tools->antivirus_status();
 		$clam   = $av['clamav'];
 		$maldet = $av['maldet'];
@@ -1148,10 +1152,24 @@ class Settings_Page {
 		if ( 'ready_off' === $clam['state'] ) {
 			echo '<div class="wpcs-callout">';
 			echo '<span class="wpcs-callout__icon" aria-hidden="true"><span class="dashicons dashicons-sos"></span></span>';
-			echo '<div class="wpcs-callout__text"><strong>' . esc_html__( 'ClamAV is installed and ready, but not in use', 'cybergate-security' ) . '</strong>';
-			echo '<span class="wpcs-sub">' . esc_html( $clam['daemon'] ? __( 'Turn it on to check every upload with ClamAV too. Its background service runs, so whole-site scans use it as well.', 'cybergate-security' ) : __( 'Turn it on to check every upload with ClamAV too.', 'cybergate-security' ) ) . '</span></div>';
+			echo '<div class="wpcs-callout__text"><strong>' . esc_html__( 'ClamAV is installed and works, but is not in use', 'cybergate-security' ) . '</strong>';
+			if ( ! empty( $clam['slow_only'] ) ) {
+				$sub = __( 'Only the slow clamscan works here, so uploads are not scanned with it while someone waits (held uploads the early guard imports by cron are). Start clamd for fast scans of every upload.', 'cybergate-security' );
+			} else {
+				$sub = $clam['daemon'] ? __( 'Turn it on to check every upload with ClamAV too. Its background service runs, so whole-site scans use it as well.', 'cybergate-security' ) : __( 'Turn it on to check every upload with ClamAV too.', 'cybergate-security' );
+			}
+			echo '<span class="wpcs-sub">' . esc_html( $sub ) . '</span></div>';
 			echo '<button type="button" class="button button-primary" data-wpcs-clamav-enable><span class="dashicons dashicons-yes" aria-hidden="true"></span>' . esc_html__( 'Turn on ClamAV for uploads', 'cybergate-security' ) . '</button>';
 			echo '</div>';
+			if ( '' !== $clam['hint_code'] ) {
+				echo '<p class="wpcs-sub">' . esc_html( $clam['hint'] ) . '</p>';
+				echo self::code( $clam['hint_code'] ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+			}
+		} elseif ( in_array( $clam['state'], array( 'broken', 'slow' ), true ) || ( '' !== $clam['hint'] && in_array( $clam['state'], array( 'uploads' ), true ) ) ) {
+			self::notice( $clam['label'] . ( '' !== $clam['hint'] ? ' ' . $clam['hint'] : '' ), 'broken' === $clam['state'] ? 'bad' : 'warn' );
+			if ( '' !== $clam['hint_code'] ) {
+				echo self::code( $clam['hint_code'] ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+			}
 		}
 
 		echo '<div class="wpcs-engines">';
@@ -1159,16 +1177,42 @@ class Settings_Page {
 		$used = array(
 			'missing'       => ! empty( $clam['hidden'] ) ? __( 'Nothing (not found)', 'cybergate-security' ) : __( 'Nothing (not installed)', 'cybergate-security' ),
 			'blocked'       => __( 'Nothing (PHP cannot run it)', 'cybergate-security' ),
+			'broken'        => __( 'Nothing (the self-test failed)', 'cybergate-security' ),
 			'ready_off'     => __( 'Nothing yet', 'cybergate-security' ),
+			'slow'          => __( 'Held uploads imported by cron (uploads skip it while someone waits)', 'cybergate-security' ),
 			'uploads'       => __( 'Uploads', 'cybergate-security' ),
 			'uploads_scans' => __( 'Uploads and whole-site scans', 'cybergate-security' ),
 		);
+		$service = $this->badge( __( 'Not running', 'cybergate-security' ), 'muted' );
+		if ( 'missing' === $clam['state'] ) {
+			$service = ! empty( $clam['hidden'] ) ? esc_html__( 'Unknown (hosting hides it)', 'cybergate-security' ) : esc_html__( 'Not installed', 'cybergate-security' );
+		} elseif ( $clam['daemon'] ) {
+			/* translators: %s: time per file */
+			$service = $this->badge( null !== $clam['daemon_ms'] ? sprintf( __( 'Running, about %s per file', 'cybergate-security' ), Sysadmin_Tools::duration_ms( $clam['daemon_ms'] ) ) : __( 'Running', 'cybergate-security' ), 'ok' );
+		} elseif ( 'socket' === $clam['kind'] ) {
+			$service = $this->badge( __( 'Running, but PHP may not use its socket', 'cybergate-security' ), 'high' );
+		}
 		$rows = array(
 			__( 'Program', 'cybergate-security' )            => '' !== $clam['binary'] ? '<code class="wpcs-path">' . esc_html( $clam['binary'] ) . '</code>' : esc_html__( 'Not found', 'cybergate-security' ),
-			__( 'Background service (clamd)', 'cybergate-security' ) => 'missing' === $clam['state'] ? ( ! empty( $clam['hidden'] ) ? esc_html__( 'Unknown (hosting hides it)', 'cybergate-security' ) : esc_html__( 'Not installed', 'cybergate-security' ) ) : ( $clam['daemon'] ? $this->badge( __( 'Running', 'cybergate-security' ), 'ok' ) : $this->badge( __( 'Not running', 'cybergate-security' ), 'muted' ) ),
+			__( 'Background service (clamd)', 'cybergate-security' ) => $service,
 			__( 'PHP may run it', 'cybergate-security' )     => $clam['exec'] ? $this->badge( $yes, 'ok' ) : $this->badge( __( 'No: exec() and proc_open() are disabled', 'cybergate-security' ), 'high' ),
-			__( 'Used for', 'cybergate-security' )           => esc_html( $used[ $clam['state'] ] ),
+			__( 'Used for', 'cybergate-security' )           => esc_html( isset( $used[ $clam['state'] ] ) ? $used[ $clam['state'] ] : $clam['label'] ),
 		);
+		if ( ! empty( $clam['bins'] ) ) {
+			$lines = array();
+			foreach ( $clam['bins'] as $bin => $row ) {
+				$name = '<code class="wpcs-path">' . esc_html( basename( (string) $bin ) ) . '</code> ';
+				if ( ! empty( $row['ok'] ) ) {
+					/* translators: %s: duration */
+					$lines[] = $name . $this->badge( sprintf( __( 'Works, %s', 'cybergate-security' ), Sysadmin_Tools::duration_ms( $row['ms'] ) ), (int) $row['ms'] > \WPCyberSecurity\Scanner::SLOW_MS ? 'medium' : 'ok' );
+				} else {
+					$lines[] = $name . $this->badge( __( 'Failed', 'cybergate-security' ), 'high' ) . ' <span class="wpcs-muted">' . esc_html( (string) $row['error'] ) . '</span>';
+				}
+			}
+			/* translators: %s: time ago */
+			$lines[] = '<span class="wpcs-muted">' . esc_html( sprintf( __( 'Tested %s with the EICAR test file.', 'cybergate-security' ), Admin::ago( $clam['tested_at'] ) ) ) . '</span>';
+			$rows[ __( 'Self-test', 'cybergate-security' ) ] = implode( '<br>', $lines );
+		}
 		$this->engine( 'ClamAV', $clam['label'], $clam['tone'], $rows );
 
 		// Linux Malware Detect.
@@ -1213,6 +1257,21 @@ class Settings_Page {
 			__( 'ClamAV scanning', 'cybergate-security' ),
 			self::toggle_row( 'clamav_enabled', ! empty( $s['clamav_enabled'] ), __( 'Also scan uploads with ClamAV', 'cybergate-security' ), __( 'Uploads take a little longer. clamdscan is much faster than clamscan when the clamd service runs; with it, whole-site scans use ClamAV too.', 'cybergate-security' ) )
 		);
+		$has_scan = false;
+		foreach ( array_keys( (array) $clam['bins'] ) as $bin ) {
+			$has_scan = $has_scan || false === strpos( basename( (string) $bin ), 'clamdscan' );
+		}
+		if ( $has_scan || ! empty( $clam['forced'] ) ) {
+			$this->field(
+				__( 'Slow clamscan', 'cybergate-security' ),
+				self::toggle_row(
+					'clamav_slow_uploads',
+					! empty( $clam['forced'] ),
+					__( 'Also use the slow clamscan for uploads', 'cybergate-security' ),
+					__( 'Without the background service, clamscan loads its whole database for every file, which takes seconds. By default a clamscan slower than 3 seconds is only used for held uploads that cron imports, so nobody waits for it. Turn this on to make every upload wait for it.', 'cybergate-security' )
+				)
+			);
+		}
 		$this->field(
 			__( 'ClamAV program', 'cybergate-security' ),
 			'<input type="text" id="wpcs-clamav-binary" name="clamav_binary" value="' . esc_attr( $s['clamav_binary'] ) . '" placeholder="' . esc_attr( '' !== $clam['binary'] ? $clam['binary'] : '/usr/bin/clamdscan' ) . '" class="wpcs-mono">',
@@ -1228,7 +1287,7 @@ class Settings_Page {
 		} else {
 			echo '<h3 class="wpcs-guide-title">' . esc_html__( 'How to install ClamAV', 'cybergate-security' ) . '</h3>';
 		}
-		Clamav_Guide::render( (string) $tools->clamav_detect(), (bool) $clam['exec'], ! empty( $info['daemon'] ) );
+		Clamav_Guide::render( (string) $tools->clamav_detect(), (bool) $clam['exec'], ! empty( $info['daemon'] ), $clam );
 		if ( $ready ) {
 			echo '</details>';
 		}
@@ -1484,9 +1543,32 @@ class Settings_Page {
 		$yes    = __( 'Yes', 'cybergate-security' );
 		$no     = __( 'No', 'cybergate-security' );
 
+		$manager_live = method_exists( $manager, 'live_state' ) ? $manager->live_state( $status ) : array( 'state' => ! empty( $status['active'] ) ? 'active' : ( ! empty( $status['installed'] ) ? 'installed' : 'off' ), 'label' => '', 'tone' => 'muted' );
+		$ping         = isset( $status['ping'] ) && is_array( $status['ping'] ) ? $status['ping'] : null;
+		$results      = array(
+			'active'   => array( __( 'PHP loaded the guard', 'cybergate-security' ), 'ok' ),
+			'inactive' => array( __( 'PHP did not load the guard', 'cybergate-security' ), 'medium' ),
+			'down'     => array( __( 'The site did not answer', 'cybergate-security' ), 'high' ),
+		);
+		if ( $ping && isset( $results[ $ping['result'] ] ) && ! empty( $status['installed'] ) ) {
+			/* translators: %s: time ago */
+			$last = $this->badge( $results[ $ping['result'] ][0], $results[ $ping['result'] ][1] ) . ' <span class="wpcs-muted">' . esc_html( Admin::ago( $ping['at'] ) ) . '</span>';
+		} else {
+			$last = esc_html__( 'Not tested yet', 'cybergate-security' );
+		}
+
 		$rows = array(
+			array( __( 'State', 'cybergate-security' ), '' !== (string) $manager_live['label'] ? $this->badge( $manager_live['label'], $manager_live['tone'] ) : '' ),
 			array( __( 'Installed', 'cybergate-security' ), ! empty( $status['installed'] ) ? $this->badge( $yes, 'ok' ) : $this->badge( $no, 'muted' ) ),
-			array( __( 'Active in this request', 'cybergate-security' ), ! empty( $status['active'] ) ? $this->badge( $yes, 'ok' ) : $this->badge( $no, empty( $status['installed'] ) ? 'muted' : 'medium' ) ),
+			array(
+				__( 'Active in this request', 'cybergate-security' ),
+				! empty( $status['active'] )
+					? $this->badge( $yes, 'ok' )
+					: ( isset( $status['can_tell'] ) && ! $status['can_tell']
+						? esc_html__( 'Cannot tell here (this request does not read .user.ini or .htaccess)', 'cybergate-security' )
+						: $this->badge( $no, empty( $status['installed'] ) ? 'muted' : 'medium' ) ),
+			),
+			array( __( 'Last live test', 'cybergate-security' ), $last ),
 			array(
 				__( 'Bootstrap file', 'cybergate-security' ),
 				'<code class="wpcs-path">' . esc_html( isset( $status['bootstrap_path'] ) ? $status['bootstrap_path'] : '' ) . '</code> '
@@ -1503,27 +1585,46 @@ class Settings_Page {
 		}
 		echo '</tbody></table>';
 
+		$state = (string) $manager_live['state'];
 		if ( ! empty( $status['conflict'] ) ) {
 			$help = ! empty( $status['conflict_help'] ) ? (string) $status['conflict_help'] : __( 'Another file already uses auto_prepend_file. The guard bootstrap includes it so both keep working, but check the snippets below before you change the PHP configuration.', 'cybergate-security' );
 			self::notice( $help, 'warn' );
 			if ( ! empty( $status['conflict_snippet'] ) ) {
 				echo self::code( (string) $status['conflict_snippet'], __( 'Add at the top of the other prepend file', 'cybergate-security' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
 			}
-		} elseif ( ! empty( $status['installed'] ) && empty( $status['active'] ) ) {
-			self::notice( __( 'Installed, but PHP does not load it yet. Set auto_prepend_file with the recommended snippet below (or the button that writes .user.ini), then reload this page.', 'cybergate-security' ), 'warn' );
+		} elseif ( 'confirmed' === $state ) {
+			self::notice( __( 'The guard runs: the last live test request to the site was answered with the guard loaded. This request cannot tell by itself (PHP on the command line and the development server do not read .user.ini or .htaccess).', 'cybergate-security' ), 'ok' );
+		} elseif ( 'installed' === $state ) {
+			self::notice( __( 'Installed, but PHP does not load it yet. Use "Install and switch on the early guard" below, or set auto_prepend_file with the recommended snippet, then reload this page.', 'cybergate-security' ), 'warn' );
+		}
+
+		$hardening = Sysadmin_Tools::service( 'hardening' );
+		$one_click = ! in_array( $state, array( 'active', 'confirmed' ), true ) && empty( $status['conflict'] ) && $hardening && method_exists( $hardening, 'descriptor' ) ? $hardening->descriptor( 'guard' ) : null;
+		if ( $one_click ) {
+			echo '<div class="wpcs-autofix wpcs-card__lead">';
+			echo '<button type="button" class="button button-primary" data-wpcs-fix="guard"><span class="dashicons dashicons-shield-alt" aria-hidden="true"></span>' . esc_html( $one_click['label'] ) . '</button>';
+			echo '<span class="wpcs-sub">' . esc_html( $one_click['description'] ) . '</span>';
+			echo '</div>';
 		}
 
 		echo '<div class="wpcs-row wpcs-card__actions">';
+		if ( $one_click ) {
+			echo '<span class="wpcs-muted">' . esc_html__( 'Or step by step:', 'cybergate-security' ) . '</span>';
+		}
 		if ( empty( $status['installed'] ) ) {
-			echo '<a class="button button-primary" href="' . esc_url( $this->action_url( 'guard', array( 'op' => 'install' ) ) ) . '"><span class="dashicons dashicons-download" aria-hidden="true"></span>' . esc_html__( 'Install the early guard', 'cybergate-security' ) . '</a>';
+			echo '<a class="button' . ( $one_click ? '' : ' button-primary' ) . '" href="' . esc_url( $this->action_url( 'guard', array( 'op' => 'install' ) ) ) . '"><span class="dashicons dashicons-download" aria-hidden="true"></span>' . esc_html( $one_click ? __( 'Only install the guard files', 'cybergate-security' ) : __( 'Install the guard files', 'cybergate-security' ) ) . '</a>';
 		} else {
-			echo '<a class="button" href="' . esc_url( $this->action_url( 'guard', array( 'op' => 'install' ) ) ) . '"><span class="dashicons dashicons-update" aria-hidden="true"></span>' . esc_html__( 'Reinstall', 'cybergate-security' ) . '</a>';
+			if ( in_array( $state, array( 'active', 'confirmed', 'installed' ), true ) && $hardening && method_exists( $hardening, 'reping' ) ) {
+				echo '<a class="button" href="' . esc_url( $this->action_url( 'guard', array( 'op' => 'ping' ) ) ) . '"><span class="dashicons dashicons-update" aria-hidden="true"></span>' . esc_html__( 'Test again', 'cybergate-security' ) . '</a>';
+			}
+			echo '<a class="button" href="' . esc_url( $this->action_url( 'guard', array( 'op' => 'install' ) ) ) . '"><span class="dashicons dashicons-update" aria-hidden="true"></span>' . esc_html__( 'Reinstall the files', 'cybergate-security' ) . '</a>';
 			echo '<a class="button wpcs-btn-danger" href="' . esc_url( $this->action_url( 'guard', array( 'op' => 'uninstall' ) ) ) . '" data-wpcs-confirm="' . esc_attr__( 'Switch the early guard off? Uploads to scripts outside WordPress will no longer be held.', 'cybergate-security' ) . '">' . esc_html__( 'Uninstall', 'cybergate-security' ) . '</a>';
 		}
-		if ( method_exists( $manager, 'write_user_ini' ) ) {
-			echo '<a class="button" href="' . esc_url( $this->action_url( 'guard', array( 'op' => 'write_user_ini' ) ) ) . '"><span class="dashicons dashicons-media-text" aria-hidden="true"></span>' . esc_html__( 'Write .user.ini for me', 'cybergate-security' ) . '</a>';
+		// Only with the bootstrap in place: a .user.ini line that points at a missing file stops every PHP request.
+		if ( method_exists( $manager, 'write_user_ini' ) && ! empty( $status['installed'] ) && ! empty( $status['bootstrap_exists'] ) && ! in_array( $state, array( 'active', 'confirmed' ), true ) ) {
+			echo '<a class="button" href="' . esc_url( $this->action_url( 'guard', array( 'op' => 'write_user_ini' ) ) ) . '"><span class="dashicons dashicons-media-text" aria-hidden="true"></span>' . esc_html__( 'Only write .user.ini', 'cybergate-security' ) . '</a>';
+			echo '<span class="wpcs-muted wpcs-inline-help">' . esc_html__( '.user.ini works with PHP-FPM and CGI. For mod_php or a server-wide setting, use one of the snippets below.', 'cybergate-security' ) . '</span>';
 		}
-		echo '<span class="wpcs-muted wpcs-inline-help">' . esc_html__( '.user.ini works with PHP-FPM and CGI. For mod_php or a server-wide setting, use one of the snippets below.', 'cybergate-security' ) . '</span>';
 		echo '</div>';
 
 		$this->field(
@@ -1617,6 +1718,11 @@ class Settings_Page {
 			echo '<div class="wpcs-cmd-block"><strong class="wpcs-cmd-block__title">' . esc_html( $snippet['label'] ) . '</strong>';
 			echo self::commands( $snippet['code'], $snippet['file'], $snippet['help'], 0 === $i && $missing ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
 			echo '</div>';
+		}
+		// The same switch-off step as the wizard: a button once real cron is seen running.
+		$hardening = Sysadmin_Tools::service( 'hardening' );
+		if ( ! $disabled && $hardening && method_exists( $hardening, 'descriptor' ) && $hardening->descriptor( 'disable_wp_cron' ) ) {
+			$hardening->render_fix( 'disable_wp_cron' );
 		}
 		$this->card_close();
 	}

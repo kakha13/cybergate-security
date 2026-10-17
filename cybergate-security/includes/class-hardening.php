@@ -198,11 +198,22 @@ class Hardening {
 				}
 				return array(
 					'id'          => 'guard',
-					'label'       => __( 'Install the guard', 'cybergate-security' ),
+					'label'       => __( 'Install and switch on the early guard', 'cybergate-security' ),
 					'description' => ( 'htaccess' === $method
-						? __( 'Adds the guard to the .htaccess file in the WordPress folder, then checks that the site still loads. Everything is undone automatically if it does not.', 'cybergate-security' )
-						: __( 'Adds the guard to a .user.ini file in the WordPress folder (this server runs PHP through FastCGI or LiteSpeed), then checks that the site still loads. PHP picks up .user.ini within a few minutes.', 'cybergate-security' ) )
+						? __( 'Installs the guard files, adds the guard to the .htaccess file in the WordPress folder (PHP runs as an Apache or LiteSpeed module here), then makes a live test request. Everything is undone automatically if the site stops answering.', 'cybergate-security' )
+						: __( 'Installs the guard files, adds the guard to a .user.ini file in the WordPress folder (this server runs PHP through PHP-FPM, CGI or OpenLiteSpeed), then makes a live test request. Everything is undone automatically if the site stops answering.', 'cybergate-security' ) )
 						. ( method_exists( $gm, 'front_root' ) && '' !== $gm->front_root() ? ' ' . __( 'The site\'s front controller (index.php) is in another folder, so that folder gets the same line.', 'cybergate-security' ) : '' ),
+				);
+
+			case 'guard_files':
+				$gm = wpcybersec()->guard_manager;
+				if ( ! is_object( $gm ) || ! method_exists( $gm, 'install' ) || $gm->is_installed() ) {
+					return null;
+				}
+				return array(
+					'id'          => 'guard_files',
+					'label'       => __( 'Install the guard files', 'cybergate-security' ),
+					'description' => __( 'Writes the guard bootstrap next to wp-config.php and its configuration into the data folder. It does nothing until PHP loads it through auto_prepend_file (the steps below).', 'cybergate-security' ),
 				);
 
 			case 'disable_wp_cron':
@@ -308,27 +319,38 @@ class Hardening {
 						'code' => 'php_value auto_prepend_file ' . $boot,
 					);
 				}
-				return array_merge( array(
-					array( 'text' => __( 'Install the guard files first: Settings > Advanced > Early upload guard > Install.', 'cybergate-security' ) ),
+				$first = array();
+				if ( ! is_object( $gm ) || ! method_exists( $gm, 'is_installed' ) || ! $gm->is_installed() ) {
+					$first[] = array( 'text' => __( 'Install the guard files first (the "Install the guard files" button, also in Settings > Advanced > Early guard).', 'cybergate-security' ) );
+				}
+				return array_merge( $first, array(
 					array( 'text' => __( 'If PHP runs through PHP-FPM or CGI, create a file named .user.ini in the WordPress folder with:', 'cybergate-security' ), 'code' => "auto_prepend_file = '" . $boot . "'" ),
 					array( 'text' => __( 'If PHP runs as an Apache module, add to the .htaccess file in the WordPress folder:', 'cybergate-security' ), 'code' => "<IfModule php_module>\n    php_value auto_prepend_file \"" . $boot . "\"\n</IfModule>" ),
 					array( 'text' => __( 'On nginx with PHP-FPM, ask your host to add this to the PHP location block and reload nginx:', 'cybergate-security' ), 'code' => 'fastcgi_param PHP_VALUE "auto_prepend_file=' . $boot . '";' ),
 				), $extra );
 
 			case 'disable_wp_cron':
+				$off = Sysadmin_Tools::cron_disable_step();
 				return array(
-					array( 'text' => __( 'Only do this after a real cron job runs WordPress cron (see "Real cron job").', 'cybergate-security' ) ),
-					array( 'text' => __( 'Open wp-config.php and add this line:', 'cybergate-security' ), 'code' => "define( 'DISABLE_WP_CRON', true );" ),
+					array( 'text' => __( 'Only do this after the real cron jobs run WordPress cron (see "Real cron job").', 'cybergate-security' ) ),
+					array( 'text' => __( 'Open wp-config.php and add this line:', 'cybergate-security' ), 'code' => $off['code'] ),
 					array( 'text' => $above ),
 				);
 
 			case 'wp_cron':
-				$cron = Sysadmin_Tools::php_command() . ' ' . Sysadmin_Tools::shell_arg( wp_normalize_path( WPCYBERSEC_DIR ) . 'bin/cron.php' ) . ' --quiet' . Sysadmin_Tools::cron_url_arg();
-				return array(
-					array( 'text' => __( 'In your hosting control panel open "Cron Jobs" (cPanel, Plesk "Scheduled Tasks", or your host\'s equivalent).', 'cybergate-security' ) ),
-					array( 'text' => __( 'Add a new job that runs every 15 minutes (*/15 * * * *) with this command:', 'cybergate-security' ), 'code' => $cron ),
-					array( 'text' => __( 'Optional, once the job runs: add this line to wp-config.php so page visits no longer trigger background work:', 'cybergate-security' ), 'code' => "define( 'DISABLE_WP_CRON', true );" ),
+				// The same three jobs as the crontab block (Sysadmin_Tools::cron_jobs()), one panel entry each.
+				$steps = array(
+					array( 'text' => __( 'In your hosting control panel open "Cron Jobs" (cPanel, Plesk "Scheduled Tasks", or your host\'s equivalent) and add these three jobs.', 'cybergate-security' ) ),
 				);
+				foreach ( Sysadmin_Tools::cron_jobs() as $job ) {
+					$steps[] = array(
+						/* translators: 1: what the job does and when, 2: cron schedule */
+						'text' => sprintf( __( '%1$s. Schedule: %2$s. Command:', 'cybergate-security' ), $job['when'], $job['schedule'] ),
+						'code' => $job['command'],
+					);
+				}
+				$steps[] = Sysadmin_Tools::cron_disable_step();
+				return $steps;
 		}
 		return array();
 	}
@@ -400,6 +422,15 @@ class Hardening {
 			case 'guard':
 				$result = $this->fix_guard();
 				break;
+			case 'guard_files':
+				$gm     = wpcybersec()->guard_manager;
+				$result = is_object( $gm ) && method_exists( $gm, 'install' )
+					? $gm->install()
+					: new \WP_Error( 'wpcybersec_fix', __( 'The early guard module is not available in this installation.', 'cybergate-security' ) );
+				if ( true === $result ) {
+					$result = __( 'The guard files are installed. Now point auto_prepend_file at the bootstrap with one of the steps below.', 'cybergate-security' );
+				}
+				break;
 			case 'disable_wp_cron':
 				$result = defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON ? true : Config_Editor::set_constant( 'DISABLE_WP_CRON', true );
 				break;
@@ -411,8 +442,11 @@ class Hardening {
 			Developer_Instructions::record_failure( $id, $result->get_error_message() );
 		} else {
 			Developer_Instructions::clear_failure( $id );
-			/* translators: %s: fix id */
-			wpcybersec()->logger->log( 'hardening_fixed', sprintf( __( 'Applied the one-click fix "%s".', 'cybergate-security' ), $id ), array( 'fix' => $id ) );
+			if ( ! in_array( $id, array( 'guard', 'guard_files' ), true ) ) {
+				// The guard logs its own entry (one per install).
+				/* translators: %s: fix id */
+				wpcybersec()->logger->log( 'hardening_fixed', sprintf( __( 'Applied the one-click fix "%s".', 'cybergate-security' ), $id ), array( 'fix' => $id ) );
+			}
 			Network::delete_transient( Sysadmin_Tools::PROBE_TRANSIENT );
 		}
 		return $result;
@@ -651,6 +685,60 @@ class Hardening {
 		if ( ! $methods || ! is_object( $gm ) ) {
 			return new \WP_Error( 'wpcybersec_fix', __( 'This server needs the PHP setting changed in its own configuration. Follow the steps below.', 'cybergate-security' ) );
 		}
+		// One activity log entry for the whole install instead of one per file.
+		$gm->set_quiet( true );
+		try {
+			$result = $this->wire_guard( $gm, $methods );
+		} finally {
+			$gm->set_quiet( false );
+		}
+		$how = $this->wired_with;
+		if ( is_wp_error( $result ) ) {
+			wpcybersec()->logger->log(
+				'guard_enable_failed',
+				/* translators: %s: error message */
+				sprintf( __( 'Could not switch on the early upload guard: %s', 'cybergate-security' ), $result->get_error_message() )
+			);
+		} else {
+			$files = array();
+			foreach ( $gm->wiring_dirs() as $dir ) {
+				$files[] = wp_normalize_path( $dir . ( 'htaccess' === $how ? '.htaccess' : (string) ini_get( 'user_ini.filename' ) ) );
+			}
+			$check = $this->last_check;
+			if ( 'active' === $check ) {
+				$shown = __( 'A live test confirmed that PHP loads it.', 'cybergate-security' );
+			} elseif ( 'user_ini' === $how && 'inactive' === $check ) {
+				$shown = __( 'PHP reads .user.ini again within a few minutes; the Dashboard shows when the guard runs.', 'cybergate-security' );
+			} else {
+				$shown = __( 'The live test got no answer, so it is not confirmed yet.', 'cybergate-security' );
+			}
+			wpcybersec()->logger->log(
+				'guard_installed',
+				sprintf(
+					/* translators: 1: file list, 2: what the live test showed */
+					__( 'Early upload guard installed and switched on in %1$s. %2$s', 'cybergate-security' ),
+					implode( ', ', $files ),
+					$shown
+				)
+			);
+		}
+		return $result;
+	}
+
+	/** @var string Method fix_guard() wired the guard in with (htaccess | user_ini). */
+	private $wired_with = '';
+
+	/** @var string Last live test result of wire_guard(). */
+	private $last_check = '';
+
+	/**
+	 * Writes the guard files and the auto_prepend_file line, tests, rolls back.
+	 *
+	 * @param Guard_Manager $gm      Guard manager.
+	 * @param string[]      $methods guard_methods().
+	 * @return true|string|\WP_Error
+	 */
+	private function wire_guard( $gm, array $methods ) {
 		$installed = $gm->install();
 		if ( is_wp_error( $installed ) ) {
 			return $installed;
@@ -661,8 +749,9 @@ class Hardening {
 			: '';
 		$count   = count( $methods );
 		foreach ( $methods as $i => $method ) {
-			$more  = $i < $count - 1;
-			$wired = 'htaccess' === $method ? $gm->write_htaccess() : $gm->write_user_ini();
+			$more             = $i < $count - 1;
+			$this->wired_with = $method;
+			$wired            = 'htaccess' === $method ? $gm->write_htaccess() : $gm->write_user_ini();
 			if ( is_wp_error( $wired ) ) {
 				if ( $more ) {
 					continue;
@@ -672,6 +761,13 @@ class Hardening {
 			}
 
 			$check = $this->ping_guard();
+			$ttl   = (int) ini_get( 'user_ini.cache_ttl' );
+			if ( 'inactive' === $check && 'user_ini' === $method && $ttl > 0 && $ttl <= 15 ) {
+				// PHP rereads .user.ini within seconds here: test once more after that.
+				sleep( $ttl + 1 );
+				$check = $this->ping_guard();
+			}
+			$this->last_check = $check;
 			if ( 'down' === $check ) {
 				$this->roll_back_guard( $gm, $method );
 				return new \WP_Error( 'wpcybersec_fix', __( 'The site stopped answering after the change, so it was undone. Follow the steps below or ask your host.', 'cybergate-security' ) );
@@ -732,7 +828,8 @@ class Hardening {
 	 *
 	 * @return string active | inactive | down | unknown
 	 */
-	private function ping_guard() {
+	private function ping_guard( $timeout = 20 ) {
+		$this->ping_timeout = max( 2, (int) $timeout );
 		$token = wp_generate_password( 24, false );
 		set_transient( 'wpcybersec_guard_ping', $token, 5 * MINUTE_IN_SECONDS );
 		$admin = $this->ping_url(
@@ -746,7 +843,27 @@ class Hardening {
 		);
 		$front = 'down' === $admin ? 'unknown' : $this->ping_url( add_query_arg( 'wpcybersec_guard_ping', $token, home_url( '/' ) ) );
 		delete_transient( 'wpcybersec_guard_ping' );
-		return self::combine_pings( $admin, $front );
+		$result = self::combine_pings( $admin, $front );
+		$gm     = wpcybersec()->guard_manager;
+		if ( is_object( $gm ) && method_exists( $gm, 'record_ping' ) ) {
+			// Kept for WP-CLI, cron and development servers, which cannot tell themselves.
+			$gm->record_ping( $result );
+		}
+		return $result;
+	}
+
+	/** @var int Seconds per test request of ping_guard(). */
+	private $ping_timeout = 20;
+
+	/**
+	 * Repeats the live test of an installed guard (Guard_Manager::maybe_reping(),
+	 * "Test again" in Settings > Advanced > Early guard).
+	 *
+	 * @param int $timeout Seconds per test request.
+	 * @return string active | inactive | down | unknown
+	 */
+	public function reping( $timeout = 10 ) {
+		return $this->ping_guard( $timeout );
 	}
 
 	/**
@@ -775,7 +892,7 @@ class Hardening {
 		$response = wp_remote_get(
 			$url,
 			array(
-				'timeout'   => 20,
+				'timeout'   => $this->ping_timeout,
 				'sslverify' => apply_filters( 'https_local_ssl_verify', false ), // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- WordPress core filter, same as wp-cron uses for loopback requests.
 				'headers'   => array( 'Cache-Control' => 'no-cache' ),
 			)
@@ -906,7 +1023,7 @@ class Hardening {
 	private function skip_reason( $id ) {
 		switch ( $id ) {
 			case 'guard':
-				return __( 'The early guard was not installed: it changes how PHP starts every request, so use its own "Install the guard" button.', 'cybergate-security' );
+				return __( 'The early guard was not installed: it changes how PHP starts every request, so use its own "Install and switch on the early guard" button.', 'cybergate-security' );
 			case 'disable_wp_cron':
 				return __( 'Visitor-triggered cron was not switched off: use its own button once you are sure the real cron job keeps running.', 'cybergate-security' );
 			case 'wp_version':
@@ -930,6 +1047,13 @@ class Hardening {
 	public function render_fix( $id ) {
 		$auto  = $this->descriptor( $id );
 		$steps = $this->manual_steps( $id );
+		// By hand, the early guard still needs its files: offer them as their own button.
+		$files = 'guard' === $id ? $this->descriptor( 'guard_files' ) : null;
+		$extra = '';
+		if ( $files ) {
+			$extra = '<p class="wpcs-autofix wpcs-autofix--inline"><button type="button" class="button" data-wpcs-fix="guard_files"><span class="dashicons dashicons-download" aria-hidden="true"></span>' . esc_html( $files['label'] ) . '</button>'
+				. '<span class="wpcs-sub">' . esc_html( $files['description'] ) . '</span></p>';
+		}
 		if ( $auto ) {
 			echo '<div class="wpcs-autofix">';
 			if ( ! empty( $auto['link'] ) ) {
@@ -942,13 +1066,15 @@ class Hardening {
 			}
 			echo '</div>';
 			if ( $steps ) {
-				echo '<details class="wpcs-manual" data-wpcs-manual="' . esc_attr( $auto['id'] ) . '"><summary>' . esc_html__( 'Do it by hand instead', 'cybergate-security' ) . '</summary>';
+				echo '<details class="wpcs-manual" data-wpcs-manual="' . esc_attr( $auto['id'] ) . '"><summary>' . esc_html( 'guard' === $id ? __( 'Do it by hand', 'cybergate-security' ) : __( 'Do it by hand instead', 'cybergate-security' ) ) . '</summary>';
+				echo $extra; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped above.
 				Admin\Settings_Page::render_steps( $steps );
 				echo '</details>';
 			}
 		} elseif ( $steps ) {
 			echo '<div class="wpcs-manual wpcs-manual--open" data-wpcs-manual="' . esc_attr( $id ) . '">';
 			echo '<span class="wpcs-sub wpcs-check__fix">' . esc_html__( 'How to set it up:', 'cybergate-security' ) . '</span>';
+			echo $extra; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped above.
 			Admin\Settings_Page::render_steps( $steps );
 			echo '</div>';
 		}

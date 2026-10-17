@@ -4,7 +4,9 @@
  * Uses window.WPCyberSec from core.js. Behaviour:
  *   - protection level cards sync the related fields to the preset values
  *   - "Custom" hint when the fields differ from the selected preset
- *   - wizard baseline scan runner with progress and result
+ *   - wizard baseline scan runner with progress and result (Continue becomes
+ *     the main action once a baseline exists)
+ *   - wizard upload policy radios follow the chosen protection level
  *   - test email button (AJAX, falls back to the form submit without JS)
  *   - freeze lock Unlock / Lock buttons
  *   - Settings > Advanced section chips work as tabs (one section at a time)
@@ -71,6 +73,20 @@
 			return p.file_mode === 'quarantine_exec';
 		}
 	};
+
+	/**
+	 * Wizard radio groups and the value a preset gives them.
+	 */
+	var WIZARD_RADIOS = {
+		upload_mode: function (p) {
+			return p.upload_mode === 'hold_risky' ? 'hold_risky' : 'hold_all';
+		}
+	};
+
+	function radioValue(form, name) {
+		var checked = form.querySelector('input[type="radio"][name="' + name + '"]:checked');
+		return checked ? checked.value : '';
+	}
 
 	function selectedLevel(form) {
 		var checked = form.querySelector('input[data-wpcs-level]:checked');
@@ -150,9 +166,13 @@
 
 	function differsFromPreset(form, preset, isWizard) {
 		if (isWizard) {
-			return Object.keys(WIZARD_SYNC).some(function (key) {
+			var toggles = Object.keys(WIZARD_SYNC).some(function (key) {
 				var el = form.querySelector('[data-wpcs-sync="' + key + '"]');
 				return el && el.checked !== WIZARD_SYNC[key](preset);
+			});
+			return toggles || Object.keys(WIZARD_RADIOS).some(function (name) {
+				var value = radioValue(form, name);
+				return value !== '' && value !== WIZARD_RADIOS[name](preset);
 			});
 		}
 		return Object.keys(preset).some(function (key) {
@@ -195,6 +215,12 @@
 							if (el) {
 								el.checked = WIZARD_SYNC[key](preset);
 							}
+						});
+						Object.keys(WIZARD_RADIOS).forEach(function (name) {
+							var wanted = WIZARD_RADIOS[name](preset);
+							each(form.querySelectorAll('input[type="radio"][name="' + name + '"]'), function (el) {
+								el.checked = el.value === wanted;
+							});
 						});
 					} else {
 						applyPreset(form, preset);
@@ -267,8 +293,37 @@
 			result.classList.remove('wpcs-hidden');
 		}
 
+		/**
+		 * The listing phase: the count only once the job reports one (it is
+		 * saved at the end of each step, so it can stay 0 for a while).
+		 */
+		function listingLabel(status) {
+			if (!status || status.state !== 'enumerating') {
+				return;
+			}
+			var text = progress.querySelector('.wpcs-progress__text');
+			var found = parseInt(status.files_total, 10) || 0;
+			if (text) {
+				text.textContent = found > 0 ? fmt(i18n.listingCount || '%s', S.number(found)) : i18n.listing || '';
+			}
+		}
+
+		/** After a finished scan: Continue is the main action, scanning again is secondary. */
+		function demote() {
+			button.className = 'button button-large';
+			var label = button.querySelector('[data-wpcs-baseline-label]');
+			if (label) {
+				label.textContent = i18n.scanAgain || label.textContent;
+			}
+			var icon = button.querySelector('.dashicons');
+			if (icon) {
+				icon.className = 'dashicons dashicons-update';
+			}
+		}
+
 		function onProgress(status) {
 			S.renderProgress(progress, status);
+			listingLabel(status);
 			if (status && status.mode && status.mode !== 'baseline' && S.scan.isRunning(status)) {
 				show(notice('', i18n.waitOther || ''));
 			} else if (status && status.mode === 'baseline' && !result.classList.contains('wpcs-hidden') && S.scan.isRunning(status)) {
@@ -300,8 +355,10 @@
 				}
 				show(wrap);
 				box.setAttribute('data-has-baseline', '1');
+				demote();
 				if (next) {
 					next.disabled = false;
+					next.focus();
 				}
 				if (hint) {
 					hint.hidden = true;
@@ -338,6 +395,7 @@
 			}
 			begin();
 			S.renderProgress(progress, { state: 'enumerating', files_total: 0, message: i18n.starting || '' });
+			listingLabel({ state: 'enumerating', files_total: 0 });
 			runBaseline(0).then(end).catch(fail);
 		});
 

@@ -231,7 +231,7 @@ class Developer_Instructions {
 		switch ( $id ) {
 			case 'guard':
 				$status = Sysadmin_Tools::call( 'guard_manager', 'status', array(), array() );
-				return ! empty( $status['active'] );
+				return ! empty( $status['active'] ) || ! empty( $status['confirmed'] );
 			case 'hmac_key':
 				return defined( 'WPCYBERSEC_HMAC_KEY' );
 			case 'disable_wp_cron':
@@ -263,7 +263,7 @@ class Developer_Instructions {
 			case 'guard':
 				$status = Sysadmin_Tools::call( 'guard_manager', 'status', array(), array() );
 				$hard   = Sysadmin_Tools::service( 'hardening' );
-				return ! empty( $status['installed'] ) && empty( $status['active'] ) && empty( $status['conflict'] )
+				return ! empty( $status['installed'] ) && empty( $status['active'] ) && empty( $status['confirmed'] ) && empty( $status['conflict'] )
 					&& $hard && method_exists( $hard, 'guard_method' ) && '' === $hard->guard_method();
 			case 'clamav':
 				return isset( $av['clamav']['state'] ) && 'missing' === $av['clamav']['state'];
@@ -422,10 +422,7 @@ class Developer_Instructions {
 							'text' => sprintf( __( 'Open the crontab of the user that owns the site files (%s here) with "crontab -e" and add these lines:', 'cybergate-security' ), $user ),
 							'code' => $snippets[0]['code'],
 						),
-						array(
-							'text' => __( 'Once the job runs, add this line to wp-config.php so page visits no longer trigger background work:', 'cybergate-security' ),
-							'code' => $snippets[2]['code'],
-						),
+						Sysadmin_Tools::cron_disable_step(),
 					);
 				}
 				break;

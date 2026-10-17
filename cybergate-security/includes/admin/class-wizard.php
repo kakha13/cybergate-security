@@ -382,18 +382,42 @@ class Wizard {
 		$hold_install = 'hold' === $s['install_mode'];
 		$quarantine   = 'quarantine_exec' === $s['file_mode'];
 
+		// A level that differs only in which uploads are held still starts from its card.
+		$card = $level;
+		if ( 'custom' === $level ) {
+			$base = $this->tools()->match_level( array_merge( $s, array( 'upload_mode' => 'hold_all' ) ) );
+			$card = 'custom' !== $base ? $base : $level;
+		}
+
 		$this->heading(
 			'shield',
 			__( 'Choose a protection level', 'cybergate-security' ),
 			__( 'Pick a starting point. Balanced suits most sites; you can fine-tune every setting later.', 'cybergate-security' )
 		);
-		if ( 'custom' === $level ) {
+		if ( 'custom' === $card ) {
 			Settings_Page::notice( __( 'Your settings are currently customized. Pick a level to start from its defaults, or keep your current settings.', 'cybergate-security' ), 'info' );
 		}
-		echo Settings_Page::level_cards( 'level', $level ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in level_cards().
+		$this->render_upload_hint( $s );
+		echo Settings_Page::level_cards( 'level', $card ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in level_cards().
 		?>
 		<div class="wpcs-wizard__tune" data-wpcs-level-form="wizard">
 			<h3 class="wpcs-wizard__subtitle"><?php esc_html_e( 'Fine-tune', 'cybergate-security' ); ?></h3>
+			<div class="wpcs-field" data-wpcs-upload-mode>
+				<div class="wpcs-field__label"><?php esc_html_e( 'New uploads', 'cybergate-security' ); ?></div>
+				<div>
+				<?php
+				echo Settings_Page::radio_list( // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in radio_list().
+					'upload_mode',
+					array(
+						'hold_all'   => array( __( 'Hold every upload', 'cybergate-security' ), __( 'Every new file waits until an administrator approves it. Safest; best for sites with few uploads.', 'cybergate-security' ) ),
+						'hold_risky' => array( __( 'Hold only risky uploads (clean images and documents pass after scanning)', 'cybergate-security' ), __( 'Risky means: files that can run code (PHP and other script names, double extensions such as photo.php.jpg, .htaccess), archives (ZIP, RAR, 7z, TAR, GZ), SVG, HTML, XML and JavaScript files, files whose content does not match their extension or whose type is unknown, and anything the malware scan flags.', 'cybergate-security' ) ),
+					),
+					in_array( $s['upload_mode'], array( 'hold_all', 'hold_risky' ), true ) ? $s['upload_mode'] : ''
+				);
+				?>
+				<span class="wpcs-field__help"><?php esc_html_e( 'Uploads that look malicious are always held, whichever you choose.', 'cybergate-security' ); ?></span>
+				</div>
+			</div>
 			<?php
 			Settings_Page::render_toggle_row(
 				'hold_admin_uploads',
@@ -421,6 +445,47 @@ class Wizard {
 			<p class="wpcs-custom-hint wpcs-hidden" data-wpcs-custom-hint></p>
 		</div>
 		<?php
+	}
+
+	/**
+	 * Busy sites: how many approvals "hold every upload" means, and the
+	 * combination that keeps that manageable.
+	 *
+	 * @param array $s Settings.
+	 */
+	private function render_upload_hint( array $s ) {
+		$tools = $this->tools();
+		if ( ! method_exists( $tools, 'upload_activity' ) ) {
+			return;
+		}
+		try {
+			$stats = $tools->upload_activity();
+		} catch ( \Throwable $e ) {
+			return;
+		}
+		$per_day = isset( $stats['per_day'] ) ? (float) $stats['per_day'] : 0.0;
+		if ( $per_day <= Sysadmin_Tools::BUSY_UPLOADS_PER_DAY ) {
+			return;
+		}
+		$n    = number_format_i18n( (int) round( $per_day ) );
+		$text = sprintf(
+			/* translators: 1: uploads per day, 2: percentage, 3: uploads per day */
+			__( 'This site receives about %1$s uploads a day (%2$s%% from users who are not administrators). Holding every upload means approving about %3$s files a day.', 'cybergate-security' ),
+			$n,
+			number_format_i18n( (int) $stats['non_admin_pct'] ),
+			$n
+		);
+		echo '<div class="wpcs-callout wpcs-callout--hint" data-wpcs-upload-hint>';
+		echo '<span class="wpcs-callout__icon" aria-hidden="true"><span class="dashicons dashicons-chart-bar"></span></span>';
+		echo '<div class="wpcs-callout__text"><strong>' . esc_html( $text ) . '</strong>';
+		if ( 'hold_risky' === $s['upload_mode'] && 'hold' === $s['install_mode'] ) {
+			echo '<span class="wpcs-sub">' . esc_html__( 'This site already holds only risky uploads and every new plugin and theme, the combination we recommend for busy sites.', 'cybergate-security' ) . '</span></div>';
+			echo '</div>';
+			return;
+		}
+		echo '<span class="wpcs-sub">' . esc_html__( 'Recommended for this site: Balanced, but hold only risky uploads, and keep holding new plugins and themes. Clean images and documents then pass after the malware scan; anything that could run code still waits for you.', 'cybergate-security' ) . '</span></div>';
+		echo '<button type="submit" name="wpcs_do" value="recommended_uploads" class="button button-primary" formnovalidate><span class="dashicons dashicons-yes" aria-hidden="true"></span>' . esc_html__( 'Use this', 'cybergate-security' ) . '</button>';
+		echo '</div>';
 	}
 
 	/**
@@ -465,9 +530,10 @@ class Wizard {
 		?>
 		<div class="wpcs-scanbox" data-wpcs-baseline-box data-has-baseline="<?php echo $has_base ? '1' : '0'; ?>">
 			<div class="wpcs-scanbox__action">
-				<button type="button" class="button button-primary button-hero" data-wpcs-baseline>
-					<span class="dashicons dashicons-search" aria-hidden="true"></span>
-					<?php echo $has_base ? esc_html__( 'Run the baseline scan again', 'cybergate-security' ) : esc_html__( 'Scan and trust current files', 'cybergate-security' ); ?>
+				<?php // Once a baseline exists, Continue is the main action and scanning again is secondary. ?>
+				<button type="button" class="<?php echo esc_attr( $has_base ? 'button button-large' : 'button button-primary button-hero' ); ?>" data-wpcs-baseline>
+					<span class="dashicons dashicons-<?php echo esc_attr( $has_base ? 'update' : 'search' ); ?>" aria-hidden="true"></span>
+					<span data-wpcs-baseline-label><?php echo $has_base ? esc_html__( 'Scan again', 'cybergate-security' ) : esc_html__( 'Scan and trust current files', 'cybergate-security' ); ?></span>
 				</button>
 				<span class="wpcs-scanbox__hint wpcs-muted" data-wpcs-baseline-hint<?php echo $has_base ? ' hidden' : ''; ?>><?php esc_html_e( 'Continue unlocks when the scan is done, or skip it for now.', 'cybergate-security' ); ?></span>
 			</div>
@@ -620,23 +686,20 @@ class Wizard {
 				<span class="dashicons dashicons-shield-alt" aria-hidden="true"></span>
 				<h3><?php esc_html_e( 'Early upload guard', 'cybergate-security' ); ?></h3>
 				<?php
-				if ( is_array( $guard ) ) {
-					if ( ! empty( $guard['active'] ) ) {
-						echo '<span class="wpcs-badge wpcs-badge--ok">' . esc_html__( 'Active', 'cybergate-security' ) . '</span>';
-					} elseif ( ! empty( $guard['installed'] ) ) {
-						echo '<span class="wpcs-badge wpcs-badge--medium">' . esc_html__( 'Installed, not loaded yet', 'cybergate-security' ) . '</span>';
-					} else {
-						echo '<span class="wpcs-badge wpcs-badge--muted">' . esc_html__( 'Not installed', 'cybergate-security' ) . '</span>';
-					}
+				$live = $this->guard_live( $guard );
+				if ( $live ) {
+					echo '<span class="wpcs-badge wpcs-badge--' . esc_attr( $live['tone'] ) . '">' . esc_html( $live['label'] ) . '</span>';
 				}
 				?>
 			</div>
 			<p><?php esc_html_e( 'Runs before any PHP code through auto_prepend_file and holds files uploaded to ANY script, including old scripts outside WordPress that attackers like to abuse.', 'cybergate-security' ); ?></p>
 			<?php
 			$hardening = Sysadmin_Tools::service( 'hardening' );
-			if ( is_array( $guard ) && ( ! empty( $guard['active'] ) || ! empty( $guard['installed'] ) ) ) {
+			$running   = $live && in_array( $live['state'], array( 'active', 'confirmed' ), true );
+			if ( $running || ( is_array( $guard ) && ! empty( $guard['conflict'] ) ) ) {
 				echo '<a class="button" href="' . esc_url( Sysadmin_Tools::settings_url( 'advanced', array(), 'wpcs-guard' ) ) . '">' . esc_html__( 'Guard settings', 'cybergate-security' ) . '</a>';
 			} elseif ( $hardening && method_exists( $hardening, 'render_fix' ) ) {
+				// One click: files, the right auto_prepend_file line for this server, a live test, undo on failure.
 				$hardening->render_fix( 'guard' );
 			} else {
 				echo '<a class="button" href="' . esc_url( Sysadmin_Tools::settings_url( 'advanced', array(), 'wpcs-guard' ) ) . '">' . esc_html__( 'Set it up in Settings > Advanced', 'cybergate-security' ) . '</a>';
@@ -689,7 +752,11 @@ class Wizard {
 		$guide  = Sysadmin_Tools::settings_url( 'advanced', array(), 'wpcs-antivirus' );
 		echo '<div class="wpcs-section">';
 		echo '<div class="wpcs-section__head"><span class="dashicons dashicons-sos" aria-hidden="true"></span><h3>' . esc_html__( 'Antivirus (optional)', 'cybergate-security' ) . '</h3>';
-		echo '<span class="wpcs-badge wpcs-badge--' . esc_attr( $clam['tone'] ) . '">' . esc_html( 'ClamAV: ' . $clam['label'] ) . '</span>';
+		$short = array(
+			'broken' => __( 'Not working', 'cybergate-security' ),
+			'slow'   => __( 'Works, but slow', 'cybergate-security' ),
+		);
+		echo '<span class="wpcs-badge wpcs-badge--' . esc_attr( $clam['tone'] ) . '">' . esc_html( 'ClamAV: ' . ( isset( $short[ $clam['state'] ] ) ? $short[ $clam['state'] ] : $clam['label'] ) ) . '</span>';
 		echo '</div>';
 		echo '<p>' . esc_html__( 'ClamAV and Linux Malware Detect know many more existing infections and give every upload a second opinion. They find more, but they do not block attacks.', 'cybergate-security' ) . '</p>';
 		$facts = array();
@@ -706,11 +773,18 @@ class Wizard {
 			$facts[] = __( 'Linux Malware Detect is not installed.', 'cybergate-security' );
 		}
 		echo '<p class="wpcs-muted">' . esc_html( implode( ' ', $facts ) ) . '</p>';
+		if ( in_array( $clam['state'], array( 'broken', 'slow' ), true ) || ( 'ready_off' === $clam['state'] && ! empty( $clam['slow_only'] ) ) ) {
+			// The self-test failed, or only a clamscan that is too slow for uploads works.
+			Settings_Page::notice( $clam['label'] . ( ! empty( $clam['hint'] ) ? ' ' . $clam['hint'] : '' ), 'broken' === $clam['state'] ? 'bad' : 'warn' );
+			if ( ! empty( $clam['hint_code'] ) ) {
+				echo Settings_Page::code( $clam['hint_code'] ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+			}
+		}
 		echo '<p class="wpcs-row">';
 		if ( 'ready_off' === $clam['state'] ) {
 			echo '<button type="button" class="button button-primary" data-wpcs-clamav-enable><span class="dashicons dashicons-yes" aria-hidden="true"></span>' . esc_html__( 'Turn on ClamAV for uploads', 'cybergate-security' ) . '</button>';
 			echo '<a href="' . esc_url( $guide ) . '">' . esc_html__( 'Details', 'cybergate-security' ) . '</a>';
-		} elseif ( in_array( $clam['state'], array( 'uploads', 'uploads_scans' ), true ) ) {
+		} elseif ( in_array( $clam['state'], array( 'uploads', 'uploads_scans', 'slow', 'broken' ), true ) ) {
 			echo '<a class="button" href="' . esc_url( $guide ) . '">' . esc_html__( 'Antivirus settings', 'cybergate-security' ) . '</a>';
 		} else {
 			echo '<a class="button" href="' . esc_url( $guide ) . '"><span class="dashicons dashicons-book" aria-hidden="true"></span>' . esc_html__( 'Install guide', 'cybergate-security' ) . '</a>';
@@ -736,6 +810,79 @@ class Wizard {
 		) . ' ';
 		echo '<a href="' . esc_url( Sysadmin_Tools::settings_url( 'advanced', array(), 'wpcs-developer' ) ) . '">' . esc_html__( 'Open the developer instructions', 'cybergate-security' ) . '</a>';
 		echo '</p></div>';
+	}
+
+	/**
+	 * Antivirus row of the summary: ClamAV state, plus Linux Malware Detect when it is installed.
+	 *
+	 * @param array $av Sysadmin_Tools::antivirus_status().
+	 * @return string
+	 */
+	private function antivirus_summary( array $av ) {
+		$clam  = $av['clamav'];
+		$texts = array(
+			'missing'       => ! empty( $clam['hidden'] ) ? __( 'ClamAV: unknown (hosting hides it)', 'cybergate-security' ) : __( 'ClamAV: not installed (optional)', 'cybergate-security' ),
+			'blocked'       => __( 'ClamAV: installed, PHP cannot run it', 'cybergate-security' ),
+			'broken'        => __( 'ClamAV: installed, not working', 'cybergate-security' ),
+			'ready_off'     => __( 'ClamAV: ready, not in use', 'cybergate-security' ),
+			'slow'          => __( 'ClamAV: on, too slow for uploads', 'cybergate-security' ),
+			'uploads'       => __( 'ClamAV: checks uploads', 'cybergate-security' ),
+			'uploads_scans' => __( 'ClamAV: checks uploads and scans', 'cybergate-security' ),
+		);
+		$parts = array( isset( $texts[ $clam['state'] ] ) ? $texts[ $clam['state'] ] : 'ClamAV: ' . $clam['label'] );
+		if ( ! empty( $av['maldet']['binary'] ) ) {
+			$parts[] = __( 'Linux Malware Detect: installed', 'cybergate-security' );
+		}
+		return implode( ', ', $parts );
+	}
+
+	/**
+	 * @param array $av Sysadmin_Tools::antivirus_status().
+	 * @return string Badge tone.
+	 */
+	private function antivirus_tone( array $av ) {
+		$state = $av['clamav']['state'];
+		if ( in_array( $state, array( 'uploads', 'uploads_scans' ), true ) ) {
+			return 'ok';
+		}
+		if ( 'broken' === $state ) {
+			return 'high';
+		}
+		return in_array( $state, array( 'ready_off', 'slow', 'blocked' ), true ) ? 'medium' : 'muted';
+	}
+
+	/**
+	 * What to show for the early guard (Guard_Manager::live_state()).
+	 *
+	 * @param array|null $status Guard_Manager::status().
+	 * @return array|null { state, label, tone }
+	 */
+	private function guard_live( $status ) {
+		if ( ! is_array( $status ) ) {
+			return null;
+		}
+		$manager = Sysadmin_Tools::service( 'guard_manager' );
+		if ( $manager && method_exists( $manager, 'live_state' ) ) {
+			return $manager->live_state( $status );
+		}
+		if ( ! empty( $status['active'] ) ) {
+			return array(
+				'state' => 'active',
+				'label' => __( 'Active', 'cybergate-security' ),
+				'tone'  => 'ok',
+			);
+		}
+		return ! empty( $status['installed'] )
+			? array(
+				'state' => 'installed',
+				'label' => __( 'Installed, not loaded yet', 'cybergate-security' ),
+				'tone'  => 'medium',
+			)
+			: array(
+				'state' => 'off',
+				'label' => __( 'Not installed', 'cybergate-security' ),
+				'tone'  => 'muted',
+			);
 	}
 
 	/**
@@ -784,20 +931,28 @@ class Wizard {
 				! empty( $s['freeze_mods'] ) ? 'ok' : 'muted',
 			),
 		);
-		if ( is_array( $guard ) ) {
-			if ( ! empty( $guard['active'] ) ) {
-				$rows[] = array( 'shield-alt', __( 'Early upload guard', 'cybergate-security' ), __( 'Active', 'cybergate-security' ), 'ok' );
-			} elseif ( ! empty( $guard['installed'] ) ) {
-				$rows[] = array( 'shield-alt', __( 'Early upload guard', 'cybergate-security' ), __( 'Installed, not loaded yet', 'cybergate-security' ), 'medium' );
-			} else {
-				$rows[] = array( 'shield-alt', __( 'Early upload guard', 'cybergate-security' ), __( 'Not installed (optional)', 'cybergate-security' ), 'muted' );
-			}
+		$live = $this->guard_live( $guard );
+		if ( $live ) {
+			$rows[] = array( 'shield-alt', __( 'Early upload guard', 'cybergate-security' ), 'off' === $live['state'] ? __( 'Not installed (optional)', 'cybergate-security' ) : $live['label'], $live['tone'] );
 		}
+		$av = Sysadmin_Tools::call( 'sysadmin', 'antivirus_status', array(), null );
+		if ( is_array( $av ) ) {
+			$rows[] = array( 'sos', __( 'Antivirus', 'cybergate-security' ), $this->antivirus_summary( $av ), $this->antivirus_tone( $av ) );
+		}
+		$alerts_off = 'off' === $s['notify_mode'];
 		?>
 		<div class="wpcs-wizard__hero wpcs-wizard__hero--done">
 			<span class="wpcs-wizard__hero-icon"><span class="dashicons dashicons-yes" aria-hidden="true"></span></span>
 			<h2 class="wpcs-wizard__hero-title"><?php esc_html_e( 'Your site is protected', 'cybergate-security' ); ?></h2>
-			<p class="wpcs-wizard__lead"><?php esc_html_e( 'Here is what is active now. When something is held, it appears on the Reports page and you get an alert.', 'cybergate-security' ); ?></p>
+			<p class="wpcs-wizard__lead">
+				<?php
+				echo esc_html(
+					$alerts_off
+						? __( 'Here is what is active now. When something is held, it appears on the Reports page. Alerts are off, so look there regularly (or turn alerts on in Settings).', 'cybergate-security' )
+						: __( 'Here is what is active now. When something is held, it appears on the Reports page and you get an alert.', 'cybergate-security' )
+				);
+				?>
+			</p>
 		</div>
 		<ul class="wpcs-summary">
 			<?php foreach ( $rows as $row ) : ?>

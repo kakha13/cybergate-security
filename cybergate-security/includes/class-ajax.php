@@ -20,8 +20,14 @@ defined( 'ABSPATH' ) || exit;
  *   scan_tick                                                  -> scan status
  *   scan_status                                                -> scan status
  *   scan_cancel                                                -> scan status
- *   item_action  do=<action>, id=<int>                         -> { item (match snippets redacted), counts, message }
- *   bulk_action  do=<action>, ids[]=<int>                      -> { done, errors, counts }
+ *   item_action  do=<action>, id=<int>[, risk_ok=1]            -> { item (match snippets redacted), counts, message }
+ *   bulk_action  do=<action>, ids[]=<int>[, risk_ok=1]         -> { done, errors, counts }
+ *                (approve / ignore of an item flagged high or critical needs risk_ok=1, which the
+ *                Reports page sends after its confirmation dialog; error code "confirm" otherwise)
+ *   clean_images                                               -> { ids, count, more } pending uploads "Allow all clean images" may approve
+ *   allow_clean  ids[]=<int> (at most ALLOW_CLEAN_MAX)          -> { done, approved, skipped, errors, remaining, counts }
+ *                approves the ids that are still clean images, one by one, until the time budget
+ *                is used; the browser sends "remaining" again
  *   counts                                                     -> counts
  *   unlock       minutes=<int>                                 -> { unlocked_until }
  *   lock                                                       -> { unlocked_until: 0 }
@@ -41,8 +47,14 @@ class Ajax {
 	 */
 	const CRON_TAKEOVER = 90;
 
+	/** Most ids one allow_clean request accepts. */
+	const ALLOW_CLEAN_MAX = 50;
+
+	/** Most pending uploads clean_images looks at. */
+	const CLEAN_SCAN_MAX = 5000;
+
 	public function register() {
-		$endpoints = array( 'scan_start', 'scan_tick', 'scan_status', 'scan_cancel', 'item_action', 'bulk_action', 'counts', 'unlock', 'lock', 'diff_summary', 'clamav_enable' );
+		$endpoints = array( 'scan_start', 'scan_tick', 'scan_status', 'scan_cancel', 'item_action', 'bulk_action', 'counts', 'unlock', 'lock', 'diff_summary', 'clamav_enable', 'clean_images', 'allow_clean' );
 		foreach ( $endpoints as $endpoint ) {
 			add_action( 'wp_ajax_wpcybersec_' . $endpoint, array( $this, $endpoint ) );
 		}
@@ -176,6 +188,7 @@ class Ajax {
 		$this->guard();
 		$action = $this->param( 'do' );
 		$id     = (int) $this->param( 'id', '0' );
+		$this->require_risk_confirm( $action, array( $id ) );
 		$result = wpcybersec()->decisions->apply( $action, $id );
 		if ( is_wp_error( $result ) ) {
 			wp_send_json_error( array( 'message' => $result->get_error_message() ) );
@@ -218,9 +231,144 @@ class Ajax {
 		$action = $this->param( 'do' );
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified in guard().
 		$ids    = isset( $_POST['ids'] ) ? array_map( 'intval', (array) wp_unslash( $_POST['ids'] ) ) : array();
+		$this->require_risk_confirm( $action, $ids );
 		$result = wpcybersec()->decisions->bulk( $action, $ids );
 		$result['counts'] = wpcybersec()->store->counts();
 		wp_send_json_success( $result );
+	}
+
+	/**
+	 * Allowing (or marking safe) an item flagged high or critical needs the
+	 * confirmation of the Reports page dialog (risk_ok=1); answers with error
+	 * code "confirm" otherwise. WP-CLI and Decisions themselves are not
+	 * affected.
+	 *
+	 * @param string $action Decision.
+	 * @param int[]  $ids    Item ids.
+	 */
+	private function require_risk_confirm( $action, array $ids ) {
+		if ( ! in_array( $action, array( 'approve', 'ignore' ), true ) || '1' === $this->param( 'risk_ok' ) ) {
+			return;
+		}
+		$risky = Admin\Admin::risky_items( $ids );
+		if ( ! $risky ) {
+			return;
+		}
+		$text = Admin\Admin::risk_confirm_text( $risky[0] );
+		wp_send_json_error(
+			array(
+				'code'    => 'confirm',
+				'message' => $text['verdict'] . '. ' . __( 'Confirm on the Reports page before allowing a file flagged high or critical.', 'cybergate-security' ),
+			)
+		);
+	}
+
+	/**
+	 * Pending uploads that "Allow all clean images" may approve (verified
+	 * images without any finding, see Upload_Gate::is_clean_image()).
+	 */
+	public function clean_images() {
+		$this->guard();
+		$gate  = wpcybersec()->upload_gate;
+		$store = wpcybersec()->store;
+		$start = microtime( true );
+		$ids   = array();
+		$more  = false;
+		$page  = 1;
+		$seen  = 0;
+		do {
+			$result = $store->items_query(
+				array(
+					'type'     => Store::TYPE_UPLOAD,
+					'status'   => Store::STATUS_PENDING,
+					'orderby'  => 'id',
+					'order'    => 'ASC',
+					'per_page' => 200,
+					'page'     => $page,
+				)
+			);
+			$rows = isset( $result['rows'] ) ? (array) $result['rows'] : array();
+			foreach ( $rows as $item ) {
+				++$seen;
+				if ( $gate->is_clean_image( $item ) ) {
+					$ids[] = (int) $item['id'];
+				}
+			}
+			++$page;
+			if ( $seen >= self::CLEAN_SCAN_MAX || microtime( true ) - $start > 10.0 ) {
+				$more = count( $rows ) >= 200;
+				break;
+			}
+		} while ( count( $rows ) >= 200 );
+		wp_send_json_success(
+			array(
+				'ids'   => $ids,
+				'count' => count( $ids ),
+				'more'  => $more,
+			)
+		);
+	}
+
+	/**
+	 * Approves clean images in batches (each is imported into the Media
+	 * Library like a single Allow). Every id is checked again here, so the
+	 * list from clean_images() cannot be stretched to anything else.
+	 */
+	public function allow_clean() {
+		$this->guard();
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- verified in guard().
+		$ids      = isset( $_POST['ids'] ) ? array_slice( array_values( array_unique( array_filter( array_map( 'intval', (array) wp_unslash( $_POST['ids'] ) ) ) ) ), 0, self::ALLOW_CLEAN_MAX ) : array();
+		$plugin   = wpcybersec();
+		$budget   = self::allow_budget();
+		$start    = microtime( true );
+		$done     = 0;
+		$skip     = 0;
+		$errors   = array();
+		$approved = array();
+		$left     = $ids;
+		foreach ( $ids as $id ) {
+			if ( $done + $skip + count( $errors ) > 0 && microtime( true ) - $start > $budget ) {
+				break;
+			}
+			array_shift( $left );
+			$item = $plugin->store->item_get( $id );
+			if ( ! $item || ! $plugin->upload_gate->is_clean_image( $item ) ) {
+				++$skip;
+				continue;
+			}
+			$result = $plugin->decisions->bulk( 'approve', array( $id ) );
+			if ( ! empty( $result['done'] ) ) {
+				++$done;
+				$approved[] = $id;
+			}
+			if ( ! empty( $result['errors'] ) ) {
+				$errors = array_merge( $errors, array_map( 'strval', (array) $result['errors'] ) );
+			}
+		}
+		wp_send_json_success(
+			array(
+				'done'      => $done,
+				'approved'  => $approved,
+				'skipped'   => $skip,
+				'errors'    => array_slice( $errors, 0, 20 ),
+				'remaining' => array_values( $left ),
+				'counts'    => $plugin->store->counts(),
+			)
+		);
+	}
+
+	/**
+	 * Seconds one allow_clean request may spend on imports: well inside
+	 * max_execution_time (thumbnails of a large photo take seconds).
+	 *
+	 * @return float
+	 */
+	private static function allow_budget() {
+		$max = (int) ini_get( 'max_execution_time' );
+		if ( $max <= 0 ) {
+			return 15.0;
+		}
+		return max( 2.0, min( 15.0, $max / 3 ) );
 	}
 
 	public function counts() {

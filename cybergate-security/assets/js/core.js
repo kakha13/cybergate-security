@@ -13,13 +13,19 @@
  *   scan.attach(onProgress)       Keeps ticking a scan that is already running
  *   scan.cancel()
  *   renderProgress(el, status)    Fills a .wpcs-progress block
- *   itemAction(action, id)        Applies a decision, resolves with { item, available, counts, message }
- *   bulk(action, ids)             Bulk decision, resolves with { done, errors, counts }
+ *   itemAction(action, id, extra) Applies a decision, resolves with { item, available, counts, message }
+ *                                 (extra: more fields, e.g. { risk_ok: 1 } after the risk dialog)
+ *   bulk(action, ids, extra)      Bulk decision, resolves with { done, errors, counts }
+ *   confirmDialog(opts)           Accessible modal confirmation (native <dialog>), resolves true / false.
+ *                                 opts: { title, verdict, text, confirm, cancel, tone: 'danger'|'ok' }.
+ *                                 Focus starts on Cancel; Escape and the backdrop cancel.
  *
  * Declarative hooks (no extra JS needed):
  *   <button data-wpcs-scan data-mode="full" data-malware="1" data-target="#prog" data-reload="1">
  *   <div id="prog" class="wpcs-progress wpcs-hidden" data-wpcs-progress-auto> ...markup below... </div>
  *   <button data-wpcs-action="approve" data-id="12" [data-confirm="..."]>   inside a <tr data-item-id="12">
+ *   <button data-wpcs-action="approve" data-wpcs-risk="3" data-risk-title data-risk-verdict data-risk-text data-risk-confirm data-risk-cancel>
+ *                                 items flagged high or critical: confirmDialog() first, then risk_ok=1
  *   <span data-wpcs-count="pending|threats|quarantined">3</span>
  *   <button class="wpcs-copy" data-wpcs-copy>                              inside .wpcs-code (copies its <pre>)
  *   <a data-wpcs-confirm="Message">                                        asks before following a link / submitting
@@ -190,7 +196,8 @@
 		}
 		var label;
 		if (state === 'enumerating') {
-			label = (i18n.enumerating || 'Listing files') + ' - ' + sprintf(i18n.filesFound || '%s files found so far', number(status.files_total));
+			// The job saves its count only between steps, so 0 means "not known yet".
+			label = (i18n.enumerating || 'Listing files') + (parseInt(status.files_total, 10) > 0 ? ' - ' + sprintf(i18n.filesFound || '%s files found so far', number(status.files_total)) : '...');
 		} else if (state === 'processing') {
 			label = (i18n.processing || 'Checking files') + ' - ' + sprintf(i18n.filesChecked || '%1$s of %2$s files checked', number(status.files_done), number(status.files_total));
 		} else if (state === 'finishing') {
@@ -225,9 +232,16 @@
 				return;
 			}
 			e.preventDefault();
-			if (btn.getAttribute('data-confirm') && !window.confirm(btn.getAttribute('data-confirm'))) {
+			if (btn.getAttribute('data-confirm') && !btn._wpcsConfirmed) {
+				confirmDialog({ title: btn.getAttribute('data-confirm'), tone: 'ok', confirm: i18n.confirmYes || 'Continue' }).then(function (confirmed) {
+					if (confirmed) {
+						btn._wpcsConfirmed = true;
+						btn.click();
+					}
+				});
 				return;
 			}
+			btn._wpcsConfirmed = false;
 			var target = document.querySelector(btn.getAttribute('data-target') || '[data-wpcs-progress-auto]');
 			var opts = {
 				mode: btn.getAttribute('data-mode') || 'incremental',
@@ -305,18 +319,126 @@
 		});
 	}
 
-	function itemAction(action, id) {
-		return ajax('item_action', { do: action, id: id }).then(function (res) {
+	function merge(base, extra) {
+		Object.keys(extra || {}).forEach(function (key) {
+			base[key] = extra[key];
+		});
+		return base;
+	}
+
+	function itemAction(action, id, extra) {
+		return ajax('item_action', merge({ do: action, id: id }, extra)).then(function (res) {
 			updateCounts(res.counts);
 			return res;
 		});
 	}
 
-	function bulk(action, ids) {
-		return ajax('bulk_action', { do: action, ids: ids }).then(function (res) {
+	function bulk(action, ids, extra) {
+		return ajax('bulk_action', merge({ do: action, ids: ids }, extra)).then(function (res) {
 			updateCounts(res.counts);
 			return res;
 		});
+	}
+
+	/* ---------------- Confirmation dialog ---------------- */
+
+	var dialogSeq = 0;
+
+	function confirmDialog(opts) {
+		opts = opts || {};
+		var probe = document.createElement('dialog');
+		if (typeof probe.showModal !== 'function') {
+			// Browsers without <dialog>: the plain confirm box still says everything.
+			return Promise.resolve(window.confirm([opts.title, opts.verdict, opts.text].filter(Boolean).join('\n\n')));
+		}
+		return new Promise(function (resolve) {
+			var id = 'wpcs-dialog-' + ++dialogSeq;
+			var previous = document.activeElement;
+			var d = document.createElement('dialog');
+			d.className = 'wpcs-dialog wpcs-dialog--' + (opts.tone === 'ok' ? 'ok' : 'danger');
+			d.setAttribute('aria-labelledby', id + '-title');
+			d.setAttribute('aria-describedby', id + '-desc');
+
+			var head = document.createElement('div');
+			head.className = 'wpcs-dialog__head';
+			var icon = document.createElement('span');
+			icon.className = 'dashicons dashicons-' + (opts.tone === 'ok' ? 'format-gallery' : 'warning');
+			icon.setAttribute('aria-hidden', 'true');
+			var title = document.createElement('h2');
+			title.id = id + '-title';
+			title.textContent = opts.title || i18n.confirm || 'Are you sure?';
+			head.appendChild(icon);
+			head.appendChild(title);
+			d.appendChild(head);
+
+			var desc = document.createElement('div');
+			desc.id = id + '-desc';
+			desc.className = 'wpcs-dialog__body';
+			if (opts.verdict) {
+				var verdict = document.createElement('p');
+				verdict.className = 'wpcs-dialog__verdict';
+				verdict.textContent = opts.verdict;
+				desc.appendChild(verdict);
+			}
+			if (opts.text) {
+				var text = document.createElement('p');
+				text.textContent = opts.text;
+				desc.appendChild(text);
+			}
+			d.appendChild(desc);
+
+			var actions = document.createElement('div');
+			actions.className = 'wpcs-dialog__actions';
+			var cancel = document.createElement('button');
+			cancel.type = 'button';
+			cancel.className = 'button button-primary';
+			cancel.textContent = opts.cancel || i18n.cancel || 'Cancel';
+			var ok = document.createElement('button');
+			ok.type = 'button';
+			ok.className = 'button ' + (opts.tone === 'ok' ? 'wpcs-btn-approve' : 'wpcs-btn-danger');
+			ok.textContent = opts.confirm || i18n.confirmYes || 'Continue';
+			actions.appendChild(cancel);
+			actions.appendChild(ok);
+			d.appendChild(actions);
+
+			cancel.addEventListener('click', function () {
+				d.close('cancel');
+			});
+			ok.addEventListener('click', function () {
+				d.close('confirm');
+			});
+			d.addEventListener('click', function (e) {
+				if (e.target === d) {
+					d.close('cancel'); // Click on the backdrop.
+				}
+			});
+			d.addEventListener('close', function () {
+				var confirmed = d.returnValue === 'confirm';
+				if (d.parentNode) {
+					d.parentNode.removeChild(d);
+				}
+				if (previous && typeof previous.focus === 'function' && document.contains(previous)) {
+					previous.focus();
+				}
+				resolve(confirmed);
+			});
+			// Inside the plugin wrapper (its colour tokens); the modal itself sits in the top layer.
+			(document.querySelector('.wpcs-wrap') || document.body).appendChild(d);
+			d.showModal();
+			cancel.focus();
+		});
+	}
+
+	/* Options of the risk dialog from a button's data-risk-* attributes. */
+	function riskOptions(btn) {
+		return {
+			title: btn.getAttribute('data-risk-title') || '',
+			verdict: btn.getAttribute('data-risk-verdict') || '',
+			text: btn.getAttribute('data-risk-text') || '',
+			confirm: btn.getAttribute('data-risk-confirm') || '',
+			cancel: btn.getAttribute('data-risk-cancel') || '',
+			tone: 'danger'
+		};
 	}
 
 	var STATUS_LABEL = {
@@ -338,48 +460,66 @@
 			e.preventDefault();
 			var action = btn.getAttribute('data-wpcs-action');
 			var id = btn.getAttribute('data-id');
-			var confirmMsg = btn.getAttribute('data-confirm') || (action === 'delete' ? i18n.confirmDelete : '');
-			if (confirmMsg && !window.confirm(confirmMsg)) {
+			if (btn.hasAttribute('data-wpcs-risk')) {
+				// Flagged high or critical: the dialog names the finding before anything is allowed.
+				confirmDialog(riskOptions(btn)).then(function (confirmed) {
+					if (confirmed) {
+						runItemAction(btn, action, id, { risk_ok: 1 });
+					}
+				});
 				return;
 			}
-			var row = btn.closest('[data-item-id]');
-			if (row) {
-				row.classList.add('is-busy');
-			}
-			itemAction(action, id)
-				.then(function (res) {
-					var status = res.item ? res.item.status : action;
-					var label = STATUS_LABEL[status] || { text: status, cls: 'muted' };
-					if (row) {
-						row.classList.remove('is-busy');
-						row.classList.add('is-done');
-						var statusCell = row.querySelector('[data-wpcs-status]');
-						if (statusCell) {
-							statusCell.innerHTML = '';
-							var badge = document.createElement('span');
-							badge.className = 'wpcs-badge wpcs-badge--' + label.cls;
-							badge.textContent = label.text;
-							statusCell.appendChild(badge);
-						}
-						var actions = row.querySelector('.wpcs-actions');
-						if (actions) {
-							actions.querySelectorAll('[data-wpcs-action]').forEach(function (b) {
-								var allowed = (res.available || []).indexOf(b.getAttribute('data-wpcs-action')) !== -1;
-								b.classList.toggle('wpcs-hidden', !allowed);
-							});
-						}
+			var confirmMsg = btn.getAttribute('data-confirm') || (action === 'delete' ? i18n.confirmDelete : '');
+			if (confirmMsg) {
+				confirmDialog({ title: confirmMsg, tone: 'danger', confirm: btn.textContent.trim() || i18n.confirmYes || 'Continue' }).then(function (confirmed) {
+					if (confirmed) {
+						runItemAction(btn, action, id, null);
 					}
-					// Extra instructions from the server (for example "upload the ZIP again") win over the generic text.
-					toast(res.message ? res.message : label.text + ': ' + (res.item ? res.item.path : '#' + id));
-					document.dispatchEvent(new CustomEvent('wpcybersec:item-updated', { detail: res }));
-				})
-				.catch(function (err) {
-					if (row) {
-						row.classList.remove('is-busy');
-					}
-					toast(err.message, true);
 				});
+				return;
+			}
+			runItemAction(btn, action, id, null);
 		});
+	}
+
+	function runItemAction(btn, action, id, extra) {
+		var row = btn.closest('[data-item-id]');
+		if (row) {
+			row.classList.add('is-busy');
+		}
+		itemAction(action, id, extra)
+			.then(function (res) {
+				var status = res.item ? res.item.status : action;
+				var label = STATUS_LABEL[status] || { text: status, cls: 'muted' };
+				if (row) {
+					row.classList.remove('is-busy');
+					row.classList.add('is-done');
+					var statusCell = row.querySelector('[data-wpcs-status]');
+					if (statusCell) {
+						statusCell.innerHTML = '';
+						var badge = document.createElement('span');
+						badge.className = 'wpcs-badge wpcs-badge--' + label.cls;
+						badge.textContent = label.text;
+						statusCell.appendChild(badge);
+					}
+					var actions = row.querySelector('.wpcs-actions');
+					if (actions) {
+						actions.querySelectorAll('[data-wpcs-action]').forEach(function (b) {
+							var allowed = (res.available || []).indexOf(b.getAttribute('data-wpcs-action')) !== -1;
+							b.classList.toggle('wpcs-hidden', !allowed);
+						});
+					}
+				}
+				// Extra instructions from the server (for example "upload the ZIP again") win over the generic text.
+				toast(res.message ? res.message : label.text + ': ' + (res.item ? res.item.path : '#' + id));
+				document.dispatchEvent(new CustomEvent('wpcybersec:item-updated', { detail: res }));
+			})
+			.catch(function (err) {
+				if (row) {
+					row.classList.remove('is-busy');
+				}
+				toast(err.message, true);
+			});
 	}
 
 	/* ---------------- Misc ---------------- */
@@ -446,10 +586,21 @@
 	function bindConfirm() {
 		document.addEventListener('click', function (e) {
 			var el = e.target.closest('[data-wpcs-confirm]');
-			if (el && !window.confirm(el.getAttribute('data-wpcs-confirm') || i18n.confirm || 'Are you sure?')) {
-				e.preventDefault();
-				e.stopImmediatePropagation();
+			if (!el) {
+				return;
 			}
+			if (el._wpcsConfirmed) {
+				el._wpcsConfirmed = false; // Confirmed: let this click through once.
+				return;
+			}
+			e.preventDefault();
+			e.stopImmediatePropagation();
+			confirmDialog({ title: el.getAttribute('data-wpcs-confirm') || i18n.confirm || 'Are you sure?', tone: 'danger', confirm: (el.textContent || el.value || '').trim() || i18n.confirmYes || 'Continue' }).then(function (confirmed) {
+				if (confirmed) {
+					el._wpcsConfirmed = true;
+					el.click();
+				}
+			});
 		}, true);
 	}
 
@@ -503,6 +654,7 @@
 		renderProgress: renderProgress,
 		itemAction: itemAction,
 		bulk: bulk,
+		confirmDialog: confirmDialog,
 		updateCounts: updateCounts,
 		copyText: copyText
 	};
