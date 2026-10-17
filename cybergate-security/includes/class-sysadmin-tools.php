@@ -2666,11 +2666,20 @@ class Sysadmin_Tools {
 			$rows[] = array( $label, 'na', __( 'maldet is not installed', 'cybergate-security' ) );
 		} else {
 			$running = null;
-			$pidfile = $base . '/tmp/inotifywait.pid';
-			if ( self::path_allowed( $pidfile ) && self::path_allowed( '/proc' ) && @is_dir( '/proc/self' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-				$pid = @is_readable( $pidfile ) ? (int) trim( (string) @file_get_contents( $pidfile, false, null, 0, 32 ) ) : 0; // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-				if ( $pid > 0 ) {
-					$running = @file_exists( '/proc/' . $pid ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			// Servers that mount /proc with hidepid (common on hardened and CloudLinux
+			// hosts) hide other users' processes from PHP: the root-owned monitor is
+			// invisible there, so "not found" means unknown, not stopped. Process 1
+			// (init) always exists, so not seeing it shows the processes are hidden.
+			$procs_visible = self::path_allowed( '/proc' ) && @is_dir( '/proc/self' ) && @file_exists( '/proc/1' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( $procs_visible ) {
+				// maldet 1.6 keeps the monitor's pid in monitor.pid; older versions in inotifywait.pid.
+				foreach ( array( 'monitor.pid', 'inotifywait.pid' ) as $name ) {
+					$pidfile = $base . '/tmp/' . $name;
+					$pid     = self::path_allowed( $pidfile ) && @is_readable( $pidfile ) ? (int) trim( (string) @file_get_contents( $pidfile, false, null, 0, 32 ) ) : 0; // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+					if ( $pid > 0 && @file_exists( '/proc/' . $pid ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+						$running = true;
+						break;
+					}
 				}
 			}
 			if ( null === $running ) {
@@ -2678,8 +2687,8 @@ class Sysadmin_Tools {
 				$code = self::exit_code( 'pgrep -f ' . escapeshellarg( '[i]notifywait.*maldetect' ) );
 				if ( 0 === $code ) {
 					$running = true;
-				} elseif ( 1 === $code ) {
-					$running = false;
+				} elseif ( 1 === $code && $procs_visible ) {
+					$running = false; // Only trust "no match" when PHP can see other users' processes.
 				}
 			}
 			if ( null === $running ) {
