@@ -95,13 +95,18 @@ class Admin {
 			}
 		}
 
-		add_action( 'admin_menu', array( $this, 'menu' ) );
-		add_action( 'admin_menu', array( $this, 'menu_bubbles' ), 999 );
+		// Multisite: the screens live in Network Admin only. Site administrators
+		// see no plugin menu (their uploads are still held); super admins
+		// approve from Network Admin.
+		$menu_hook = is_multisite() ? 'network_admin_menu' : 'admin_menu';
+		add_action( $menu_hook, array( $this, 'menu' ) );
+		add_action( $menu_hook, array( $this, 'menu_bubbles' ), 999 );
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue' ) );
 		add_action( 'admin_init', array( $this, 'maybe_redirect' ), 1 );
 		add_action( 'admin_notices', array( $this, 'notices' ) );
 		add_action( 'network_admin_notices', array( $this, 'notices' ) );
 		add_filter( 'plugin_action_links_' . WPCYBERSEC_BASENAME, array( $this, 'action_links' ) );
+		add_filter( 'network_admin_plugin_action_links_' . WPCYBERSEC_BASENAME, array( $this, 'action_links' ) );
 		add_filter( 'removable_query_args', array( $this, 'removable_query_args' ) );
 
 		add_action( 'admin_post_wpcybersec_download', array( $this, 'handle_download' ) );
@@ -463,7 +468,17 @@ class Admin {
 			}
 			$query[ sanitize_key( $key ) ] = rawurlencode( (string) $value );
 		}
-		return add_query_arg( $query, admin_url( 'admin.php' ) );
+		return add_query_arg( $query, self::admin_page_base() );
+	}
+
+	/**
+	 * admin.php of the screen that holds the plugin pages: Network Admin on
+	 * multisite (also the action of the pages' GET filter forms).
+	 *
+	 * @return string Unescaped URL.
+	 */
+	public static function admin_page_base() {
+		return \WPCyberSecurity\Network::admin_url( 'admin.php' );
 	}
 
 	/**
@@ -699,7 +714,7 @@ class Admin {
 	 * Opens the setup wizard once right after activation.
 	 */
 	public function maybe_redirect() {
-		if ( ! get_option( Installer::REDIRECT_OPTION ) ) {
+		if ( ! \WPCyberSecurity\Network::get_option( Installer::REDIRECT_OPTION ) ) {
 			return;
 		}
 		if ( wp_doing_ajax() || ( defined( 'WP_CLI' ) && WP_CLI ) || ( defined( 'IFRAME_REQUEST' ) && IFRAME_REQUEST ) ) {
@@ -714,10 +729,15 @@ class Admin {
 			return;
 		}
 
-		delete_option( Installer::REDIRECT_OPTION );
+		// Multisite: the wizard is a Network Admin page; keep the flag for the next Network Admin page load.
+		if ( is_multisite() && ! is_network_admin() ) {
+			return;
+		}
+
+		\WPCyberSecurity\Network::delete_option( Installer::REDIRECT_OPTION );
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only flag set by WordPress.
-		if ( is_network_admin() || isset( $_GET['activate-multi'] ) ) {
+		if ( isset( $_GET['activate-multi'] ) ) {
 			return;
 		}
 		if ( self::setting( 'wizard_completed', false ) || self::PAGE_WIZARD === self::current_page() ) {

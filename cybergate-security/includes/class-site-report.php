@@ -110,7 +110,7 @@ class Site_Report {
 		);
 		$counts  = $plugin->store->counts();
 		$last    = (array) $plugin->scan_job->last_result();
-		$baseline = (int) get_option( 'wpcybersec_baseline_at', 0 );
+		$baseline = (int) Network::get_option( 'wpcybersec_baseline_at', 0 );
 
 		$html  = '<!DOCTYPE html><html lang="' . esc_attr( str_replace( '_', '-', get_locale() ) ) . '"><head><meta charset="utf-8">';
 		$html .= '<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex">';
@@ -170,6 +170,10 @@ class Site_Report {
 			__( 'Baseline recorded', 'cybergate-security' )   => $baseline ? $this->when( $baseline ) : __( 'Not yet', 'cybergate-security' ),
 			__( 'Last scan', 'cybergate-security' )           => ! empty( $last['finished_at'] ) ? $this->when( (int) $last['finished_at'] ) : __( 'Never', 'cybergate-security' ),
 		);
+		if ( is_multisite() && function_exists( 'get_sites' ) ) {
+			// One report covers the whole network: files, approvals and scans are shared.
+			$rows[ __( 'Sites in the network', 'cybergate-security' ) ] = number_format_i18n( (int) get_sites( array( 'count' => true ) ) );
+		}
 		return '<section><h2>' . $this->t( __( 'Overview', 'cybergate-security' ) ) . '</h2>' . $this->kv( $rows ) . '</section>';
 	}
 
@@ -243,7 +247,7 @@ class Site_Report {
 		if ( isset( $last['new_admins'] ) ) {
 			$rows[ __( 'New administrators found', 'cybergate-security' ) ] = number_format_i18n( (int) $last['new_admins'] );
 		}
-		$db = get_option( Db_Scanner::LAST_OPTION, array() );
+		$db = Network::get_option( Db_Scanner::LAST_OPTION, array() );
 		if ( is_array( $db ) && ! empty( $db['finished_at'] ) ) {
 			$rows[ __( 'Last database scan', 'cybergate-security' ) ] = sprintf(
 				/* translators: 1: date, 2: options, 3: posts, 4: findings */
@@ -356,6 +360,10 @@ class Site_Report {
 			__( 'Item', 'cybergate-security' )     => '#' . (int) $item['id'],
 			__( 'Detected', 'cybergate-security' ) => $this->when( (int) strtotime( (string) $item['created_at'] . ' UTC' ) ),
 		);
+		$site = isset( $details['blog_id'] ) ? Network::site_label( (int) $details['blog_id'] ) : '';
+		if ( '' !== $site ) {
+			$rows[ __( 'Site', 'cybergate-security' ) ] = $site;
+		}
 		if ( Store::TYPE_USER === $item['type'] ) {
 			if ( ! empty( $details['user_email'] ) ) {
 				$rows[ __( 'Email', 'cybergate-security' ) ] = self::mask_email( (string) $details['user_email'] );
@@ -718,7 +726,7 @@ class Site_Report {
 			$values[] = $value;
 		}
 		foreach ( array( 'wpcybersec_snapshot_key' ) as $option ) {
-			$value = get_option( $option, '' );
+			$value = Network::get_option( $option, '' );
 			if ( is_string( $value ) && strlen( $value ) >= 8 ) {
 				$values[] = $value;
 			}

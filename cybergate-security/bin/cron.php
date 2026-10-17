@@ -474,7 +474,7 @@ $wpcybersec_progress  = $wpcybersec_options['quiet'] ? null : static function ( 
 $wpcybersec_final = $wpcybersec_job->run_to_completion( $wpcybersec_progress );
 
 // Lets the settings offer "switch off visitor-triggered cron" once real cron is proven to run.
-update_option( 'wpcybersec_cli_cron_at', time(), false );
+\WPCyberSecurity\Network::update_option( 'wpcybersec_cli_cron_at', time(), false );
 
 $wpcybersec_summary = sprintf(
 	"CyberGate Security %s scan %s: %d files checked, %d new, %d modified, %d deleted, %d threats, %d quarantined, %d skipped.\n",

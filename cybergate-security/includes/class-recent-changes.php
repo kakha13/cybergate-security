@@ -69,7 +69,7 @@ class Recent_Changes {
 	 */
 	public static function remember_update( array $abs_paths, $action = 'update' ) {
 		$now   = time();
-		$marks = get_option( self::UPDATES_OPTION, array() );
+		$marks = Network::get_option( self::UPDATES_OPTION, array() );
 		$marks = is_array( $marks ) ? $marks : array();
 		foreach ( $abs_paths as $abs ) {
 			$abs = wp_normalize_path( (string) $abs );
@@ -98,7 +98,7 @@ class Recent_Changes {
 		if ( count( $marks ) > self::MAX_MARKS ) {
 			$marks = array_slice( $marks, -self::MAX_MARKS );
 		}
-		update_option( self::UPDATES_OPTION, $marks, false );
+		Network::update_option( self::UPDATES_OPTION, $marks, false );
 	}
 
 	/**
@@ -110,7 +110,7 @@ class Recent_Changes {
 		if ( null !== $this->marks ) {
 			return $this->marks;
 		}
-		$marks = get_option( self::UPDATES_OPTION, array() );
+		$marks = Network::get_option( self::UPDATES_OPTION, array() );
 		$marks = is_array( $marks ) ? array_values( array_filter( $marks, 'is_array' ) ) : array();
 
 		$store = wpcybersec()->store;
@@ -437,26 +437,32 @@ class Recent_Changes {
 	/* ------------------------------------------------------------------ */
 
 	/**
-	 * Validates a relative path from a request: inside the scan root, a file
-	 * the manifest knows, and still there.
+	 * Validates a manifest key from a request: a file the manifest knows,
+	 * covered by a whole-site scan (Paths::in_scope(), so files outside the
+	 * scan root, whose key is their absolute path, work too), outside the
+	 * plugin's data folder, and still there.
 	 *
 	 * @param string $rel Relative path.
 	 * @return array|\WP_Error { rel, abs, row }
 	 */
 	public static function resolve( $rel ) {
-		$rel = ltrim( wp_normalize_path( trim( (string) $rel ) ), '/' );
+		$rel = wp_normalize_path( trim( (string) $rel ) );
 		$bad = new \WP_Error( 'wpcybersec_path', __( 'This file is not one the plugin monitors, so it cannot be shown here.', 'cybergate-security' ) );
-		if ( '' === $rel || false !== strpos( $rel, "\0" ) || preg_match( '#(^|/)\.\.(/|$)#', $rel ) || Paths::is_absolute( $rel ) ) {
+		if ( '' === $rel || false !== strpos( $rel, "\0" ) || preg_match( '#(^|/)\.\.(/|$)#', $rel ) ) {
 			return $bad;
 		}
+		// Keys outside the scan root are absolute paths; "/wp-content/x.php" may also mean a relative key.
 		$row = wpcybersec()->store->manifest_get( $rel );
+		if ( ! is_array( $row ) && '/' === substr( $rel, 0, 1 ) ) {
+			$rel = ltrim( $rel, '/' );
+			$row = '' !== $rel ? wpcybersec()->store->manifest_get( $rel ) : null;
+		}
 		if ( ! is_array( $row ) ) {
 			return $bad;
 		}
-		$root = Paths::scan_root();
 		$abs  = Paths::abs( $rel );
 		$real = @realpath( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
-		if ( ! $real || ! @is_file( $real ) || ! Storage::is_within( wp_normalize_path( $real ), $root ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( ! $real || ! @is_file( $real ) || ! Paths::in_scope( wp_normalize_path( $real ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			return new \WP_Error( 'wpcybersec_gone', __( 'This file no longer exists.', 'cybergate-security' ) );
 		}
 		if ( Storage::is_within( wp_normalize_path( $real ), wpcybersec()->storage->data_dir() ) ) {

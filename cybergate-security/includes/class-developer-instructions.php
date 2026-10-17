@@ -87,7 +87,7 @@ class Developer_Instructions {
 				return (int) $b['at'] - (int) $a['at'];
 			}
 		);
-		update_option( self::FAILURES_OPTION, array_slice( $all, 0, self::MAX_FAILURES, true ), false );
+		Network::update_option( self::FAILURES_OPTION, array_slice( $all, 0, self::MAX_FAILURES, true ), false );
 		self::flush();
 	}
 
@@ -101,7 +101,7 @@ class Developer_Instructions {
 		$all = self::failures();
 		if ( isset( $all[ $id ] ) ) {
 			unset( $all[ $id ] );
-			update_option( self::FAILURES_OPTION, $all, false );
+			Network::update_option( self::FAILURES_OPTION, $all, false );
 		}
 		self::flush();
 	}
@@ -110,7 +110,7 @@ class Developer_Instructions {
 	 * @return array id => { at, message }
 	 */
 	public static function failures() {
-		$all = get_option( self::FAILURES_OPTION, array() );
+		$all = Network::get_option( self::FAILURES_OPTION, array() );
 		$out = array();
 		foreach ( is_array( $all ) ? $all : array() as $id => $row ) {
 			if ( is_array( $row ) && isset( $row['at'], $row['message'] ) ) {
@@ -127,7 +127,7 @@ class Developer_Instructions {
 	 * Drops the cached count, so the Dashboard shows the new number.
 	 */
 	public static function flush() {
-		delete_transient( self::COUNT_TRANSIENT );
+		Network::delete_transient( self::COUNT_TRANSIENT );
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -199,7 +199,7 @@ class Developer_Instructions {
 				return (int) $a['optional'] - (int) $b['optional'];
 			}
 		);
-		set_transient( self::COUNT_TRANSIENT, count( $items ), 15 * MINUTE_IN_SECONDS );
+		Network::set_transient( self::COUNT_TRANSIENT, count( $items ), 15 * MINUTE_IN_SECONDS );
 		return $items;
 	}
 
@@ -209,7 +209,7 @@ class Developer_Instructions {
 	 * @return int
 	 */
 	public function count() {
-		$cached = get_transient( self::COUNT_TRANSIENT );
+		$cached = Network::get_transient( self::COUNT_TRANSIENT );
 		if ( false !== $cached ) {
 			return (int) $cached;
 		}
@@ -259,7 +259,7 @@ class Developer_Instructions {
 		switch ( $id ) {
 			case 'wp_cron':
 				// bin/cron.php records every run; none in the last two hours means no real cron job.
-				return (int) get_option( 'wpcybersec_cli_cron_at', 0 ) < time() - 2 * HOUR_IN_SECONDS;
+				return (int) Network::get_option( 'wpcybersec_cli_cron_at', 0 ) < time() - 2 * HOUR_IN_SECONDS;
 			case 'guard':
 				$status = Sysadmin_Tools::call( 'guard_manager', 'status', array(), array() );
 				$hard   = Sysadmin_Tools::service( 'hardening' );

@@ -33,7 +33,8 @@
  *   enabled, action (block|strip), quarantine_dir, spool_file, allow_file,
  *   exempt (list), max_bytes, max_spool_bytes, max_quarantine_files,
  *   max_quarantine_bytes, min_free_bytes, exec_extensions, exec_filenames,
- *   home_path, login_cookie, message, message_refused, root (WordPress folder),
+ *   home_path, home_paths (multisite: URL path of every site), login_cookie,
+ *   message, message_refused, root (WordPress folder),
  *   front_root (folder of the front controller index.php when it is not root).
  *
  * @package WPCyberSecurity
@@ -201,6 +202,7 @@ if ( ! defined( 'WPCYBERSEC_GUARD_ACTIVE' ) ) {
 					'exec_extensions'      => self::lower_list( isset( $config['exec_extensions'] ) ? $config['exec_extensions'] : null, array( 'php', 'php3', 'php4', 'php5', 'php7', 'php8', 'phtml', 'pht', 'phar', 'phps', 'inc', 'shtml', 'cgi', 'pl', 'py', 'sh', 'asp', 'aspx', 'jsp' ) ),
 					'exec_filenames'       => self::lower_list( isset( $config['exec_filenames'] ) ? $config['exec_filenames'] : null, array( '.htaccess', '.user.ini', 'php.ini', 'web.config' ) ),
 					'home_path'            => isset( $config['home_path'] ) ? rtrim( str_replace( '\\', '/', (string) $config['home_path'] ), '/' ) : '',
+					'home_paths'           => self::path_list( isset( $config['home_paths'] ) ? $config['home_paths'] : null ),
 					'login_cookie'         => isset( $config['login_cookie'] ) ? (string) $config['login_cookie'] : '',
 					'message'              => isset( $config['message'] ) && '' !== (string) $config['message'] ? (string) $config['message'] : $message,
 					'message_refused'      => isset( $config['message_refused'] ) && '' !== (string) $config['message_refused'] ? (string) $config['message_refused'] : 'This upload was refused because it could not be checked (CyberGate Security). Please contact the site administrator.',
@@ -469,13 +471,38 @@ if ( ! defined( 'WPCYBERSEC_GUARD_ACTIVE' ) ) {
 				if ( preg_match( '#/\.\.?(/|$)#', $path ) ) {
 					return false; // Dot segments: not a plain route path.
 				}
-				$home = $config['home_path'];
-				foreach ( array( $home . $pattern, $home . '/index.php' . $pattern ) as $prefix ) {
-					if ( $path === $prefix || 0 === strpos( $path, $prefix . '/' ) ) {
-						return true;
+				// Multisite: every site of the network has its own path (subdirectory networks).
+				$homes = $config['home_paths'] ? $config['home_paths'] : array( $config['home_path'] );
+				foreach ( $homes as $home ) {
+					foreach ( array( $home . $pattern, $home . '/index.php' . $pattern ) as $prefix ) {
+						if ( $path === $prefix || 0 === strpos( $path, $prefix . '/' ) ) {
+							return true;
+						}
 					}
 				}
 				return false;
+			}
+
+			/**
+			 * URL paths from the config: strings without a trailing slash, at most 5000.
+			 *
+			 * @param mixed $list Raw list.
+			 * @return array
+			 */
+			private static function path_list( $list ) {
+				$out = array();
+				if ( ! is_array( $list ) ) {
+					return $out;
+				}
+				foreach ( $list as $value ) {
+					if ( is_string( $value ) && strlen( $value ) < 300 ) {
+						$out[] = rtrim( str_replace( '\\', '/', $value ), '/' );
+						if ( count( $out ) >= 5000 ) {
+							break;
+						}
+					}
+				}
+				return array_values( array_unique( $out ) );
 			}
 
 			/**
@@ -638,6 +665,7 @@ if ( ! defined( 'WPCYBERSEC_GUARD_ACTIVE' ) ) {
 					'time'            => time(),
 					'script'          => self::clean( isset( $_SERVER['SCRIPT_NAME'] ) ? (string) $_SERVER['SCRIPT_NAME'] : '', 255 ),
 					'uri'             => self::clean( isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '', 1000 ),
+					'host'            => self::clean( isset( $_SERVER['HTTP_HOST'] ) ? (string) $_SERVER['HTTP_HOST'] : '', 255 ),
 					'method'          => self::clean( isset( $_SERVER['REQUEST_METHOD'] ) ? (string) $_SERVER['REQUEST_METHOD'] : '', 10 ),
 					'ip'              => self::clean( isset( $_SERVER['REMOTE_ADDR'] ) ? (string) $_SERVER['REMOTE_ADDR'] : '', 45 ),
 					'ua'              => self::clean( isset( $_SERVER['HTTP_USER_AGENT'] ) ? (string) $_SERVER['HTTP_USER_AGENT'] : '', 255 ),

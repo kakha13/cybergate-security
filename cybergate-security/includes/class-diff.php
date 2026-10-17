@@ -744,7 +744,8 @@ class Diff {
 	}
 
 	/**
-	 * Only files inside the scanned folder or the WordPress folder are read.
+	 * Only files a whole-site scan covers are read (Paths::in_scope(): the
+	 * scan root plus the WordPress folders outside it).
 	 *
 	 * @param string $abs Path.
 	 * @return bool
@@ -753,7 +754,7 @@ class Diff {
 		if ( ! @is_readable( $abs ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			return false;
 		}
-		return Storage::is_within( $abs, Paths::scan_root() ) || Storage::is_within( $abs, ABSPATH );
+		return Paths::in_scope( $abs );
 	}
 
 	/**

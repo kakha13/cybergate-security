@@ -59,13 +59,16 @@ class Notifier {
 	 * Keeps the daily digest event in line with notify_mode.
 	 */
 	public function schedule() {
-		$next = wp_next_scheduled( self::DIGEST_HOOK );
+		if ( ! Network::is_main() ) {
+			return; // Multisite: the plugin's cron events live on the main site.
+		}
+		$next = Network::next_scheduled( self::DIGEST_HOOK );
 		if ( 'digest' === $this->mode() ) {
 			if ( ! $next ) {
-				wp_schedule_event( $this->next_digest_time(), 'daily', self::DIGEST_HOOK );
+				Network::schedule_event( $this->next_digest_time(), 'daily', self::DIGEST_HOOK );
 			}
 		} elseif ( $next ) {
-			wp_clear_scheduled_hook( self::DIGEST_HOOK );
+			Network::clear_hook( self::DIGEST_HOOK );
 		}
 	}
 
@@ -119,7 +122,7 @@ class Notifier {
 		foreach ( array( 'mode', 'trigger', 'files_total', 'files_done', 'new', 'modified', 'deleted', 'threats', 'quarantined', 'skipped', 'started_at', 'finished_at', 'database', 'db_findings', 'missing_core', 'new_admins' ) as $key ) {
 			$summary[ $key ] = isset( $status[ $key ] ) ? $status[ $key ] : '';
 		}
-		update_option( self::SCAN_OPTION, $summary, false );
+		Network::update_option( self::SCAN_OPTION, $summary, false );
 		if ( 'instant' !== $mode ) {
 			return; // send_digest() includes it.
 		}
@@ -189,8 +192,8 @@ class Notifier {
 				'per_page' => self::MAX_DETAILED,
 			)
 		);
-		$scan    = get_option( self::SCAN_OPTION, array() );
-		delete_option( self::SCAN_OPTION );
+		$scan    = Network::get_option( self::SCAN_OPTION, array() );
+		Network::delete_option( self::SCAN_OPTION );
 		$this->clear_queue(); // Everything queued is part of this summary.
 
 		if ( ! $pending['total'] && ! $threats['total'] ) {
@@ -271,7 +274,7 @@ class Notifier {
 		if ( 'instant' !== $mode ) {
 			if ( 'off' === $mode ) {
 				$this->clear_queue();
-				delete_option( self::SCAN_OPTION );
+				Network::delete_option( self::SCAN_OPTION );
 			}
 			return false; // Digest mode: send_digest() reports everything once a day.
 		}
@@ -279,10 +282,10 @@ class Notifier {
 			return false;
 		}
 		$ids  = $this->queue();
-		$scan = get_option( self::SCAN_OPTION, array() );
+		$scan = Network::get_option( self::SCAN_OPTION, array() );
 		$this->clear_queue();
-		delete_option( self::SCAN_OPTION );
-		wp_clear_scheduled_hook( self::FLUSH_HOOK );
+		Network::delete_option( self::SCAN_OPTION );
+		Network::clear_hook( self::FLUSH_HOOK );
 
 		$items = array();
 		foreach ( $ids as $id ) {
@@ -298,7 +301,7 @@ class Notifier {
 			return false;
 		}
 
-		update_option( self::LAST_OPTION, time(), false );
+		Network::update_option( self::LAST_OPTION, time(), false );
 		$ok = $this->mail( wpcybersec()->settings->recipients(), $this->items_subject( $items, $scan ), $this->items_body( $items, $scan ) );
 		$this->webhook( $this->items_webhook_text( $items, $scan ) );
 		if ( ! $ok ) {
@@ -316,7 +319,7 @@ class Notifier {
 	 * Sends now when the last email is older than THROTTLE, otherwise schedules it.
 	 */
 	private function maybe_flush() {
-		$last = (int) get_option( self::LAST_OPTION, 0 );
+		$last = (int) Network::get_option( self::LAST_OPTION, 0 );
 		$due  = $last + self::THROTTLE;
 		if ( $due <= time() ) {
 			$this->flush();
@@ -329,14 +332,14 @@ class Notifier {
 	 * @param int $timestamp When.
 	 */
 	private function schedule_flush( $timestamp ) {
-		$next = wp_next_scheduled( self::FLUSH_HOOK );
+		$next = Network::next_scheduled( self::FLUSH_HOOK );
 		if ( $next && $next <= $timestamp ) {
 			return;
 		}
 		if ( $next ) {
-			wp_clear_scheduled_hook( self::FLUSH_HOOK );
+			Network::clear_hook( self::FLUSH_HOOK );
 		}
-		wp_schedule_single_event( max( time() + 5, (int) $timestamp ), self::FLUSH_HOOK );
+		Network::schedule_single( max( time() + 5, (int) $timestamp ), self::FLUSH_HOOK );
 	}
 
 	/**
@@ -350,14 +353,14 @@ class Notifier {
 		if ( count( $queue ) > self::MAX_QUEUE ) {
 			$queue = array_slice( $queue, -self::MAX_QUEUE );
 		}
-		update_option( self::QUEUE_OPTION, $queue, false );
+		Network::update_option( self::QUEUE_OPTION, $queue, false );
 	}
 
 	/**
 	 * @return int[]
 	 */
 	private function queue() {
-		$queue = get_option( self::QUEUE_OPTION, array() );
+		$queue = Network::get_option( self::QUEUE_OPTION, array() );
 		return is_array( $queue ) ? array_values( array_map( 'intval', $queue ) ) : array();
 	}
 
@@ -365,7 +368,7 @@ class Notifier {
 	 * Empties the queue.
 	 */
 	private function clear_queue() {
-		delete_option( self::QUEUE_OPTION );
+		Network::delete_option( self::QUEUE_OPTION );
 	}
 
 	/**
@@ -374,12 +377,12 @@ class Notifier {
 	 * @return bool
 	 */
 	private function acquire_lock() {
-		if ( add_option( self::LOCK_OPTION, time(), '', false ) ) {
+		if ( Network::add_option( self::LOCK_OPTION, time(), '', false ) ) {
 			return true;
 		}
-		$since = (int) get_option( self::LOCK_OPTION, 0 );
+		$since = (int) Network::get_option( self::LOCK_OPTION, 0 );
 		if ( $since && $since < time() - 120 ) {
-			update_option( self::LOCK_OPTION, time(), false ); // Stale lock from a crashed request.
+			Network::update_option( self::LOCK_OPTION, time(), false ); // Stale lock from a crashed request.
 			return true;
 		}
 		return false;
@@ -389,7 +392,7 @@ class Notifier {
 	 * Releases the mutex.
 	 */
 	private function release_lock() {
-		delete_option( self::LOCK_OPTION );
+		Network::delete_option( self::LOCK_OPTION );
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -438,14 +441,14 @@ class Notifier {
 				/* translators: 1: site name, 2: site url */
 				__( 'CyberGate Security on %1$s (%2$s) needs your attention:', 'cybergate-security' ),
 				$this->site_name(),
-				home_url( '/' )
+				Network::home_url( '/' )
 			);
 		} else {
 			$lines[] = sprintf(
 				/* translators: 1: site name, 2: site url */
 				__( 'A security scan on %1$s (%2$s) found something:', 'cybergate-security' ),
 				$this->site_name(),
-				home_url( '/' )
+				Network::home_url( '/' )
 			);
 		}
 		$lines[] = '';
@@ -510,6 +513,10 @@ class Notifier {
 			}
 		}
 
+		$site = isset( $details['blog_id'] ) ? Network::site_label( (int) $details['blog_id'] ) : '';
+		if ( '' !== $site ) {
+			$rows[] = array( __( 'Site', 'cybergate-security' ), $site );
+		}
 		$rows[] = array( __( 'By', 'cybergate-security' ), $this->who( $item ) );
 		$where  = $this->where( $item );
 		if ( '' !== $where ) {
@@ -820,12 +827,12 @@ class Notifier {
 		$lines[] = '';
 		$lines[] = '-- ';
 		/* translators: %s: site url */
-		$lines[] = sprintf( __( 'Sent by CyberGate Security on %s.', 'cybergate-security' ), home_url( '/' ) );
+		$lines[] = sprintf( __( 'Sent by CyberGate Security on %s.', 'cybergate-security' ), Network::home_url( '/' ) );
 		if ( $throttled && 'instant' === $this->mode() ) {
 			$lines[] = __( 'At most one email is sent every 10 minutes; anything that happens in between is included in the next one.', 'cybergate-security' );
 		}
 		/* translators: %s: settings url */
-		$lines[] = sprintf( __( 'Change who gets these emails: %s', 'cybergate-security' ), admin_url( 'admin.php?page=wpcybersec-settings' ) );
+		$lines[] = sprintf( __( 'Change who gets these emails: %s', 'cybergate-security' ), Network::admin_url( 'admin.php?page=wpcybersec-settings' ) );
 		return implode( "\n", $lines ) . "\n";
 	}
 
@@ -921,11 +928,10 @@ class Notifier {
 	}
 
 	/**
-	 * @return string Site name without HTML entities.
+	 * @return string Site name (the network name on multisite) without HTML entities.
 	 */
 	private function site_name() {
-		$name = wp_specialchars_decode( (string) get_bloginfo( 'name' ), ENT_QUOTES );
-		return '' !== trim( $name ) ? $name : (string) wp_parse_url( home_url(), PHP_URL_HOST );
+		return Network::name();
 	}
 
 	/**
@@ -933,7 +939,7 @@ class Notifier {
 	 * @return string
 	 */
 	private function reports_url( $tab ) {
-		return admin_url( 'admin.php?page=wpcybersec-reports&tab=' . ( 'threats' === $tab ? 'threats' : 'pending' ) );
+		return Network::admin_url( 'admin.php?page=wpcybersec-reports&tab=' . ( 'threats' === $tab ? 'threats' : 'pending' ) );
 	}
 
 	/**

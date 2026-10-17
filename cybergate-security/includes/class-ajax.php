@@ -133,15 +133,15 @@ class Ajax {
 			return;
 		}
 		$hook = File_Monitor::TICK_HOOK;
-		$next = wp_next_scheduled( $hook );
+		$next = Network::next_scheduled( $hook );
 		// Rewriting the cron option on every tick is wasteful: only move the event when it is getting close.
 		if ( $next && ( $next - time() ) > self::CRON_TAKEOVER / 2 ) {
 			return;
 		}
 		if ( $next ) {
-			wp_unschedule_event( $next, $hook );
+			Network::unschedule_event( $next, $hook );
 		}
-		wp_schedule_single_event( time() + self::CRON_TAKEOVER, $hook );
+		Network::schedule_single( time() + self::CRON_TAKEOVER, $hook );
 	}
 
 	/**
@@ -168,7 +168,7 @@ class Ajax {
 		$this->guard();
 		wpcybersec()->scan_job->cancel();
 		// Nothing left to continue in the background.
-		wp_clear_scheduled_hook( File_Monitor::TICK_HOOK );
+		Network::clear_hook( File_Monitor::TICK_HOOK );
 		wp_send_json_success( wpcybersec()->scan_job->status() );
 	}
 

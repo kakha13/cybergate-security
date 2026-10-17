@@ -27,8 +27,13 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
   a public `register()` method. `Plugin::boot()` creates and registers everything.
 - Reach other services through `wpcybersec()->name` (see the list below). Never construct
   core services yourself except `new Storage()` in code that may run before boot.
-- Escape all output (`esc_html`, `esc_attr`, `esc_url`, `wp_kses_post`), check capability
-  `manage_options` and nonces on every form/AJAX/admin-post handler.
+- Escape all output (`esc_html`, `esc_attr`, `esc_url`, `wp_kses_post`), check the capability with
+  `Admin\Admin::can()` (`manage_options` on a single site, `manage_network_options` on multisite)
+  and a nonce on every form/AJAX/admin-post handler.
+- Plugin options go through `Network::get_option()` / `update_option()` / `add_option()` /
+  `delete_option()` (network options on multisite), plugin cron events through
+  `Network::schedule_event()` and friends (main site only), plugin page links through
+  `Admin\Admin::page_url()` (Network Admin on multisite). See "Multisite network mode".
 - Translatable strings use text domain `cybergate-security`. **Never use em dashes or en dashes**
   in any string or comment; use a plain hyphen.
 - Icons: Dashicons only (`<span class="dashicons dashicons-shield"></span>`). No emojis.
@@ -68,19 +73,56 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
 | developer | `Developer_Instructions` | setup (steps that need server access) |
 | admin | `Admin\Admin` | admin UI |
 
-Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` (core), `Cli` (setup),
+Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` (core), `Network`
+(core, multisite mode), `Config_Editor` (core, wp-config.php edits), `Cli` (setup),
 `Signatures` (engine), `Admin\Assets` (core), `Diff` (changes view). `Originals`,
 `Recent_Changes` and `Site_Report` are created on demand (`new Originals()`, ...).
 
 ## Core API (already written - read the source in `includes/`)
 
 - `Settings`: `defaults()`, `enums()`, `presets()`, `all()`, `get($key, $default)`,
-  `update(array $values)`, `apply_level($level)`, `recipients()`. Action
-  `wpcybersec_settings_updated($new, $old)`.
+  `update(array $values)`, `apply_level($level)`, `recipients()` (empty `notify_emails` means
+  `Network::default_recipients()`: the site admin email, on multisite the network admin email
+  plus every super admin). Action `wpcybersec_settings_updated($new, $old)`. One option
+  `wpcybersec_settings` (a network option on multisite).
 - `Storage`: `data_dir()`, `path($sub)`, `quarantine_dir()`, `jobs_dir()`, `spool_dir()`,
   `guard_dir()`, `ensure()`, `protect($dir)`, `is_in_webroot($path)`, static `is_within($path, $dir)`.
+  Folder resolution (`resolve()`, once per request, `Storage::reset()` forgets it), first writable
+  one wins: `WPCYBERSEC_DATA_DIR`, a fallback folder already in use (option
+  `wpcybersec_data_fallback`; it keeps being used until its data is moved, so held items stay
+  reachable), the folder of the one-click move (option `wpcybersec_data_dir`, single sites
+  only), `wp-content/wpcybersec`, else a new fallback `<main site uploads>/wpcybersec-<random>`.
+  `status()` / `available()`: `{ state ok|fallback|unavailable, dir, primary, source
+  constant|moved|default|fallback, primary_ok }`. `check()` (activation, settings and plugin
+  pages) re-resolves, stores option `wpcybersec_storage_status` and logs a change;
+  `problem($status)` gives the admin notice text `{ level, title, text, fix, code }`. Uploads are
+  never blocked because this storage failed (Upload_Gate lets a clean upload through and logs
+  `upload_not_held` once an hour; only malicious ones are refused). `configured_dir()`,
+  `default_dir()`, static `site_id()` (md5 of ABSPATH plus `$wpdb->base_prefix`, so every site of a
+  network shares it; written into `.wpcybersec-site`, `marker_matches()`, `write_marker()`),
+  `suggested_outside_dir()`, static `path_allowed($path)` (open_basedir: paths outside it are
+  never touched or suggested), `dir_usable()`, `relocate($target, $after_switch)` (copy, verify,
+  switch, remove; resumable with `resume_move()` / `move_pending()`, option
+  `wpcybersec_data_move`; refused on multisite and with the constant).
 - `Paths` (static): `scan_root()`, `rel($abs)`, `abs($rel)`, `hash($rel)`, `ext($name)`,
-  `is_executable($name)`, `is_excluded($rel)`.
+  `is_executable($name)`, `is_excluded($rel)`. Scan set: `scan_set()` is the scan root plus the
+  WordPress folders outside it (ABSPATH, WP_CONTENT_DIR, WP_PLUGIN_DIR, WPMU_PLUGIN_DIR, the
+  uploads folder: walked in full; the home folder of WordPress in a subfolder or Bedrock's `web/`:
+  its own files only; a wp-config.php one folder above ABSPATH), each realpath'd and dropped when
+  another entry covers it (entries `{ path, depth all|top|file, kind, alias }`, filter
+  `wpcybersec_scan_set`). `extra_roots()` (all but the root), `outside_root()` (for the UI),
+  `in_scope($abs)` (a whole-site scan covers it: use this, not "inside the scan root", before
+  reading or touching a live file), `in_full_scope($dir)`, `scope_entry($abs)`, `alias($abs)`
+  (`wp-content/...` name of a file outside the root, for exclusions), `home_dir()`, `reset()`.
+  Files outside the scan root keep their absolute path as the manifest key. On multisite the
+  uploads and home folders are the main site's (`Network::on_main()`).
+- `Config_Editor` (static): `path()`, `can_check()` (tokenizer), `can_edit()`, `has_constant()`,
+  `set_constant($name, $value)` (replaces a define in place, else adds it above "That's all, stop
+  editing!" under a `// Added by CyberGate Security on <date>.` line; refuses when the constant is
+  defined in another file wp-config.php loads, never adds a duplicate), `remove_constant($name)`,
+  `remove_marked_constant($name)` (only defines below that marker comment; uninstall),
+  `parses($code)`. Every write is parse-checked, atomic (`Fs::replace()`), backed up into the data
+  folder only when that folder cannot be downloaded, and trusted in the manifest.
 - `Store`: constants `TYPE_*` (upload, install, file, threat), `STATUS_*` (pending, approved,
   denied, ignored, quarantined, restored, deleted, resolved), `SEV_*` (0 info, 1 medium, 2 high,
   3 critical), `STATE_*` (trusted, pending, threat). Items: `item_insert`, `item_get`,
@@ -88,7 +130,8 @@ Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` 
   `items_delete`. Manifest: `manifest_get_many`, `manifest_get`, `manifest_upsert_many`,
   `manifest_touch`, `manifest_unseen`, `manifest_delete`, `manifest_delete_prefix`,
   `manifest_count`, `manifest_set_state`, `manifest_truncate`, `manifest_page`. Log:
-  `log_insert`, `log_query`, `log_prune`. Static `table`, `now`, `severity_label`, `client_ip`.
+  `log_insert`, `log_query`, `log_prune`. Static `table` (`$wpdb->base_prefix . 'wpcybersec_' .
+  $name`: one set of tables for a whole multisite network), `now`, `severity_label`, `client_ip`.
 - `Allowlist`: `is_allowed_hash`, `allow_hash($sha256, $label, $note)`, `is_allowed_install($type, $slug)`,
   `allow_install($type, $slug, $label, $note)`, static `install_key`, `remove($id)`, `get($id)`,
   `query($args)`, `count()`, `hashes()`, `export_guard_file()`, `verify_integrity()` (true/false/null).
@@ -108,7 +151,10 @@ Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` 
 - `Admin\Assets`: `register()`, `enqueue()`. Handles `wpcybersec-base` (css) and
   `wpcybersec-core` (js, exposes `window.WPCyberSec`, see header comment in `assets/js/core.js`).
 - `Installer`: `CRON_HOOKS`, `REDIRECT_OPTION` (`wpcybersec_activation_redirect`, set on activation),
-  `activate()`, `install()`, `maybe_upgrade()`, `deactivate()`, `tables()`.
+  `activate($network_wide)`, `install()` (on multisite first `Network::migrate_main_options()`,
+  then tables and defaults, then a bounded `Network::migrate_sites()` pass), `maybe_upgrade()`
+  (DB version `WPCYBERSEC_DB_VERSION`, 5 since network mode), `deactivate($network_wide)`
+  (`Network::clear_cron_everywhere()`, guard config disabled), `tables()`.
 
 ### Item row shape
 
@@ -131,6 +177,9 @@ created_at, updated_at, decided_by, decided_at
 - `post_id` (attach approved upload to this post), `context`: `media` | `sideload` | `plugin_zip` | `theme_zip` | `guard`
 - `request_uri`, `script` (guard), `field` (guard form field name)
 - `install_type` (`plugin`|`theme`), `slug`, `name`, `version`, `install_source` (`wporg`|`upload`|`url`)
+- `blog_id` (multisite: the site an upload, guard upload, database finding or administrator
+  belongs to), `sites` (user items: every site where the account is administrator),
+  `migrated_from` (copied from a site's own tables by the network migration)
 
 Sources (`source` column): `media`, `sideload`, `rest`, `plugin_zip`, `theme_zip`, `guard`,
 `scan`, `install`, `database` (Db_Scanner finding; `sha256` is the place-bound fingerprint, only
@@ -164,6 +213,74 @@ own files are threats in every mode, for executable names and .js/.mjs. Whole-si
 missing core files (`missing_core` in status/last_result, "Missing core files: N" in the
 summary).
 
+## Multisite network mode
+
+Files: `includes/class-network.php` plus small parts of most modules. The plugin header says
+`Network: true`: on multisite it is network activated and works ONCE for the whole network,
+because every site shares the file system. Single sites behave exactly as before (every
+`Network` method falls back to the plain WordPress function).
+
+- Shared state: tables on `$wpdb->base_prefix` (manifest, items, allowlist, log), every plugin
+  option as a network option (`Network::get_option()` and friends; `flush_option_cache()`
+  drops it from the request cache), caches of shared data as site transients
+  (`Network::get_transient()` and friends: snapshot stats, original-file hits, the quarantine web
+  probe, the developer instruction count), one data folder, one quarantine, one snapshot store, one
+  guard config. Raw lock rows of the scan job (`wpcybersec_job_lock`, `wpcybersec_job_cancel`)
+  live in the main site's options table (`Network::lock_table()`).
+- Cron: every plugin event is scheduled on the main site (`Network::schedule_event()`,
+  `schedule_single()`, `next_scheduled()`, `get_schedule()`, `unschedule_event()`,
+  `clear_hook()` switch there). Code that only keeps a schedule in shape runs on the main site
+  (`Network::is_main()`); other sites never check it. `clear_site_cron()` (init of admin and cron
+  requests on other sites, and a stray `wpcybersec_scheduled_scan` handler there) removes events
+  older versions left on other sites. Scans therefore run once for the network.
+- Screens: menu on `network_admin_menu` (Dashboard, Reports, Settings, Wizard in Network Admin);
+  site admins see no plugin menu and get 403 on the pages; `Admin::page_url()` and
+  `Admin::admin_page_base()` point at Network Admin; admin-post and AJAX go to the main site's
+  `admin-post.php` / `admin-ajax.php` with `Admin::can()` (`manage_network_options`). The
+  activation redirect waits for a Network Admin page. Admin bar node and notices: super admins
+  only. Uploads on every site are still gated.
+- Sites: `main_site_id()`, `on_main($fn)`, `on_site($blog_id, $fn)`, `site_ids_after($after,
+  $limit)` (batched, id order), `site_label($blog_id)` ("Name (host/path/)"), `home_paths()`,
+  `home_url()` / `admin_url()` / `name()` (network address and name).
+- Items remember the site: held uploads (`Upload_Gate`) and guard uploads (spool `host` + `uri`
+  mapped with `get_site_by_path()`) store `details.blog_id`; approving a media/REST/sideload
+  upload imports it into that site's Media Library inside `Network::on_site()` (a deleted site:
+  the hash is allowed only). The same file held on two sites is two items. Database findings and
+  administrator items record `blog_id` too. Reports (source column "Site: ..."), alert emails
+  ("Site" row) and the downloadable report show it; the report also counts the network's sites.
+- Database scan: one run walks every site in id order (cursor `blog`, `sites`; resumable like
+  the chunks, each site in `switch_to_blog()`). Places on a site other than the main one are
+  `db:site:<id>:option:<name>` / `db:site:<id>:post:<ID>` (own fingerprints);
+  `Db_Scanner::blog_id($item)`, `location_label()` and `post_id()` understand both forms.
+- Administrator watch: one trusted list for the network. Administrators of every site come from
+  one query on the shared usermeta table (`User_Watch::network_admin_sites()`: the
+  `<prefix>capabilities` rows that hold "administrator", mapped to site ids), plus super admins,
+  so a scan needs no `switch_to_blog()` per site on any network size. Items carry
+  `details.sites`; deny removes the role on every site and revokes super admin.
+- Guard: one config for the network. `home_path` is the main site's, `home_paths` lists every
+  site's URL path (`Network::home_paths()`), so REST exemptions such as `/wp-json/wp/v2/media`
+  match `/sub1/wp-json/...` too; `front_root()` is worked out on the main site. Creating or
+  deleting a site (`wp_initialize_site`, `wp_delete_site`) rewrites the config.
+- Alerts default to the network admin email plus every super admin; emails say the network
+  name and address and link to Network Admin.
+- Migration (`Network::migrate_main_options()` + `migrate_sites()`, network option
+  `wpcybersec_ms_migration` = last site id done, then `done`): the main site's plugin options
+  become network options (existing network options win); then, per site in batches of 50 under a
+  MySQL `GET_LOCK` and a 10 second budget (continued on later admin, cron and CLI requests from
+  `Plugin::boot()`), a site with its own tables (`<site prefix>wpcybersec_*`, created by older
+  versions) has them merged and dropped: allowlist `INSERT IGNORE`, log copied, items copied with
+  `details.blog_id` and `migrated_from` (rows the network table already has with the same type,
+  status, hash and path are skipped; database findings get the `db:site:<id>:` place, so their
+  old "Mark safe" fingerprints no longer match and they are reported once more), the manifest
+  dropped (each site had built a copy of the whole network) unless it is the main site's and
+  the network manifest is empty (main site with another prefix). Every site's trusted
+  administrators are merged, its other plugin options and transients deleted, its plugin cron
+  events cleared and its `snapshots/site-<id>/` folder removed. On a standard network the main
+  site's prefix IS the base prefix, so its tables are used as they are. A summary is logged per
+  site (`network_site_merged`) and at the end (`network_migrated`).
+- Data folder: shared; the one-click move stays single-site only (`WPCYBERSEC_DATA_DIR` moves it
+  for a network). Several networks in one database share the base tables.
+
 ## Changes view (what changed in a file)
 
 Files: `includes/class-snapshots.php`, `includes/class-originals.php`, `includes/class-diff.php`,
@@ -172,7 +289,13 @@ Files: `includes/class-snapshots.php`, `includes/class-originals.php`, `includes
 - `Snapshots`: gzip copies of file versions at `<data_dir>/snapshots/<k[0:2]>/<k[2:4]>/<k>.gz`
   (0600), `k = hmac_sha256(sha256, option wpcybersec_snapshot_key)` so a leaked fingerprint is
   never a download address. Only when setting `snapshots` is on, the name is executable, a config
-  file or .js/.html/.svg, size <= `snapshot_max_kb`, and the content is not binary. API: `store($abs,
+  file or .js/.html/.svg, size <= `snapshot_max_kb`, and the content is not binary. Store limits:
+  at most `snapshot_max_files` copies (1000 - 1000000, default 20000; inode quotas) and
+  `snapshot_max_mb` (10 - 10240, default 200), both on Settings > General. Running totals in option
+  `wpcybersec_snapshot_usage`; a new copy is refused while the store is full, `enforce_cap()`
+  (after every scan and from `prune()`) deletes the least recently used copies down to 90 % of
+  both limits; `usage()` reports files, bytes, limits, refused copies and write failures. Raising
+  a limit (or `snapshot_max_kb`) resets the backfill. API: `store($abs,
   $sha)`, `store_trusted($abs, $sha, $verify)` (skips official core/plugin checksum matches),
   `put_content($content)`, `has`, `get` (sha256 checked), `stored_at`, `stats`, `clear`, `prune`
   (daily from `wpcybersec_maintenance`, keeps versions referenced by the manifest or by a file/threat
@@ -214,8 +337,9 @@ Files: `includes/class-recent-changes.php`, `Admin\Reports_Page::render_recent_t
 - Update marks: option `wpcybersec_update_marks` (list of `{ p: relative prefix, t: unix, a:
   update|install }`, 45 days, at most 600) written by `Install_Gate::process_complete()` through
   `Recent_Changes::remember_update()`, plus the `rebaselined` activity log events (older updates).
-- `resolve($rel)`: accepts only an exact manifest path whose real path is inside the scan root
-  and outside the data folder. `file_item()` describes it like an item (id 0) for
+- `resolve($rel)`: accepts only an exact manifest key (relative, or absolute for a file outside
+  the scan root) whose real path `Paths::in_scope()` covers and that is outside the data folder;
+  `..` segments are refused. `file_item()` describes it like an item (id 0) for
   `Diff::for_item()` (live file, matches from `scan_file()`, last trusted copy as the base when the
   file changed after the scan, else the official original, else the content).
 - `report($rel)`: "Report for review" creates a pending `file` item (source `review`, hits,
@@ -249,15 +373,20 @@ Files: `includes/class-scanner.php`, `includes/class-signatures.php`,
 ### `Scanner`
 - `register()`: nothing required (may add cache cleanup).
 - `scan_file($abs, $rel = '')`: array of hits `{ sig, title, severity, line, snippet }`. Reads
-  at most `max_file_mb`. Skips binary media except the "PHP hidden in image" checks (head and
-  tail 8 KB). Applies `min_severity`.
+  at most `read_cap()` bytes: `max_file_mb` (`max_bytes()`), lowered when the memory left under
+  memory_limit (`memory_room()`) could not hold about four copies plus 8 MB (after trying
+  `wp_raise_memory_limit()`), never below 64 KB. Skips binary media except the "PHP hidden in
+  image" checks (head and tail 8 KB). Applies `min_severity`.
 - `scan_upload($tmp_path, $original_name)`: hits for an incoming upload (name-based checks such
   as double extensions + content checks + optional ClamAV). Severity >= 2 means "malicious".
 - `max_severity(array $hits)`: int.
 - `verify($rel, $sha256, $md5 = '')`: `'match' | 'mismatch' | 'unknown'` using core checksums
   (`get_core_checksums()`, md5) and wordpress.org plugin checksums
   (`https://downloads.wordpress.org/plugin-checksums/{slug}/{version}.json`, sha256),
-  cached in transients. Only when setting `use_checksums` is on.
+  cached in site transients. Only when setting `use_checksums` is on. Core checksums are fetched
+  for `package_locale()`: `$wp_local_package` in wp-includes/version.php (what the core files
+  were built for), en_US when unset, not the site language; when only another locale's list is
+  available, version.php is compared without its `$wp_local_package` line.
 - `is_core_path($rel)`, `plugin_slug_for($rel)` helpers.
 - `clamav_available()`: bool, `clamav_scan($path)`: null (not available) or hits.
 
@@ -269,10 +398,12 @@ Files: `includes/class-scanner.php`, `includes/class-signatures.php`,
   Low false positives are critical (must stay quiet on WooCommerce, Elementor, Yoast, Polylang).
 
 ### `File_Monitor`
-- `register()`: schedules `wpcybersec_scheduled_scan` according to `scan_schedule` (reschedules
-  on `wpcybersec_settings_updated`), hooks `wpcybersec_scheduled_scan` (starts an incremental
-  job, ticks once) and `wpcybersec_scan_tick` (continues a running job, re-schedules itself in
-  60s while running).
+- `register()`: schedules `wpcybersec_scheduled_scan` according to `scan_schedule` on `init`
+  (scheduling runs `cron_schedules`, where other plugins translate; core's `weekly` interval is
+  used, no own interval), on the main site only (reschedules on `wpcybersec_settings_updated`),
+  hooks `wpcybersec_scheduled_scan` (starts an incremental job, ticks once; on another site of a
+  network it clears that stray event instead) and `wpcybersec_scan_tick` (continues a running job,
+  re-schedules itself in 60s while running). A cron tick asks for `CRON_BUDGET` (20 s).
 - `trust_file($abs, $sha256 = '')`: manifest row -> trusted (hash computed if empty).
 - `forget_file($abs)`: delete the manifest row.
 - `rebaseline_paths(array $abs_dirs)`: synchronously re-trust files under these folders (used
@@ -283,7 +414,25 @@ Files: `includes/class-scanner.php`, `includes/class-signatures.php`,
 
 ### `Scan_Job`
 Only one job at a time. State in option `wpcybersec_job` (not autoloaded); file list in
-`<jobs_dir>/<id>.list`.
+`<jobs_dir>/<id>.list`. Read the class header for the full contract; the essentials:
+- Whole-site runs walk `Paths::scan_set()`. Folders are read as a stream: a folder with more than
+  `DIR_CAP` (20000) entries is listed across ticks from an entry count (state `cursor`), and its
+  rows are never treated as deleted meanwhile. Folders outside the scan root that older versions
+  never scanned (option `wpcybersec_manifest_extra`) are adopted like a baseline the first time.
+- Symlinks: a symlinked folder is not walked through the link; when its target is in the scan set
+  it is scanned there once, otherwise it is counted (`symlinks`, `symlink_list`, "symlinked
+  folders not scanned").
+- Budgets: `tick($budget)` uses at most about half of what max_execution_time leaves
+  (`exec_seconds_left()`, `clamp_budget()`), so the batch running over the deadline, the state
+  save and a database step still fit.
+- Crash guard: before real work on a file its name goes into `<jobs_dir>/<id>.cur` (crash
+  marker, emptied when done; a shutdown function records the fatal error and releases the
+  lock). A file that stopped the scan `CRASH_LIMIT` (2) times is skipped, reported as a pending
+  file item "could not be scanned" and remembered in option `wpcybersec_unscannable` (path hash
+  => size:mtime, at most 200) so later runs skip it until it changes (`unscannable` count).
+- `generated_kind($abs)`: `dropin` (a drop-in name at the top of WP_CONTENT_DIR) or `generated`
+  (wp-content/cache/, litespeed/, wp-rocket-config/, w3tc-config/, wp-cache-config.php). Such
+  files and critical files are reported but never quarantined automatically.
 - `start(array $opts)`: opts `mode` (`incremental`|`full`|`baseline`), `malware` (bool),
   `paths` (optional absolute folders), `trigger` (`manual`|`cron`|`cli`|`wizard`|`update`),
   `force` (bool). Returns job id string or WP_Error. If a job is running and not `force`,
@@ -308,9 +457,17 @@ Only one job at a time. State in option `wpcybersec_job` (not autoloaded); file 
   `wpcybersec()->notifier->scan_finished($status)` at the end.
 
 ### `bin/cron.php`
-CLI runner for real cron without WP-CLI: `php bin/cron.php [--full|--baseline] [--no-malware] [--isolated] [--wp=/abs/path]`.
-Refuses to run from the web (`PHP_SAPI !== 'cli'` -> exit). Loads `wp-load.php`, runs a scan
-to completion, prints a one-line summary.
+CLI runner for real cron without WP-CLI: `php bin/cron.php [--full|--baseline] [--no-malware] [--isolated] [--quiet] [--wp=/abs/path] [--url=https://example.com/]`.
+Refuses to run from the web (CLI, or php-cgi started from a shell or cron without request
+variables; use `php-cgi -q`). Loads `wp-load.php`, runs a scan to completion, prints a one-line
+summary, exits 1 when the scan failed. `--url` sets HTTP_HOST / REQUEST_URI; without it a
+multisite host comes from `DOMAIN_CURRENT_SITE` / `PATH_CURRENT_SITE` in wp-config.php. When
+WordPress exits while loading (no site for the address) a shutdown function says so and exits 1.
+Records network option `wpcybersec_cli_cron_at` (proof that real cron runs).
+`Sysadmin_Tools::cron_snippets()` builds the crontab lines (`cron_url_arg()` adds `--url` on
+multisite). The plain `php wp-cron.php` line has no host either, so on multisite it becomes
+`curl` of the main site's `wp-cron.php?doing_wp_cron` (where every plugin event lives), and the
+WP-CLI variant runs `wp cron event run --due-now --url=<site>` for every site of `wp site list`.
 
 `--isolated` (clean-room scan): before `wp-load.php`, filters are pre-registered in the
 `$wp_filter` global (turned into WP_Hook objects by `WP_Hook::build_preinitialized_hooks()`):
@@ -331,19 +488,25 @@ Files: `includes/class-upload-gate.php`, `includes/class-install-gate.php`,
 
 ### `Upload_Gate`
 - `register()`: `wp_handle_upload_prefilter` and `wp_handle_sideload_prefilter` (priority 1000).
+- Also `wp_upload_bits` and the REST media route: `rest_request_after_callbacks` turns the
+  error of a held REST upload into `wpcybersec_upload_held` with status 403 (instead of WordPress's
+  500).
 - Policy (`upload_mode`): `hold_all` holds everything not allowlisted; `hold_risky` holds
   executable/script/archive/svg/html types, files whose real type does not match the extension,
   and anything with hits; `scan_only` holds only uploads with hits >= 2; `off` does nothing.
   Users with a role in `upload_bypass_roles` pass when clean. Malicious uploads (hits >= 2)
   are always held unless the hash is allowlisted. `gate_sideloads` controls sideloads.
 - Holding = `quarantine->hold($tmp, false)` + item (type upload, status pending, path = original
-  file name, source media|sideload|rest|plugin_zip|theme_zip, details.post_id/context/hits)
-  + log + notifier, then `$file['error'] = <message>` so WordPress shows it in the uploader.
+  file name, source media|sideload|rest|plugin_zip|theme_zip, details.post_id/context/hits,
+  `upload_subdir`, `blog_id` on multisite) + log + notifier, then `$file['error'] = <message>`
+  so WordPress shows it in the uploader. When the copy cannot be stored (data folder problem) a
+  clean upload is let through and a malicious one refused without a copy (`not_held`).
 - `with_bypass(callable $fn)`: runs $fn with the gate disabled (used when importing).
 - `on_approve(array $item)`: allowlist the hash; for media/sideload/rest uploads import the held
   file into the Media Library (`media_handle_sideload`, attach to `details.post_id`) and store
   `details.attachment_id`; for plugin/theme ZIPs also allowlist the install slug found in the
-  ZIP (top folder) so the install gate lets it through. Purge the held copy after import.
+  ZIP (top folder, read with ZipArchive or the bundled PclZip) so the install gate lets it
+  through. Purge the held copy after import. Multisite: the import runs on the item's site.
 - `on_deny(array $item)`: optional hook (logging).
 
 ### `Install_Gate`
@@ -356,6 +519,10 @@ Files: `includes/class-upload-gate.php`, `includes/class-install-gate.php`,
   unless unlocked).
 - `on_approve(array $item)`: allowlist install key (and package hash if known).
 - `unlock($minutes)`, `lock()`, `is_unlocked()`, `unlocked_until()` (unix, 0 when locked).
+- static `local_path($path)`: the local path of a path the filesystem API handed over (with
+  FS_METHOD ftpext/ftpsockets/ssh2 the upgrader works with FTP paths), '' when it cannot be
+  mapped; static `mods_disallowed()`: `DISALLOW_FILE_MODS` is on, so the freeze lock has nothing
+  to unlock (the UI and CLI say so instead of offering it).
 
 ### `Guard_Manager`
 - `register()`: imports the guard spool into items (`import_spool()`) on `admin_init` (cheap
@@ -363,6 +530,15 @@ Files: `includes/class-upload-gate.php`, `includes/class-install-gate.php`,
   sync on `wpcybersec_settings_updated` and `wpcybersec_allowlist_changed`; re-enables the
   config on boot if the guard was installed (option `wpcybersec_guard_installed`).
 - `bootstrap_path()`: `ABSPATH . 'wpcybersec-guard.php'`.
+- `front_root()`: real folder of the front controller index.php when it is not ABSPATH
+  (WordPress in its own subfolder, Bedrock's `web/`), '' otherwise; from the home/site URLs (of
+  the main site on multisite) and DOCUMENT_ROOT, confirmed by an index.php that loads
+  `<sub>/wp-blog-header.php`, remembered in option `wpcybersec_front_root` for cron and CLI.
+  `wiring_dirs()`: ABSPATH plus that folder; `write_user_ini()`, `write_htaccess()` and their
+  `remove_*()` act on both (a failure in one undoes the other). static `litespeed_edition()`:
+  `openlitespeed` | `enterprise` | `unknown` | ''.
+- `config_array()`: `home_path` (main site) and on multisite `home_paths` (every site's URL path);
+  rewritten on `wp_initialize_site` / `wp_delete_site`; kept in sync from the main site only.
 - `install()`: writes the bootstrap (checks `file_exists` before including the plugin's
   `guard/guard.php`, so deleting the plugin never fatals), `Guard_Config::write()`,
   `allowlist->export_guard_file()`, sets option `wpcybersec_guard_installed`.
@@ -370,8 +546,10 @@ Files: `includes/class-upload-gate.php`, `includes/class-install-gate.php`,
 - `status()`: `{ installed, active (constant WPCYBERSEC_GUARD_ACTIVE defined in this request),
   bootstrap_path, bootstrap_exists, prepend (ini value), conflict (other prepend file or null),
   sapi, pending_spool }`.
-- `snippets()`: list of `{ id, label, file, code, help }` for .user.ini, .htaccess (mod_php),
-  php-fpm pool, nginx fastcgi_param, php.ini.
+- `snippets()`: list of `{ id, label, file, code, help, recommended }` for .user.ini, .htaccess
+  (mod_php, LiteSpeed Enterprise, mod_lsapi; every line in IfModule), OpenLiteSpeed (WebAdmin
+  php.ini Override or CyberPanel vhost.conf; it ignores php_value in .htaccess), php-fpm pool,
+  nginx fastcgi_param, php.ini; `recommended_snippet()` by SAPI and LiteSpeed edition.
 - `write_user_ini()`: appends/updates `auto_prepend_file` in `ABSPATH/.user.ini`.
 - `import_spool()`: int imported.
 
@@ -379,13 +557,19 @@ Files: `includes/class-upload-gate.php`, `includes/class-install-gate.php`,
 Standalone (no WordPress). Exits when it is itself the requested script (direct access);
 included or prepended it runs normally. Defines `WPCYBERSEC_GUARD_ACTIVE`. Reads `WPCYBERSEC_GUARD_CONFIG`
 (set by the bootstrap). Returns immediately if disabled or `$_FILES` empty or the request path
-matches `exempt`. For each uploaded file (nested `$_FILES` arrays too) with no error:
+matches `exempt` (`.php` patterns match the script file; route patterns match `home_path`, or
+any entry of `home_paths` on multisite, plus the route; core endpoints need login credentials).
+For each uploaded file (nested `$_FILES` arrays too) with no error:
 sha256 the tmp file; allowlisted -> pass; else copy into `quarantine_dir`, append a JSON line
-to `spool_file` (`time, script, uri, ip, field, name, size, sha256, quarantine_path, type`),
+to `spool_file` (`time, script, uri, host, method, ip, ua, field, name, size, sha256,
+quarantine_path, type, exec, held, dropped, note, action`; `host` lets the import find the site),
 unlink the tmp file, and either answer `403` with the message (`block`) or strip it from
 `$_FILES` (`strip`). Must never fatal: wrap in try/catch, fail open on internal errors.
 
 ### `Notifier`
+- Recipients: `Settings::recipients()` (multisite default: network admin email and super admins).
+  Subjects and bodies use `Network::name()` / `Network::home_url()`, review links go to
+  Network Admin on multisite, items with `details.blog_id` get a "Site" row.
 - `register()`: cron `wpcybersec_digest` (daily) when `notify_mode=digest`.
 - `item_created($id)`: instant mode emails recipients (throttle: one email per 10 minutes,
   queued items are summarized in the next email) and posts to `webhook_url` if set.
@@ -399,7 +583,7 @@ Files: `includes/admin/class-admin.php`, `includes/admin/class-dashboard-page.ph
 `includes/admin/class-reports-page.php`, `assets/css/admin.css`, `assets/js/admin.js`.
 
 - `Admin\Admin::register()`: menu `Cyber Security` (dashicons-shield, position 80, capability
-  `manage_options`, count bubble = pending + threats), submenus Dashboard (`wpcybersec`),
+  `Admin::cap()`, count bubble = pending + threats; on `network_admin_menu` on multisite), submenus Dashboard (`wpcybersec`),
   Reports (`wpcybersec-reports`), Settings (`wpcybersec-settings`, rendered by
   `Admin\Settings_Page`), Setup Wizard (`wpcybersec-wizard`, rendered by `Admin\Wizard`).
   Registers `Admin\Assets` on `admin_enqueue_scripts` and enqueues base + page assets only on
@@ -440,6 +624,13 @@ Files: `includes/admin/class-wizard.php`, `includes/admin/class-settings-page.ph
   tabs; hidden sections stay in the form. The open section travels as `?section=<key>` (also the
   hidden `section` field, kept through the save redirect); `Sysadmin_Tools::settings_url('advanced',
   [], 'wpcs-<key>')` adds it from the fragment.
+- `Hardening`: one-click fixes (`run($id)`), `move_data_dir($target, $outside_only)` moves the
+  data folder through `Storage::relocate()` (refused while a scan runs, on multisite, or when the
+  guard bootstrap cannot be rewritten; the guard spool is imported first, the allowlist mirror and
+  guard config are rewritten in the new folder, the guard is reinstalled there). The uploads PHP
+  block is only reported fixed after a live test (a probe PHP file must not run, a probe text file
+  must still load; otherwise rolled back); on nginx the rule is shown instead of writing a
+  .htaccess. `DISABLE_WP_CRON` and `WPCYBERSEC_HMAC_KEY` are written with `Config_Editor`.
 - `Developer_Instructions`: `items($checks = null)` (each `{ id, title, why, steps, error, at,
   optional }`), `count()` (cached), static `record_failure($id, $message)` / `clear_failure($id)`
   (option `wpcybersec_fix_failures`; Hardening::run(), the guard and uploads/.htaccess handlers call
@@ -447,7 +638,30 @@ Files: `includes/admin/class-wizard.php`, `includes/admin/class-settings-page.ph
 - `Sysadmin_Tools`: `diagnostics()` (list of `{ id, label, status pass|warn|fail|info, detail, fix }`),
   `cron_snippets()`, `apache_uploads_rules()`, `nginx_rules()`, `permission_commands()`,
   `fapolicyd_trust_export()`, `fapolicyd_rules()`, `inotify_script()`, `maldet_steps()`,
-  `antivirus_status()`, static `maldet_detect()`, `inotifywait_installed()`,
-  `write_uploads_htaccess()`, `hmac_snippet()`.
+  `antivirus_status()` (ClamAV shows "Unknown (hosting hides it)" instead of "Not installed" when
+  `clamav_hidden()` says the host may hide the binary), static `maldet_detect()`, `inotifywait_installed()`,
+  `write_uploads_htaccess()`, `hmac_snippet()`. `server-tools/cgav.sh` (also offered as a
+  download, `includes/admin/cgav-script.txt`) installs and checks ClamAV and Linux Malware Detect
+  on the server (status, install-clamav, install-maldet, monitor, test, update, scan, logs; safe to
+  re-run, never deletes site files).
 - `Cli`: static `register()` -> `WP_CLI::add_command('wpcybersec', ...)` with `status`, `scan`,
   `pending`, `approve`, `deny`, `allowlist`, `guard`, `unlock`, `lock`, `report`.
+
+## Uninstall and deactivation
+
+- Deactivation (`Installer::deactivate()`): plugin cron events cleared on every site of a network
+  (`Network::clear_cron_everywhere()`, time-boxed), guard config disabled, redirect flag removed.
+- `uninstall.php` always removes the wp-config.php backups (they hold the database password).
+  With "Delete all data on uninstall" (read from the network option on multisite, the main
+  site's option before migration) it also: loads the plugin and removes only the define lines it
+  marked (`Config_Editor::remove_marked_constant()` for `WPCYBERSEC_HMAC_KEY` and
+  `DISABLE_WP_CRON`, never a hand-written one, never when wp-config.php does not parse); removes
+  the guard lines (`; BEGIN/END CyberGate Security Guard` block and the `auto_prepend_file` line)
+  from .user.ini and the `# BEGIN/END CyberGate Security Guard` block from .htaccess, in ABSPATH
+  and the front controller folder; removes the `# BEGIN/END CyberGate Security` block from the
+  (main site's) uploads .htaccess (deleting the file when nothing else was in it); drops the
+  tables, deletes options, transients and site transients (`_site_transient_wpcybersec_*` and
+  their timeouts, in the options table on single sites) and cron events of every site (multisite:
+  `get_sites()` over every network, old per-site tables too), deletes the network options and user
+  meta, removes the data folders that carry this install's marker, and deletes
+  `wpcybersec-guard.php` only when nothing points auto_prepend_file at it (never from WP-CLI).

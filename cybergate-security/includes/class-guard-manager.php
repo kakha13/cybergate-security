@@ -59,6 +59,9 @@ class Guard_Manager {
 	 */
 	public function register() {
 		add_filter( 'cron_schedules', array( $this, 'cron_schedules' ) ); // phpcs:ignore WordPress.WP.CronInterval
+		// Multisite: a new or deleted site changes the paths in the guard config.
+		add_action( 'wp_initialize_site', array( $this, 'on_sites_changed' ), 200, 0 );
+		add_action( 'wp_delete_site', array( $this, 'on_sites_changed' ), 200, 0 );
 		add_action( self::IMPORT_HOOK, array( $this, 'cron_import' ) );
 		add_action( 'admin_init', array( $this, 'admin_init' ) );
 		add_action( 'wpcybersec_settings_updated', array( $this, 'on_settings_updated' ), 10, 0 );
@@ -80,10 +83,18 @@ class Guard_Manager {
 	 * init: keeps the config in sync (see maintain()).
 	 */
 	public function on_init() {
+		if ( ! Network::is_main() ) {
+			return; // One network-level config, kept in sync from the main site (and Network Admin).
+		}
 		$this->maintain();
 	}
 
 	/**
+	 * Adds the 10 minute interval of the spool import. Other plugins may run
+	 * this filter before init (wp_get_schedules() while scheduling their own
+	 * events); translating then would load translations too early (notice
+	 * since WordPress 6.7), so the label stays English until init.
+	 *
 	 * @param array $schedules Schedules.
 	 * @return array
 	 */
@@ -91,7 +102,7 @@ class Guard_Manager {
 		if ( is_array( $schedules ) && ! isset( $schedules[ self::SCHEDULE ] ) ) {
 			$schedules[ self::SCHEDULE ] = array(
 				'interval' => 10 * MINUTE_IN_SECONDS,
-				'display'  => __( 'Every 10 minutes (CyberGate Security)', 'cybergate-security' ),
+				'display'  => did_action( 'init' ) ? __( 'Every 10 minutes (CyberGate Security)', 'cybergate-security' ) : 'Every 10 minutes (CyberGate Security)',
 			);
 		}
 		return $schedules;
@@ -104,12 +115,24 @@ class Guard_Manager {
 	 * be able to trigger signature scans.
 	 */
 	public function admin_init() {
-		if ( current_user_can( 'manage_options' ) && $this->has_pending() ) {
+		if ( Admin\Admin::can() && $this->has_pending() ) {
 			$this->import_spool( self::ADMIN_BATCH, self::ADMIN_SECONDS, true );
 		}
 		if ( $this->is_installed() ) {
-			$this->ensure_cron();
+			if ( Network::is_main() ) {
+				$this->ensure_cron();
+			}
 			$this->heal_bootstrap();
+		}
+	}
+
+	/**
+	 * A site was added to or removed from the network.
+	 */
+	public function on_sites_changed() {
+		Network::reset();
+		if ( $this->is_installed() ) {
+			$this->sync_config();
 		}
 	}
 
@@ -146,7 +169,7 @@ class Guard_Manager {
 			return;
 		}
 		$wanted = $this->config_array();
-		$keys   = array( 'enabled', 'action', 'quarantine_dir', 'spool_file', 'allow_file', 'exempt', 'max_bytes', 'max_spool_bytes', 'max_quarantine_files', 'max_quarantine_bytes', 'min_free_bytes', 'exec_extensions', 'exec_filenames', 'home_path', 'login_cookie', 'root', 'front_root' );
+		$keys   = array( 'enabled', 'action', 'quarantine_dir', 'spool_file', 'allow_file', 'exempt', 'max_bytes', 'max_spool_bytes', 'max_quarantine_files', 'max_quarantine_bytes', 'min_free_bytes', 'exec_extensions', 'exec_filenames', 'home_path', 'home_paths', 'login_cookie', 'root', 'front_root' );
 		foreach ( $keys as $key ) {
 			if ( ! array_key_exists( $key, $current ) || $current[ $key ] !== $wanted[ $key ] ) {
 				$this->sync_config();
@@ -194,7 +217,7 @@ class Guard_Manager {
 	 * @return bool
 	 */
 	public function is_installed() {
-		return (bool) get_option( self::INSTALLED_OPTION, false );
+		return (bool) Network::get_option( self::INSTALLED_OPTION, false );
 	}
 
 	/**
@@ -236,7 +259,10 @@ class Guard_Manager {
 		 */
 		$min_free = (int) apply_filters( 'wpcybersec_guard_min_free_bytes', 64 * MB_IN_BYTES );
 
-		$home_path = (string) wp_parse_url( home_url( '/' ), PHP_URL_PATH );
+		// One config serves every site of a multisite network: the main site's
+		// path plus the path of every site, so REST exemptions match on all of them.
+		$home_paths = Network::home_paths();
+		$home_path  = isset( $home_paths[0] ) ? $home_paths[0] : '';
 
 		return array(
 			'enabled'              => $this->is_installed(),
@@ -254,6 +280,7 @@ class Guard_Manager {
 			'exec_extensions'      => self::lower_list( $settings->get( 'exec_extensions', array() ) ),
 			'exec_filenames'       => self::lower_list( $settings->get( 'exec_filenames', array() ) ),
 			'home_path'            => untrailingslashit( wp_normalize_path( $home_path ) ),
+			'home_paths'           => Network::active() ? $home_paths : array(),
 			'login_cookie'         => defined( 'LOGGED_IN_COOKIE' ) ? (string) LOGGED_IN_COOKIE : '',
 			'message'              => __( 'This upload is waiting for administrator approval (CyberGate Security). After approval, send it again and it will go through.', 'cybergate-security' ),
 			'message_refused'      => __( 'This upload was refused because it could not be checked (CyberGate Security). Please contact the site administrator.', 'cybergate-security' ),
@@ -280,6 +307,17 @@ class Guard_Manager {
 		if ( null !== $cache ) {
 			return $cache;
 		}
+		// Multisite: worked out from the main site's addresses, whichever site runs the request.
+		$cache = (string) Network::on_main( array( $this, 'find_front_root' ) );
+		return $cache;
+	}
+
+	/**
+	 * front_root() without the cache, in the current site's context.
+	 *
+	 * @return string
+	 */
+	public function find_front_root() {
 		$cache    = '';
 		$real_abs = realpath( ABSPATH );
 		$abs      = trailingslashit( wp_normalize_path( $real_abs ? $real_abs : ABSPATH ) );
@@ -319,11 +357,11 @@ class Guard_Manager {
 		}
 		// Cron and WP-CLI have no DOCUMENT_ROOT: reuse what a web request found,
 		// so the guard config does not change with the kind of request.
-		$stored = (string) get_option( self::FRONT_OPTION, '' );
+		$stored = (string) Network::get_option( self::FRONT_OPTION, '' );
 		if ( '' === $cache && empty( $_SERVER['DOCUMENT_ROOT'] ) && '' !== $stored && 0 === strpos( $abs, $stored ) && $stored !== $abs && self::loads_wordpress( $stored . 'index.php', substr( $abs, strlen( $stored ) ) ) ) {
 			$cache = $stored;
 		} elseif ( $cache !== $stored && ( '' !== $cache || ! empty( $_SERVER['DOCUMENT_ROOT'] ) ) ) {
-			update_option( self::FRONT_OPTION, $cache, false );
+			Network::update_option( self::FRONT_OPTION, $cache, false );
 		}
 		return $cache;
 	}
@@ -428,7 +466,7 @@ class Guard_Manager {
 	public function bootstrap_code( $guard_file = null, $config_file = null, $chain = null ) {
 		$guard_file  = null === $guard_file ? $this->guard_file() : (string) $guard_file;
 		$config_file = null === $config_file ? Guard_Config::file() : (string) $config_file;
-		$chain       = null === $chain ? (string) get_option( self::CHAIN_OPTION, '' ) : (string) $chain;
+		$chain       = null === $chain ? (string) Network::get_option( self::CHAIN_OPTION, '' ) : (string) $chain;
 		return self::build_bootstrap( $guard_file, $config_file, $chain );
 	}
 
@@ -499,12 +537,12 @@ class Guard_Manager {
 		// Remember another prepend file (for example a firewall) so the bootstrap keeps it running.
 		$conflict = $this->detect_conflict();
 		if ( $conflict ) {
-			update_option( self::CHAIN_OPTION, $conflict, false );
+			Network::update_option( self::CHAIN_OPTION, $conflict, false );
 		}
 
-		update_option( self::INSTALLED_OPTION, time(), false );
+		Network::update_option( self::INSTALLED_OPTION, time(), false );
 		if ( ! $this->sync_config() ) {
-			delete_option( self::INSTALLED_OPTION );
+			Network::delete_option( self::INSTALLED_OPTION );
 			return new \WP_Error(
 				'wpcybersec_guard_config',
 				/* translators: %s: file path */
@@ -540,8 +578,8 @@ class Guard_Manager {
 	 */
 	public function uninstall( $keep_bootstrap = false ) {
 		Guard_Config::set_enabled( false );
-		delete_option( self::INSTALLED_OPTION );
-		wp_clear_scheduled_hook( self::IMPORT_HOOK );
+		Network::delete_option( self::INSTALLED_OPTION );
+		Network::clear_hook( self::IMPORT_HOOK );
 
 		// Import whatever is still waiting so nothing held is lost.
 		$this->import_spool();
@@ -561,7 +599,7 @@ class Guard_Manager {
 		} elseif ( is_file( $bootstrap ) && ! $this->bootstrap_referenced() ) {
 			Fs::delete( $bootstrap );
 			$this->forget_file( $bootstrap );
-			delete_option( self::CHAIN_OPTION );
+			Network::delete_option( self::CHAIN_OPTION );
 			$this->log( 'guard_uninstalled', __( 'Early upload guard removed.', 'cybergate-security' ) );
 		} else {
 			$this->log(
@@ -628,13 +666,13 @@ class Guard_Manager {
 	 * Schedules (or removes) the periodic spool import.
 	 */
 	private function ensure_cron() {
-		$next = wp_next_scheduled( self::IMPORT_HOOK );
+		$next = Network::next_scheduled( self::IMPORT_HOOK );
 		if ( $this->is_installed() ) {
 			if ( ! $next ) {
-				wp_schedule_event( time() + 10 * MINUTE_IN_SECONDS, self::SCHEDULE, self::IMPORT_HOOK );
+				Network::schedule_event( time() + 10 * MINUTE_IN_SECONDS, self::SCHEDULE, self::IMPORT_HOOK );
 			}
 		} elseif ( $next ) {
-			wp_clear_scheduled_hook( self::IMPORT_HOOK );
+			Network::clear_hook( self::IMPORT_HOOK );
 		}
 	}
 
@@ -682,7 +720,7 @@ class Guard_Manager {
 			'conflict'            => $conflict ? $conflict : null,
 			'conflict_help'       => $help,
 			'conflict_snippet'    => $snippet,
-			'chain'               => (string) get_option( self::CHAIN_OPTION, '' ),
+			'chain'               => (string) Network::get_option( self::CHAIN_OPTION, '' ),
 			'sapi'                => PHP_SAPI,
 			'litespeed'           => self::litespeed_edition(),
 			'front_root'          => $this->front_root(),
@@ -1606,7 +1644,7 @@ class Guard_Manager {
 					'executable'      => $executable,
 					'scan_incomplete' => '' !== $held_path && ! $scan,
 					'hits'            => array_slice( $hits, 0, 50 ),
-				),
+				) + $this->site_of_entry( $entry ),
 			)
 		);
 		if ( ! $id ) {
@@ -1641,6 +1679,25 @@ class Guard_Manager {
 			}
 		}
 		return 'imported';
+	}
+
+	/**
+	 * Multisite: the site a held request was sent to, from its host and path.
+	 *
+	 * @param array $entry Spool line.
+	 * @return array { blog_id } or empty.
+	 */
+	private function site_of_entry( array $entry ) {
+		if ( ! Network::active() || ! function_exists( 'get_site_by_path' ) ) {
+			return array();
+		}
+		$host = isset( $entry['host'] ) ? strtolower( (string) preg_replace( '/:\d+$/', '', (string) $entry['host'] ) ) : '';
+		$path = isset( $entry['uri'] ) ? (string) wp_parse_url( (string) $entry['uri'], PHP_URL_PATH ) : '/';
+		if ( '' === $host ) {
+			$host = (string) wp_parse_url( network_home_url(), PHP_URL_HOST );
+		}
+		$site = get_site_by_path( $host, '' !== $path ? $path : '/' );
+		return $site ? array( 'blog_id' => (int) $site->blog_id ) : array();
 	}
 
 	/**

@@ -142,8 +142,16 @@ final class Plugin {
 		}
 
 		add_action( 'wpcybersec_maintenance', array( $this, 'maintenance' ) );
-		if ( ! wp_next_scheduled( 'wpcybersec_maintenance' ) ) {
-			wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', 'wpcybersec_maintenance' );
+		if ( Network::is_main() ) {
+			if ( ! wp_next_scheduled( 'wpcybersec_maintenance' ) ) {
+				wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', 'wpcybersec_maintenance' );
+			}
+		} elseif ( is_admin() || wp_doing_cron() ) {
+			// Multisite: cron events of the plugin live on the main site only.
+			add_action( 'init', array( __NAMESPACE__ . '\\Network', 'clear_site_cron' ), 1 );
+		}
+		if ( Network::migration_pending() && ( is_admin() || wp_doing_cron() || ( defined( 'WP_CLI' ) && WP_CLI ) ) ) {
+			add_action( 'init', array( __NAMESPACE__ . '\\Network', 'migrate_sites' ), 2 );
 		}
 
 		if ( is_admin() ) {
@@ -153,7 +161,7 @@ final class Plugin {
 			add_action(
 				'init',
 				static function () {
-					if ( is_user_logged_in() && current_user_can( 'manage_options' ) && is_admin_bar_showing() ) {
+					if ( is_user_logged_in() && Admin\Admin::can() && is_admin_bar_showing() ) {
 						( new Admin\Admin() )->register_admin_bar();
 					}
 				}

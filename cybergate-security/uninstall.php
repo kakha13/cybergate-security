@@ -10,6 +10,25 @@ defined( 'WP_UNINSTALL_PLUGIN' ) || exit;
 
 global $wpdb;
 
+/**
+ * A plugin option: on multisite a network option (older versions kept them
+ * per site, so the main site's copy is the fallback).
+ *
+ * @param string $name    Option name.
+ * @param mixed  $default Fallback.
+ * @return mixed
+ */
+function wpcybersec_uninstall_option( $name, $default = '' ) {
+	if ( ! is_multisite() ) {
+		return get_option( $name, $default );
+	}
+	$value = get_site_option( $name, null );
+	if ( null === $value ) {
+		$value = get_blog_option( get_main_site_id(), $name, $default );
+	}
+	return $value;
+}
+
 /*
  * The data folder, resolved like Storage::data_dir(): WPCYBERSEC_DATA_DIR, else
  * the folder chosen by the one-click move (single sites only), else
@@ -30,12 +49,99 @@ if ( defined( 'WPCYBERSEC_DATA_DIR' ) && WPCYBERSEC_DATA_DIR ) {
  * Fallback folder inside uploads, used while no configured folder was
  * writable (Storage::FALLBACK_OPTION, a site option on multisite).
  */
-$wpcybersec_fallback = is_multisite() ? get_site_option( 'wpcybersec_data_fallback', '' ) : get_option( 'wpcybersec_data_fallback', '' );
+$wpcybersec_fallback = wpcybersec_uninstall_option( 'wpcybersec_data_fallback', '' );
 $wpcybersec_fallback = is_string( $wpcybersec_fallback ) && '' !== $wpcybersec_fallback ? untrailingslashit( wp_normalize_path( $wpcybersec_fallback ) ) : '';
 
 // Front controller folder (WordPress in a sub folder, Bedrock), where the guard may be wired in too.
-$wpcybersec_front = get_option( 'wpcybersec_front_root', '' );
+$wpcybersec_front = wpcybersec_uninstall_option( 'wpcybersec_front_root', '' );
 $wpcybersec_front = is_string( $wpcybersec_front ) && '' !== $wpcybersec_front ? trailingslashit( wp_normalize_path( $wpcybersec_front ) ) : '';
+
+$wpcybersec_settings = wpcybersec_uninstall_option( 'wpcybersec_settings', array() );
+$wpcybersec_delete   = is_array( $wpcybersec_settings ) && ! empty( $wpcybersec_settings['delete_data_on_uninstall'] );
+
+/*
+ * "Delete all data": first undo what the plugin wrote into the site's own
+ * files, while its classes can still be loaded (wp-config.php edits keep a
+ * backup in the data folder, which is removed below).
+ */
+if ( $wpcybersec_delete ) {
+	require_once __DIR__ . '/cybergate-security.php';
+
+	// Only the define lines the plugin marked ("// Added by CyberGate Security on <date>."),
+	// and only when wp-config.php parses before and after. A DISABLE_WP_CRON the plugin
+	// added goes too: without the plugin's cron setup WP-Cron must run on visits again.
+	if ( class_exists( '\WPCyberSecurity\Config_Editor' ) ) {
+		foreach ( array( 'WPCYBERSEC_HMAC_KEY', 'DISABLE_WP_CRON' ) as $wpcybersec_const ) {
+			try {
+				\WPCyberSecurity\Config_Editor::remove_marked_constant( $wpcybersec_const );
+			} catch ( \Throwable $wpcybersec_e ) {
+				unset( $wpcybersec_e ); // Never break the uninstall over a config edit.
+			}
+		}
+	}
+
+	// The guard lines in .user.ini and .htaccess of the WordPress folder (and the
+	// front controller folder), and the PHP block in the uploads .htaccess.
+	$wpcybersec_ini_name = (string) ini_get( 'user_ini.filename' );
+	$wpcybersec_ini_name = '' === $wpcybersec_ini_name ? '.user.ini' : $wpcybersec_ini_name;
+	$wpcybersec_wiring   = array_unique( array_filter( array( trailingslashit( wp_normalize_path( ABSPATH ) ), $wpcybersec_front ) ) );
+	foreach ( $wpcybersec_wiring as $wpcybersec_dir ) {
+		foreach ( array_unique( array( $wpcybersec_ini_name, '.user.ini' ) ) as $wpcybersec_name ) {
+			$wpcybersec_file = $wpcybersec_dir . $wpcybersec_name;
+			if ( ! is_file( $wpcybersec_file ) || is_link( $wpcybersec_file ) || ! is_writable( $wpcybersec_file ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
+				continue;
+			}
+			$wpcybersec_old  = (string) @file_get_contents( $wpcybersec_file ); // phpcs:ignore
+			$wpcybersec_kept = array();
+			foreach ( preg_split( '/\r\n|\n|\r/', $wpcybersec_old ) as $wpcybersec_line ) {
+				$wpcybersec_trim = trim( $wpcybersec_line );
+				if ( '; BEGIN CyberGate Security Guard' === $wpcybersec_trim || '; END CyberGate Security Guard' === $wpcybersec_trim ) {
+					continue;
+				}
+				if ( preg_match( '/^\s*auto_prepend_file\s*=/i', $wpcybersec_line ) && false !== strpos( $wpcybersec_line, 'wpcybersec-guard.php' ) ) {
+					continue;
+				}
+				$wpcybersec_kept[] = $wpcybersec_line;
+			}
+			$wpcybersec_new = rtrim( implode( "\n", $wpcybersec_kept ) );
+			$wpcybersec_new = '' === $wpcybersec_new ? '' : $wpcybersec_new . "\n";
+			if ( $wpcybersec_new !== $wpcybersec_old ) {
+				@file_put_contents( $wpcybersec_file, $wpcybersec_new, LOCK_EX ); // phpcs:ignore
+			}
+		}
+	}
+	$wpcybersec_up      = wp_upload_dir( null, false );
+	if ( is_multisite() && ! is_main_site() ) {
+		switch_to_blog( get_main_site_id() );
+		$wpcybersec_up = wp_upload_dir( null, false );
+		restore_current_blog();
+	}
+	$wpcybersec_htaccess_files = array();
+	foreach ( $wpcybersec_wiring as $wpcybersec_dir ) {
+		$wpcybersec_htaccess_files[] = array( $wpcybersec_dir . '.htaccess', 'CyberGate Security Guard' );
+	}
+	if ( ! empty( $wpcybersec_up['basedir'] ) ) {
+		$wpcybersec_htaccess_files[] = array( untrailingslashit( wp_normalize_path( $wpcybersec_up['basedir'] ) ) . '/.htaccess', 'CyberGate Security' );
+	}
+	foreach ( $wpcybersec_htaccess_files as $wpcybersec_pair ) {
+		list( $wpcybersec_file, $wpcybersec_marker ) = $wpcybersec_pair;
+		if ( ! is_file( $wpcybersec_file ) || is_link( $wpcybersec_file ) || ! is_writable( $wpcybersec_file ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
+			continue;
+		}
+		$wpcybersec_old = (string) @file_get_contents( $wpcybersec_file ); // phpcs:ignore
+		// Exactly the marked block ("# BEGIN <marker>" ... "# END <marker>"), every copy of it.
+		$wpcybersec_new = preg_replace( '/^[ \t]*# BEGIN ' . preg_quote( $wpcybersec_marker, '/' ) . '[ \t]*\R.*?^[ \t]*# END ' . preg_quote( $wpcybersec_marker, '/' ) . '[ \t]*(\R|\z)/ms', '', $wpcybersec_old );
+		if ( is_string( $wpcybersec_new ) && $wpcybersec_new !== $wpcybersec_old ) {
+			$wpcybersec_new = rtrim( $wpcybersec_new );
+			$wpcybersec_new = '' === $wpcybersec_new ? '' : $wpcybersec_new . "\n";
+			if ( '' === $wpcybersec_new && 'CyberGate Security' === $wpcybersec_marker ) {
+				@unlink( $wpcybersec_file ); // phpcs:ignore -- the uploads .htaccess held nothing but our block.
+			} else {
+				@file_put_contents( $wpcybersec_file, $wpcybersec_new, LOCK_EX ); // phpcs:ignore
+			}
+		}
+	}
+}
 
 /*
  * Backups of wp-config.php hold the database password and the salts: remove
@@ -56,22 +162,54 @@ foreach ( array_unique( array_filter( array( $wpcybersec_data, $wpcybersec_defau
 	@rmdir( $wpcybersec_backups ); // phpcs:ignore
 }
 
-$wpcybersec_settings = get_option( 'wpcybersec_settings', array() );
-if ( empty( $wpcybersec_settings['delete_data_on_uninstall'] ) ) {
+if ( ! $wpcybersec_delete ) {
 	return;
 }
 
-foreach ( array( 'items', 'manifest', 'allowlist', 'log' ) as $wpcybersec_table ) {
-	$wpdb->query( 'DROP TABLE IF EXISTS ' . $wpdb->prefix . 'wpcybersec_' . $wpcybersec_table ); // phpcs:ignore WordPress.DB, PluginCheck.Security.DirectDB.UnescapedDBParameter -- table names come from the fixed list above.
+$wpcybersec_hooks  = array( 'wpcybersec_scheduled_scan', 'wpcybersec_scan_tick', 'wpcybersec_digest', 'wpcybersec_maintenance', 'wpcybersec_guard_import', 'wpcybersec_notify_flush' );
+$wpcybersec_tables = array( 'items', 'manifest', 'allowlist', 'log' );
+
+/**
+ * Removes the plugin's tables (with this prefix), options, transients and
+ * site transients (single sites keep those in the options table) and cron
+ * events of the current site.
+ *
+ * @param string   $prefix Table prefix of the site.
+ * @param string[] $tables Table suffixes.
+ * @param string[] $hooks  Cron hooks.
+ */
+function wpcybersec_uninstall_site( $prefix, array $tables, array $hooks ) {
+	global $wpdb;
+	foreach ( $tables as $table ) {
+		$wpdb->query( 'DROP TABLE IF EXISTS ' . $prefix . 'wpcybersec_' . $table ); // phpcs:ignore WordPress.DB, PluginCheck.Security.DirectDB.UnescapedDBParameter -- table names come from the fixed list above.
+	}
+	$options = $prefix . 'options';
+	$wpdb->query( "DELETE FROM {$options} WHERE option_name LIKE 'wpcybersec\\_%' OR option_name LIKE '\\_transient\\_wpcybersec\\_%' OR option_name LIKE '\\_transient\\_timeout\\_wpcybersec\\_%' OR option_name LIKE '\\_site\\_transient\\_wpcybersec\\_%' OR option_name LIKE '\\_site\\_transient\\_timeout\\_wpcybersec\\_%'" ); // phpcs:ignore WordPress.DB, PluginCheck.Security.DirectDB.UnescapedDBParameter -- core options table of the site.
+	wp_cache_delete( 'alloptions', 'options' );
+	foreach ( $hooks as $hook ) {
+		wp_clear_scheduled_hook( $hook );
+	}
 }
 
-$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'wpcybersec\\_%' OR option_name LIKE '\\_transient\\_wpcybersec\\_%' OR option_name LIKE '\\_transient\\_timeout\\_wpcybersec\\_%'" ); // phpcs:ignore WordPress.DB
 if ( is_multisite() ) {
-	delete_site_option( 'wpcybersec_data_fallback' );
-}
-
-foreach ( array( 'wpcybersec_scheduled_scan', 'wpcybersec_scan_tick', 'wpcybersec_digest', 'wpcybersec_maintenance', 'wpcybersec_guard_import', 'wpcybersec_notify_flush' ) as $wpcybersec_hook ) {
-	wp_clear_scheduled_hook( $wpcybersec_hook );
+	// Every site of every network on this database: older versions kept tables,
+	// options and cron events per site.
+	$wpcybersec_site_ids = get_sites(
+		array(
+			'fields' => 'ids',
+			'number' => 0,
+		)
+	);
+	foreach ( (array) $wpcybersec_site_ids as $wpcybersec_site_id ) {
+		switch_to_blog( (int) $wpcybersec_site_id );
+		wpcybersec_uninstall_site( $wpdb->get_blog_prefix( (int) $wpcybersec_site_id ), $wpcybersec_tables, $wpcybersec_hooks );
+		restore_current_blog();
+	}
+	wpcybersec_uninstall_site( $wpdb->base_prefix, $wpcybersec_tables, array() );
+	$wpdb->query( "DELETE FROM {$wpdb->sitemeta} WHERE meta_key LIKE 'wpcybersec\\_%' OR meta_key LIKE '\\_site\\_transient\\_wpcybersec\\_%' OR meta_key LIKE '\\_site\\_transient\\_timeout\\_wpcybersec\\_%'" ); // phpcs:ignore WordPress.DB
+	wp_cache_flush();
+} else {
+	wpcybersec_uninstall_site( $wpdb->prefix, $wpcybersec_tables, $wpcybersec_hooks );
 }
 
 delete_metadata( 'user', 0, 'wpcybersec_dismiss_setup', '', true );
@@ -93,7 +231,7 @@ $wpcybersec_marker_ok = static function ( $dir ) use ( $wpdb ) {
 	}
 	$text = (string) @file_get_contents( $file, false, null, 0, 1024 ); // phpcs:ignore
 	// Same id as WPCyberSecurity\Storage::site_id().
-	$id = substr( md5( ABSPATH . $wpdb->prefix ), 0, 8 );
+	$id = substr( md5( ABSPATH . $wpdb->base_prefix ), 0, 8 );
 	return (bool) preg_match( '/^site:\s*' . $id . '\s*$/m', $text );
 };
 $wpcybersec_dirs = array();

@@ -40,7 +40,7 @@ defined( 'ABSPATH' ) || exit;
  *
  * Concurrency: AJAX, WP-Cron and bin/cron.php can all drive the same job. Only
  * one of them works at a time: tick(), start() and cancel() take the row lock
- * 'wpcybersec_job_lock' (INSERT IGNORE into the options table, value
+ * 'wpcybersec_job_lock' (INSERT IGNORE into the options table of the main site, value
  * "<expires>:<token>", taken over atomically once expired). A tick that cannot
  * get the lock returns status() at once. cancel() leaves a request in
  * 'wpcybersec_job_cancel' that the running tick honours at its next batch.
@@ -239,7 +239,7 @@ class Scan_Job {
 		// baseline first: when none has finished yet, or when the manifest was
 		// built for another scan root.
 		if ( 'baseline' !== $mode && ! $paths['abs'] && ! $this->has_baseline( $root ) ) {
-			$built_for = get_option( self::ROOT_OPTION, '' );
+			$built_for = Network::get_option( self::ROOT_OPTION, '' );
 			if ( is_string( $built_for ) && '' !== $built_for && $built_for !== $root ) {
 				wpcybersec()->logger->log(
 					'scan_root_changed',
@@ -439,7 +439,7 @@ class Scan_Job {
 				$out['skip'][] = $entry['path'];
 			}
 		}
-		$known = get_option( self::EXTRA_OPTION, array() );
+		$known = Network::get_option( self::EXTRA_OPTION, array() );
 		$known = is_array( $known ) ? $known : array();
 		foreach ( $entries as $entry ) {
 			if ( Store::db_text( $entry['path'] ) !== $entry['path'] ) {
@@ -475,8 +475,8 @@ class Scan_Job {
 	 */
 	public function has_baseline( $root = null ) {
 		$root      = null === $root ? Paths::scan_root() : (string) $root;
-		$at        = (int) get_option( self::BASELINE_OPTION, 0 );
-		$built_for = get_option( self::ROOT_OPTION, false );
+		$at        = (int) Network::get_option( self::BASELINE_OPTION, 0 );
+		$built_for = Network::get_option( self::ROOT_OPTION, false );
 
 		if ( ! $at && false === $built_for ) {
 			// Installs from before baseline tracking: a finished whole-site
@@ -484,8 +484,8 @@ class Scan_Job {
 			$last = $this->last_result();
 			if ( isset( $last['mode'], $last['state'], $last['trigger'] ) && 'baseline' === $last['mode'] && 'done' === $last['state'] && 'update' !== $last['trigger'] ) {
 				$at = ! empty( $last['finished_at'] ) ? (int) $last['finished_at'] : time();
-				update_option( self::BASELINE_OPTION, $at, false );
-				update_option( self::ROOT_OPTION, $root, false );
+				Network::update_option( self::BASELINE_OPTION, $at, false );
+				Network::update_option( self::ROOT_OPTION, $root, false );
 				return true;
 			}
 			return false;
@@ -735,7 +735,7 @@ class Scan_Job {
 
 		if ( '' !== $id && ( $status['id'] !== $id || $this->is_active( $status ) ) ) {
 			// Another runner finished the job while this one waited for the lock.
-			wp_cache_delete( self::LAST_OPTION, 'options' );
+			Network::flush_option_cache( self::LAST_OPTION );
 			$last = $this->last_result();
 			if ( isset( $last['id'] ) && $last['id'] === $id ) {
 				return $last;
@@ -804,7 +804,7 @@ class Scan_Job {
 	 * @return array
 	 */
 	public function last_result() {
-		$last = get_option( self::LAST_OPTION, array() );
+		$last = Network::get_option( self::LAST_OPTION, array() );
 		return is_array( $last ) ? $last : array();
 	}
 
@@ -914,7 +914,7 @@ class Scan_Job {
 		}
 		$queue            = $this->rebaseline_queue( true );
 		$queue[ $prefix ] = microtime( true );
-		update_option( self::QUEUE_OPTION, $queue, false );
+		Network::update_option( self::QUEUE_OPTION, $queue, false );
 		$this->queue = null;
 		return true;
 	}
@@ -964,8 +964,8 @@ class Scan_Job {
 		if ( ! is_string( $id ) ) {
 			return false;
 		}
-		if ( function_exists( 'wp_next_scheduled' ) && ! wp_next_scheduled( File_Monitor::TICK_HOOK ) ) {
-			wp_schedule_single_event( time() + 10, File_Monitor::TICK_HOOK );
+		if ( function_exists( 'wp_next_scheduled' ) && ! Network::next_scheduled( File_Monitor::TICK_HOOK ) ) {
+			Network::schedule_single( time() + 10, File_Monitor::TICK_HOOK );
 		}
 		return $id;
 	}
@@ -976,9 +976,9 @@ class Scan_Job {
 	 */
 	private function rebaseline_queue( $fresh = false ) {
 		if ( $fresh ) {
-			wp_cache_delete( self::QUEUE_OPTION, 'options' );
+			Network::flush_option_cache( self::QUEUE_OPTION );
 		}
-		$queue = get_option( self::QUEUE_OPTION, array() );
+		$queue = Network::get_option( self::QUEUE_OPTION, array() );
 		return is_array( $queue ) ? $queue : array();
 	}
 
@@ -987,9 +987,9 @@ class Scan_Job {
 	 */
 	private function write_queue( array $queue ) {
 		if ( $queue ) {
-			update_option( self::QUEUE_OPTION, $queue, false );
+			Network::update_option( self::QUEUE_OPTION, $queue, false );
 		} else {
-			delete_option( self::QUEUE_OPTION );
+			Network::delete_option( self::QUEUE_OPTION );
 		}
 		$this->queue = null;
 	}
@@ -1825,7 +1825,7 @@ class Scan_Job {
 	 * @return array path hash => "size:mtime" of files remembered as unscannable.
 	 */
 	private function skip_list() {
-		$list = get_option( self::SKIP_OPTION, array() );
+		$list = Network::get_option( self::SKIP_OPTION, array() );
 		return is_array( $list ) ? $list : array();
 	}
 
@@ -1839,7 +1839,7 @@ class Scan_Job {
 		if ( count( $list ) > self::SKIP_MAX ) {
 			$list = array_slice( $list, -self::SKIP_MAX, null, true );
 		}
-		update_option( self::SKIP_OPTION, $list, false );
+		Network::update_option( self::SKIP_OPTION, $list, false );
 	}
 
 	/**
@@ -2585,13 +2585,13 @@ class Scan_Job {
 		$this->state['message']     = $this->summary( $this->state );
 
 		if ( 'baseline' === $this->state['mode'] && empty( $this->state['paths'] ) ) {
-			update_option( self::BASELINE_OPTION, time(), false );
-			update_option( self::ROOT_OPTION, $this->root(), false );
+			Network::update_option( self::BASELINE_OPTION, time(), false );
+			Network::update_option( self::ROOT_OPTION, $this->root(), false );
 		}
 		if ( empty( $this->state['paths'] ) ) {
 			// The folders outside the scan root are covered from now on: later
 			// runs judge new files there like anywhere else.
-			update_option( self::EXTRA_OPTION, array_values( wp_list_pluck( (array) $this->state['extra'], 'p' ) ), false );
+			Network::update_option( self::EXTRA_OPTION, array_values( wp_list_pluck( (array) $this->state['extra'], 'p' ) ), false );
 		}
 		if ( wpcybersec()->snapshots && method_exists( wpcybersec()->snapshots, 'enforce_cap' ) ) {
 			// Keep stored copies under their count and size limits (inode quotas).
@@ -2708,7 +2708,7 @@ class Scan_Job {
 	 */
 	private function acquire_lock( $hold, $wait = 0.0 ) {
 		global $wpdb;
-		$table = $wpdb->options;
+		$table = Network::lock_table();
 		$token = substr( md5( uniqid( 'wpcs-lock', true ) . wp_rand() . getmypid() ), 0, 16 );
 		$until = microtime( true ) + max( 0.0, (float) $wait );
 		$tries = 0;
@@ -2753,7 +2753,7 @@ class Scan_Job {
 		if ( $value === $this->lock ) {
 			return true;
 		}
-		$table = $wpdb->options;
+		$table = Network::lock_table();
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$ok = $wpdb->query( $wpdb->prepare( "UPDATE {$table} SET option_value = %s WHERE option_name = %s AND option_value = %s", $value, self::LOCK_OPTION, $this->lock ) );
 		if ( $ok ) {
@@ -2773,7 +2773,7 @@ class Scan_Job {
 		if ( '' === (string) $value ) {
 			return;
 		}
-		$table = $wpdb->options;
+		$table = Network::lock_table();
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE option_name = %s AND option_value = %s", self::LOCK_OPTION, (string) $value ) );
 	}
@@ -2783,7 +2783,7 @@ class Scan_Job {
 	 */
 	private function request_cancel( $id ) {
 		global $wpdb;
-		$table = $wpdb->options;
+		$table = Network::lock_table();
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$wpdb->query( $wpdb->prepare( "INSERT INTO {$table} (option_name, option_value, autoload) VALUES (%s, %s, 'no') ON DUPLICATE KEY UPDATE option_value = VALUES(option_value)", self::CANCEL_OPTION, (string) $id ) );
 		wp_cache_delete( self::CANCEL_OPTION, 'options' );
@@ -2794,7 +2794,7 @@ class Scan_Job {
 	 */
 	private function clear_cancel() {
 		global $wpdb;
-		$table = $wpdb->options;
+		$table = Network::lock_table();
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE option_name = %s", self::CANCEL_OPTION ) );
 		wp_cache_delete( self::CANCEL_OPTION, 'options' );
@@ -2826,7 +2826,7 @@ class Scan_Job {
 	 */
 	private static function db_option( $name ) {
 		global $wpdb;
-		$table = $wpdb->options;
+		$table = Network::lock_table();
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		$value = $wpdb->get_var( $wpdb->prepare( "SELECT option_value FROM {$table} WHERE option_name = %s LIMIT 1", $name ) );
 		return null === $value ? null : (string) $value;
@@ -2843,14 +2843,9 @@ class Scan_Job {
 	 */
 	private function load( $fresh = false ) {
 		if ( $fresh ) {
-			wp_cache_delete( self::OPTION, 'options' );
-			$notoptions = wp_cache_get( 'notoptions', 'options' );
-			if ( is_array( $notoptions ) && isset( $notoptions[ self::OPTION ] ) ) {
-				unset( $notoptions[ self::OPTION ] );
-				wp_cache_set( 'notoptions', $notoptions, 'options' );
-			}
+			Network::flush_option_cache( self::OPTION );
 		}
-		$state = get_option( self::OPTION, null );
+		$state = Network::get_option( self::OPTION, null );
 		return is_array( $state ) && ! empty( $state['id'] ) ? $state : null;
 	}
 
@@ -2861,14 +2856,14 @@ class Scan_Job {
 		if ( null === $this->state ) {
 			return;
 		}
-		update_option( self::OPTION, $this->state, false );
+		Network::update_option( self::OPTION, $this->state, false );
 	}
 
 	/**
 	 * Copies the final status into the last-scan option.
 	 */
 	private function save_last() {
-		update_option( self::LAST_OPTION, $this->status(), false );
+		Network::update_option( self::LAST_OPTION, $this->status(), false );
 	}
 
 	/**

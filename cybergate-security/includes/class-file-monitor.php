@@ -38,6 +38,12 @@ class File_Monitor {
 		add_action( 'wpcybersec_settings_updated', array( $this, 'maybe_reschedule' ), 10, 2 );
 		add_action( 'wpcybersec_settings_updated', array( $this, 'maybe_reset_baseline' ), 10, 2 );
 
+		// Scans are scheduled on the main site only (one scan for a whole
+		// multisite network); other sites never check the schedule.
+		if ( ! Network::is_main() ) {
+			return;
+		}
+
 		// Scheduling runs the cron_schedules filter, where other plugins call
 		// __(): before init that loads translations too early (notice since
 		// WordPress 6.7). The 'weekly' interval ships with core (5.4+).
@@ -54,7 +60,7 @@ class File_Monitor {
 	public function ensure_schedule() {
 		$schedule = (string) wpcybersec()->settings->get( 'scan_schedule', 'twicedaily' );
 		if ( 'off' === $schedule ) {
-			wp_clear_scheduled_hook( self::SCHEDULED_HOOK );
+			Network::clear_hook( self::SCHEDULED_HOOK );
 			return;
 		}
 		$valid = array( 'hourly', 'twicedaily', 'daily', 'weekly' );
@@ -62,12 +68,12 @@ class File_Monitor {
 			$schedule = 'twicedaily';
 		}
 
-		$current = wp_get_schedule( self::SCHEDULED_HOOK );
+		$current = Network::get_schedule( self::SCHEDULED_HOOK );
 		if ( $current === $schedule ) {
 			return;
 		}
-		wp_clear_scheduled_hook( self::SCHEDULED_HOOK );
-		wp_schedule_event( time() + 5 * MINUTE_IN_SECONDS, $schedule, self::SCHEDULED_HOOK );
+		Network::clear_hook( self::SCHEDULED_HOOK );
+		Network::schedule_event( time() + 5 * MINUTE_IN_SECONDS, $schedule, self::SCHEDULED_HOOK );
 	}
 
 	/**
@@ -101,8 +107,8 @@ class File_Monitor {
 		if ( $new_root === $old_root && ( 'custom' !== $new_root || $new_custom === $old_custom ) ) {
 			return;
 		}
-		delete_option( Scan_Job::BASELINE_OPTION );
-		delete_option( Scan_Job::QUEUE_OPTION );
+		Network::delete_option( Scan_Job::BASELINE_OPTION );
+		Network::delete_option( Scan_Job::QUEUE_OPTION );
 		wpcybersec()->logger->log(
 			'scan_root_changed',
 			__( 'The scan folder setting changed. The next full-site scan rebuilds the baseline.', 'cybergate-security' ),
@@ -122,6 +128,10 @@ class File_Monitor {
 	 * that stopped ticking (its request was killed) is replaced by a new one.
 	 */
 	public function run_scheduled_scan() {
+		if ( ! Network::is_main() ) {
+			Network::clear_site_cron(); // An event an older version left on another site of a network.
+			return;
+		}
 		$job = wpcybersec()->scan_job;
 
 		$status = $job->status();
@@ -162,8 +172,8 @@ class File_Monitor {
 	private function tick_and_chain() {
 		$status = wpcybersec()->scan_job->tick( self::CRON_BUDGET );
 		if ( in_array( $status['state'], array( 'enumerating', 'processing', 'finishing' ), true ) ) {
-			if ( ! wp_next_scheduled( self::TICK_HOOK ) ) {
-				wp_schedule_single_event( time() + self::TICK_DELAY, self::TICK_HOOK );
+			if ( ! Network::next_scheduled( self::TICK_HOOK ) ) {
+				Network::schedule_single( time() + self::TICK_DELAY, self::TICK_HOOK );
 			}
 		}
 	}

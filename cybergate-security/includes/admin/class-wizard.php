@@ -81,7 +81,7 @@ class Wizard {
 		$step  = $this->current_step();
 		$index = (int) array_search( $step, $keys, true );
 
-		$exit = '<a class="button" href="' . esc_url( admin_url( 'admin.php?page=wpcybersec' ) ) . '">' . esc_html__( 'Exit setup', 'cybergate-security' ) . '</a>';
+		$exit = '<a class="button" href="' . esc_url( Admin::page_url( Admin::PAGE_DASHBOARD ) ) . '">' . esc_html__( 'Exit setup', 'cybergate-security' ) . '</a>';
 		?>
 		<div class="wrap wpcs-wrap wpcs-wizard">
 			<?php
@@ -187,7 +187,7 @@ class Wizard {
 					<span class="dashicons dashicons-arrow-left-alt2" aria-hidden="true"></span><?php esc_html_e( 'Back', 'cybergate-security' ); ?>
 				</a>
 			<?php elseif ( 'welcome' === $step ) : ?>
-				<a class="wpcs-wizard__later" href="<?php echo esc_url( admin_url( 'admin.php?page=wpcybersec' ) ); ?>"><?php esc_html_e( 'I will do this later', 'cybergate-security' ); ?></a>
+				<a class="wpcs-wizard__later" href="<?php echo esc_url( Admin::page_url( Admin::PAGE_DASHBOARD ) ); ?>"><?php esc_html_e( 'I will do this later', 'cybergate-security' ); ?></a>
 			<?php endif; ?>
 			<span class="wpcs-spacer"></span>
 			<?php if ( $skip ) : ?>
@@ -433,7 +433,7 @@ class Wizard {
 		$available = $scan_job && method_exists( $scan_job, 'start' );
 		// Set by the scan engine when a whole-site baseline finishes. Trusted rows alone
 		// prove nothing: approvals and updates add some before any baseline exists.
-		$base_at  = (int) get_option( 'wpcybersec_baseline_at', 0 );
+		$base_at  = (int) \WPCyberSecurity\Network::get_option( 'wpcybersec_baseline_at', 0 );
 		$has_base = $base_at > 0;
 
 		$this->heading(
@@ -486,7 +486,7 @@ class Wizard {
 	 */
 	private function render_notifications() {
 		$s      = $this->settings();
-		$emails = $s['notify_emails'] ? (array) $s['notify_emails'] : array( get_option( 'admin_email' ) );
+		$emails = $s['notify_emails'] ? (array) $s['notify_emails'] : \WPCyberSecurity\Network::default_recipients();
 
 		$this->heading(
 			'bell',
@@ -504,8 +504,13 @@ class Wizard {
 				<textarea id="wpcs-notify-emails" name="notify_emails" rows="3" class="wpcs-textarea-sm" spellcheck="false"><?php echo esc_textarea( implode( "\n", $emails ) ); ?></textarea>
 				<span class="wpcs-field__help">
 					<?php
-					/* translators: %s: email address */
-					echo esc_html( sprintf( __( 'One address per line. Leave empty to use the site admin email (%s).', 'cybergate-security' ), get_option( 'admin_email' ) ) );
+					echo esc_html(
+						is_multisite()
+							/* translators: %s: email addresses */
+							? sprintf( __( 'One address per line. Leave empty to use the network admin email and the super admins (%s).', 'cybergate-security' ), implode( ', ', \WPCyberSecurity\Network::default_recipients() ) )
+							/* translators: %s: email address */
+							: sprintf( __( 'One address per line. Leave empty to use the site admin email (%s).', 'cybergate-security' ), get_option( 'admin_email' ) )
+					);
 					?>
 				</span>
 				<p class="wpcs-inline-actions">
@@ -584,7 +589,7 @@ class Wizard {
 			<div class="wpcs-section__head">
 				<span class="dashicons dashicons-clock" aria-hidden="true"></span>
 				<h3><?php esc_html_e( 'Real cron job', 'cybergate-security' ); ?></h3>
-				<?php $cron_runs = (int) get_option( 'wpcybersec_cli_cron_at', 0 ) > time() - 2 * HOUR_IN_SECONDS; ?>
+				<?php $cron_runs = (int) \WPCyberSecurity\Network::get_option( 'wpcybersec_cli_cron_at', 0 ) > time() - 2 * HOUR_IN_SECONDS; ?>
 				<?php if ( $cron_runs ) : ?>
 					<span class="wpcs-badge wpcs-badge--ok"><?php esc_html_e( 'Running', 'cybergate-security' ); ?></span>
 				<?php endif; ?>
@@ -739,10 +744,10 @@ class Wizard {
 		$labels   = Settings_Page::labels();
 		$store    = Sysadmin_Tools::service( 'store' );
 		$count    = ( $store && method_exists( $store, 'manifest_count' ) ) ? (int) $store->manifest_count() : 0;
-		$has_base = (int) get_option( 'wpcybersec_baseline_at', 0 ) > 0;
+		$has_base = (int) \WPCyberSecurity\Network::get_option( 'wpcybersec_baseline_at', 0 ) > 0;
 		$guard    = Sysadmin_Tools::call( 'guard_manager', 'status', array(), null );
 		$settings = Sysadmin_Tools::service( 'settings' );
-		$emails   = $settings ? $settings->recipients() : array( get_option( 'admin_email' ) );
+		$emails   = $settings ? $settings->recipients() : \WPCyberSecurity\Network::default_recipients();
 
 		$level_label = isset( $labels['protection_level'][ $s['protection_level'] ] ) ? $labels['protection_level'][ $s['protection_level'] ] : $s['protection_level'];
 
@@ -803,12 +808,12 @@ class Wizard {
 		</ul>
 		<h3 class="wpcs-wizard__subtitle"><?php esc_html_e( 'What\'s next', 'cybergate-security' ); ?></h3>
 		<div class="wpcs-next">
-			<a class="wpcs-next__item" href="<?php echo esc_url( admin_url( 'admin.php?page=wpcybersec' ) ); ?>">
+			<a class="wpcs-next__item" href="<?php echo esc_url( Admin::page_url( Admin::PAGE_DASHBOARD ) ); ?>">
 				<span class="dashicons dashicons-dashboard" aria-hidden="true"></span>
 				<strong><?php esc_html_e( 'Dashboard', 'cybergate-security' ); ?></strong>
 				<span><?php esc_html_e( 'Status at a glance, scans and recent activity.', 'cybergate-security' ); ?></span>
 			</a>
-			<a class="wpcs-next__item" href="<?php echo esc_url( admin_url( 'admin.php?page=wpcybersec-reports' ) ); ?>">
+			<a class="wpcs-next__item" href="<?php echo esc_url( Admin::page_url( Admin::PAGE_REPORTS ) ); ?>">
 				<span class="dashicons dashicons-list-view" aria-hidden="true"></span>
 				<strong><?php esc_html_e( 'Reports', 'cybergate-security' ); ?></strong>
 				<span><?php esc_html_e( 'Approve or deny held uploads, installs and files.', 'cybergate-security' ); ?></span>
@@ -824,7 +829,7 @@ class Wizard {
 				<span class="dashicons dashicons-arrow-left-alt2" aria-hidden="true"></span><?php esc_html_e( 'Back', 'cybergate-security' ); ?>
 			</a>
 			<span class="wpcs-spacer"></span>
-			<a class="button button-primary button-large wpcs-wizard__next" href="<?php echo esc_url( admin_url( 'admin.php?page=wpcybersec' ) ); ?>">
+			<a class="button button-primary button-large wpcs-wizard__next" href="<?php echo esc_url( Admin::page_url( Admin::PAGE_DASHBOARD ) ); ?>">
 				<?php esc_html_e( 'Go to the Dashboard', 'cybergate-security' ); ?><span class="dashicons dashicons-arrow-right-alt2" aria-hidden="true"></span>
 			</a>
 		</div>

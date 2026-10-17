@@ -21,7 +21,15 @@ defined( 'ABSPATH' ) || exit;
  *     directly into the database.
  *
  * Each account becomes a pending item of type "user" (Store::TYPE_USER, path
- * "user:<ID>") and is notified at once. Decisions: approve adds the account to
+ * "user:<ID>") and is notified at once.
+ *
+ * Multisite: the trusted list is one network option and covers every site.
+ * Administrators of all sites are found with one query on the shared
+ * usermeta table (the "<prefix>capabilities" row of each site), so a scan
+ * needs no switch_to_blog() per site however large the network is; items
+ * record details.blog_id (the site where the account is administrator, or
+ * where the change happened) and details.sites. Deny removes the role on
+ * every site of the network. Decisions: approve adds the account to
  * the trusted list; deny removes the administrator role (the account becomes
  * a subscriber, super admin is revoked) and signs it out everywhere, never
  * for the current user or the last administrator. The trusted list is
@@ -63,10 +71,10 @@ class User_Watch {
 	 * @return bool True when the list was created now.
 	 */
 	public static function seed() {
-		if ( is_array( get_option( self::TRUSTED_OPTION, null ) ) ) {
+		if ( is_array( Network::get_option( self::TRUSTED_OPTION, null ) ) ) {
 			return false;
 		}
-		update_option( self::TRUSTED_OPTION, self::current_admin_ids(), false );
+		Network::update_option( self::TRUSTED_OPTION, self::current_admin_ids(), false );
 		return true;
 	}
 
@@ -77,7 +85,7 @@ class User_Watch {
 	 */
 	public function trusted_ids() {
 		self::seed();
-		$ids = get_option( self::TRUSTED_OPTION, array() );
+		$ids = Network::get_option( self::TRUSTED_OPTION, array() );
 		return array_values( array_unique( array_filter( array_map( 'intval', is_array( $ids ) ? $ids : array() ) ) ) );
 	}
 
@@ -95,7 +103,7 @@ class User_Watch {
 	public function trust( $user_id ) {
 		$ids   = $this->trusted_ids();
 		$ids[] = (int) $user_id;
-		update_option( self::TRUSTED_OPTION, array_values( array_unique( array_filter( $ids ) ) ), false );
+		Network::update_option( self::TRUSTED_OPTION, array_values( array_unique( array_filter( $ids ) ) ), false );
 	}
 
 	/**
@@ -103,16 +111,28 @@ class User_Watch {
 	 */
 	public function untrust( $user_id ) {
 		$ids = array_values( array_diff( $this->trusted_ids(), array( (int) $user_id ) ) );
-		update_option( self::TRUSTED_OPTION, $ids, false );
+		Network::update_option( self::TRUSTED_OPTION, $ids, false );
 	}
 
 	/**
-	 * Ids of every account that is an administrator of this site (or a super
-	 * admin on multisite).
+	 * Ids of every account that is an administrator of this site (on
+	 * multisite: of any site of the network, or a super admin).
 	 *
 	 * @return int[]
 	 */
 	public static function current_admin_ids() {
+		if ( Network::active() ) {
+			$ids = array_keys( self::network_admin_sites() );
+			foreach ( (array) get_super_admins() as $login ) {
+				$user = get_user_by( 'login', (string) $login );
+				if ( $user ) {
+					$ids[] = (int) $user->ID;
+				}
+			}
+			$ids = array_values( array_unique( array_filter( array_map( 'intval', $ids ) ) ) );
+			sort( $ids );
+			return $ids;
+		}
 		$ids = array();
 		if ( function_exists( 'get_users' ) ) {
 			$ids = array_map(
@@ -140,7 +160,55 @@ class User_Watch {
 	}
 
 	/**
-	 * Whether an account has administrator rights here.
+	 * Multisite: administrator accounts of every site of the network, from
+	 * the capabilities rows in the shared usermeta table.
+	 *
+	 * @param int $user_id Only this account (0 for all).
+	 * @return array user id => site ids where the account is administrator.
+	 */
+	public static function network_admin_sites( $user_id = 0 ) {
+		global $wpdb;
+		if ( ! Network::active() ) {
+			return array();
+		}
+		$base  = $wpdb->base_prefix;
+		$like  = $wpdb->esc_like( $base ) . '%' . $wpdb->esc_like( 'capabilities' );
+		$query = "SELECT user_id, meta_key, meta_value FROM {$wpdb->usermeta} WHERE meta_key LIKE %s AND meta_value LIKE %s";
+		$args  = array( $like, '%' . $wpdb->esc_like( '"' . self::ROLE . '"' ) . '%' );
+		if ( $user_id > 0 ) {
+			$query .= ' AND user_id = %d';
+			$args[] = (int) $user_id;
+		}
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- core usermeta table, every value is a placeholder.
+		$rows  = (array) $wpdb->get_results( $wpdb->prepare( $query . ' LIMIT 20000', $args ), ARRAY_A );
+		$out   = array();
+		$sites = array();
+		foreach ( $rows as $row ) {
+			$key = (string) $row['meta_key'];
+			$mid = substr( $key, strlen( $base ), -strlen( 'capabilities' ) );
+			if ( '' === $mid ) {
+				$blog = 1; // "<base>capabilities" belongs to site 1.
+			} elseif ( preg_match( '/^(\d+)_$/', $mid, $m ) ) {
+				$blog = (int) $m[1];
+			} else {
+				continue; // Another table prefix that shares the users table.
+			}
+			if ( ! isset( $sites[ $blog ] ) ) {
+				$site           = get_site( $blog );
+				$sites[ $blog ] = $site && (int) $site->network_id === (int) get_current_network_id();
+			}
+			$caps = maybe_unserialize( $row['meta_value'] );
+			if ( ! $sites[ $blog ] || ! is_array( $caps ) || empty( $caps[ self::ROLE ] ) ) {
+				continue;
+			}
+			$out[ (int) $row['user_id'] ][] = $blog;
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether an account has administrator rights here (multisite: on any
+	 * site of the network, or as super admin).
 	 *
 	 * @param int $user_id User id.
 	 * @return bool
@@ -151,6 +219,9 @@ class User_Watch {
 			return false;
 		}
 		if ( in_array( self::ROLE, (array) $user->roles, true ) ) {
+			return true;
+		}
+		if ( Network::active() && self::network_admin_sites( (int) $user_id ) ) {
 			return true;
 		}
 		return $this->is_network_super_admin( $user );
@@ -299,6 +370,12 @@ class User_Watch {
 			'request_uri'      => $uri,
 			'context'          => 'scan' === $source ? 'scan' : self::request_context(),
 		);
+		if ( Network::active() ) {
+			$found              = self::network_admin_sites( $user_id );
+			$sites              = isset( $found[ $user_id ] ) ? array_values( array_unique( array_map( 'intval', $found[ $user_id ] ) ) ) : array();
+			$details['sites']   = $sites;
+			$details['blog_id'] = 'scan' !== $source || ! $sites ? (int) get_current_blog_id() : (int) $sites[0];
+		}
 		$id = $store->item_insert(
 			array(
 				'type'     => Store::TYPE_USER,
@@ -437,9 +514,32 @@ class User_Watch {
 			}
 		}
 
+		$admin_sites = array();
+		if ( Network::active() ) {
+			$found       = self::network_admin_sites( $user_id );
+			$admin_sites = isset( $found[ $user_id ] ) ? array_values( array_unique( $found[ $user_id ] ) ) : array();
+			$is_admin    = $is_admin || (bool) $admin_sites;
+			if ( ( $is_admin || $is_super ) && ! array_diff( self::current_admin_ids(), array( $user_id ) ) ) {
+				return new \WP_Error( 'wpcybersec_user_last', __( 'This is the only administrator left, so the role was not removed. Create or promote another administrator first.', 'cybergate-security' ) );
+			}
+		}
+
 		$this->silent = true;
 		try {
-			if ( $is_admin ) {
+			if ( $admin_sites ) {
+				// Multisite: the administrator role is removed on every site of the network.
+				foreach ( $admin_sites as $blog_id ) {
+					Network::on_site(
+						$blog_id,
+						static function () use ( $user_id ) {
+							$site_user = new \WP_User( $user_id );
+							if ( in_array( self::ROLE, (array) $site_user->roles, true ) ) {
+								$site_user->set_role( 'subscriber' );
+							}
+						}
+					);
+				}
+			} elseif ( $is_admin ) {
 				$user->set_role( 'subscriber' );
 			}
 			if ( $is_super ) {

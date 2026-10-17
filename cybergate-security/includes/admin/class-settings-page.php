@@ -895,16 +895,31 @@ class Settings_Page {
 			__( 'Bigger files are still checked, but no copy is kept, so their changes cannot be shown line by line.', 'cybergate-security' ),
 			'wpcs-snapshot-max-kb'
 		);
+		$this->field(
+			__( 'Most stored copies', 'cybergate-security' ),
+			$this->number( 'snapshot_max_files', $s['snapshot_max_files'], 1000, 1000000, __( 'files', 'cybergate-security' ) ),
+			__( 'Shared hosting often limits the number of files (inodes). When the limit is reached, the copies used least recently are deleted first.', 'cybergate-security' ),
+			'wpcs-snapshot-max-files'
+		);
+		$this->field(
+			__( 'Most disk space for copies', 'cybergate-security' ),
+			$this->number( 'snapshot_max_mb', $s['snapshot_max_mb'], 10, 10240, __( 'MB', 'cybergate-security' ) ),
+			__( 'Copies are compressed. When the space is used up, the copies used least recently are deleted first.', 'cybergate-security' ),
+			'wpcs-snapshot-max-mb'
+		);
 		$this->card_close();
 
 		// Notifications.
 		$emails = $s['notify_emails'] ? (array) $s['notify_emails'] : array();
 		$this->card_open( 'wpcs-notifications', 'email-alt', __( 'Notifications', 'cybergate-security' ) );
 		$this->field( __( 'Send alerts', 'cybergate-security' ), self::notify_mode_choices( $s['notify_mode'] ) );
-		$emails_html  = '<textarea id="wpcs-notify-emails" name="notify_emails" rows="3" class="wpcs-textarea-sm" spellcheck="false" placeholder="' . esc_attr( get_option( 'admin_email' ) ) . '">' . esc_textarea( implode( "\n", $emails ) ) . '</textarea>';
+		$emails_html  = '<textarea id="wpcs-notify-emails" name="notify_emails" rows="3" class="wpcs-textarea-sm" spellcheck="false" placeholder="' . esc_attr( implode( "\n", \WPCyberSecurity\Network::default_recipients() ) ) . '">' . esc_textarea( implode( "\n", $emails ) ) . '</textarea>';
 		$emails_html .= '<span class="wpcs-field__help">' . esc_html(
-			/* translators: %s: email address */
-			sprintf( __( 'One address per line. Empty means the site admin email (%s).', 'cybergate-security' ), get_option( 'admin_email' ) )
+			is_multisite()
+				/* translators: %s: email addresses */
+				? sprintf( __( 'One address per line. Empty means the network admin email and the super admins (%s).', 'cybergate-security' ), implode( ', ', \WPCyberSecurity\Network::default_recipients() ) )
+				/* translators: %s: email address */
+				: sprintf( __( 'One address per line. Empty means the site admin email (%s).', 'cybergate-security' ), get_option( 'admin_email' ) )
 		) . '</span>';
 		$emails_html .= '<p class="wpcs-inline-actions"><button type="submit" name="wpcs_send_test" value="1" class="button" data-wpcs-test-email data-source="#wpcs-notify-emails"><span class="dashicons dashicons-email-alt" aria-hidden="true"></span>' . esc_html__( 'Send test email', 'cybergate-security' ) . '</button></p>';
 		$this->field( __( 'Email recipients', 'cybergate-security' ), $emails_html, '', 'wpcs-notify-emails' );
@@ -1569,8 +1584,8 @@ class Settings_Page {
 	private function section_cron( array $s, Sysadmin_Tools $tools, array $by_id = array() ) {
 		$this->card_open( 'wpcs-cron', 'clock', __( 'Real cron', 'cybergate-security' ), __( 'WordPress runs scheduled tasks only when someone visits the site. A cron job on the server makes scans run on time and lets long scans finish without a browser.', 'cybergate-security' ) );
 		$disabled = defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON;
-		$next     = wp_next_scheduled( 'wpcybersec_scheduled_scan' );
-		$last_cli = (int) get_option( 'wpcybersec_cli_cron_at', 0 );
+		$next     = \WPCyberSecurity\Network::next_scheduled( 'wpcybersec_scheduled_scan' );
+		$last_cli = (int) \WPCyberSecurity\Network::get_option( 'wpcybersec_cli_cron_at', 0 );
 		$state    = $disabled ? $this->badge( __( 'WP-Cron on page visits is off', 'cybergate-security' ), 'ok' ) : $this->badge( __( 'WP-Cron runs on page visits', 'cybergate-security' ), 'muted' );
 		if ( $last_cli ) {
 			/* translators: %s: time ago */

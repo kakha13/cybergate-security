@@ -312,7 +312,12 @@ class Paths {
 		if ( ! function_exists( 'wp_upload_dir' ) ) {
 			return '';
 		}
-		$dirs = wp_upload_dir( null, false );
+		// Multisite: the main site's folder, which holds every site's uploads (sites/<id>/).
+		$dirs = Network::on_main(
+			static function () {
+				return wp_upload_dir( null, false );
+			}
+		);
 		return ! empty( $dirs['basedir'] ) ? (string) $dirs['basedir'] : '';
 	}
 
@@ -329,8 +334,14 @@ class Paths {
 		$abspath = trailingslashit( wp_normalize_path( ABSPATH ) );
 		$found   = '';
 		if ( function_exists( 'get_option' ) ) {
-			$home = (string) wp_parse_url( (string) get_option( 'home' ), PHP_URL_PATH );
-			$site = (string) wp_parse_url( (string) get_option( 'siteurl' ), PHP_URL_PATH );
+			// Multisite: the main site's addresses (a site's path is not a folder).
+			$urls = Network::on_main(
+				static function () {
+					return array( (string) get_option( 'home' ), (string) get_option( 'siteurl' ) );
+				}
+			);
+			$home = (string) wp_parse_url( $urls[0], PHP_URL_PATH );
+			$site = (string) wp_parse_url( $urls[1], PHP_URL_PATH );
 			$home = trim( $home, '/' );
 			$site = trim( $site, '/' );
 			if ( $site !== $home && ( '' === $home || 0 === strpos( $site . '/', $home . '/' ) ) ) {

@@ -29,13 +29,17 @@ class Installer {
 	);
 
 	/**
-	 * Activation hook.
+	 * Activation hook. On multisite the plugin is network activated only
+	 * (header "Network: true") and works once for the whole network.
+	 *
+	 * @param bool $network_wide Network activation (multisite).
 	 */
-	public static function activate() {
+	public static function activate( $network_wide = false ) {
+		unset( $network_wide );
 		self::install();
 		// Read by Admin on the next admin page load to open the setup wizard.
-		update_option( self::REDIRECT_OPTION, get_current_user_id() ? get_current_user_id() : 1, false );
-		if ( get_option( 'wpcybersec_guard_installed' ) ) {
+		Network::update_option( self::REDIRECT_OPTION, get_current_user_id() ? get_current_user_id() : 1, false );
+		if ( Network::get_option( 'wpcybersec_guard_installed' ) ) {
 			Guard_Config::set_enabled( true );
 		}
 	}
@@ -121,13 +125,17 @@ class Installer {
 				KEY created_at (created_at)
 			) {$charset};",
 		);
+		// Multisite: settings and state of an older per-site install move to
+		// network options before defaults are seeded (see Network).
+		Network::migrate_main_options();
+
 		dbDelta( $sql );
 
-		if ( false === get_option( Settings::OPTION, false ) ) {
-			add_option( Settings::OPTION, Settings::defaults(), '', true );
+		if ( false === Network::get_option( Settings::OPTION, false ) ) {
+			Network::add_option( Settings::OPTION, Settings::defaults(), '', true );
 		}
-		if ( ! get_option( 'wpcybersec_installed_at' ) ) {
-			add_option( 'wpcybersec_installed_at', time(), '', false );
+		if ( ! Network::get_option( 'wpcybersec_installed_at' ) ) {
+			Network::add_option( 'wpcybersec_installed_at', time(), '', false );
 		}
 
 		// Where the data can live (a fallback inside uploads when wp-content is
@@ -141,14 +149,20 @@ class Installer {
 		// Administrators present now are trusted; later ones wait for review.
 		User_Watch::seed();
 
-		update_option( self::DB_OPTION, WPCYBERSEC_DB_VERSION, true );
+		Network::update_option( self::DB_OPTION, WPCYBERSEC_DB_VERSION, true );
+
+		// Per-site tables and options of the other sites (bounded; the rest
+		// continues on later admin, cron and CLI requests, see Plugin::boot()).
+		if ( Network::migration_pending() && did_action( 'init' ) ) {
+			Network::migrate_sites();
+		}
 	}
 
 	/**
 	 * Runs install() again when the DB version changed (after plugin updates).
 	 */
 	public static function maybe_upgrade() {
-		$old = get_option( self::DB_OPTION );
+		$old = Network::get_option( self::DB_OPTION );
 		if ( $old !== WPCYBERSEC_DB_VERSION ) {
 			self::install();
 			if ( $old && version_compare( (string) $old, '3', '<' ) ) {
@@ -164,26 +178,28 @@ class Installer {
 	 * @param string $pattern Exclusion pattern.
 	 */
 	private static function add_default_exclusion( $pattern ) {
-		$settings = get_option( Settings::OPTION, array() );
+		$settings = Network::get_option( Settings::OPTION, array() );
 		if ( ! is_array( $settings ) || ! isset( $settings['exclusions'] ) || ! is_array( $settings['exclusions'] ) ) {
 			return; // Defaults apply.
 		}
 		if ( ! in_array( $pattern, $settings['exclusions'], true ) ) {
 			$settings['exclusions'][] = $pattern;
-			update_option( Settings::OPTION, $settings );
+			Network::update_option( Settings::OPTION, $settings );
 		}
 	}
 
 	/**
-	 * Deactivation hook: stops cron and switches the early guard off so it does
-	 * not keep holding uploads while the plugin is inactive.
+	 * Deactivation hook: stops cron (on every site of a network) and switches
+	 * the early guard off so it does not keep holding uploads while the plugin
+	 * is inactive.
+	 *
+	 * @param bool $network_wide Network deactivation (multisite).
 	 */
-	public static function deactivate() {
-		foreach ( self::CRON_HOOKS as $hook ) {
-			wp_clear_scheduled_hook( $hook );
-		}
+	public static function deactivate( $network_wide = false ) {
+		unset( $network_wide );
+		Network::clear_cron_everywhere();
 		Guard_Config::set_enabled( false );
-		delete_option( self::REDIRECT_OPTION );
+		Network::delete_option( self::REDIRECT_OPTION );
 	}
 
 	/**

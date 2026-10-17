@@ -466,6 +466,10 @@ class Upload_Gate {
 			'original_name' => self::cut( sanitize_text_field( $name ), 255 ),
 			'executable'    => (bool) $executable,
 		);
+		if ( is_multisite() ) {
+			// Approving imports it into this site's Media Library (Network::on_site()).
+			$details['blog_id'] = (int) get_current_blog_id();
+		}
 		if ( ! empty( $held['not_held'] ) ) {
 			$details['not_held'] = true; // No copy was kept: approving only allows the hash.
 		}
@@ -549,7 +553,18 @@ class Upload_Gate {
 			case 'media':
 			case 'rest':
 			case 'sideload':
-				return $this->approve_media( $item, $details, $name );
+				$blog_id = isset( $details['blog_id'] ) ? (int) $details['blog_id'] : 0;
+				if ( is_multisite() && $blog_id > 0 && ! get_site( $blog_id ) ) {
+					// The site was deleted: allow the file, nothing to import into.
+					return $this->approve_hash_only( $item, $name );
+				}
+				// Multisite: into the Media Library of the site it was uploaded to.
+				return Network::on_site(
+					$blog_id,
+					function () use ( $item, $details, $name ) {
+						return $this->approve_media( $item, $details, $name );
+					}
+				);
 			default:
 				return $this->approve_hash_only( $item, $name );
 		}
@@ -1114,10 +1129,17 @@ class Upload_Gate {
 				'per_page' => 5,
 			)
 		);
+		$blog_id = is_multisite() ? (int) get_current_blog_id() : 0;
 		foreach ( $result['rows'] as $row ) {
-			if ( $row['sha256'] === $sha256 && self::item_is_executable( $row ) === (bool) $executable ) {
-				return $row;
+			if ( $row['sha256'] !== $sha256 || self::item_is_executable( $row ) !== (bool) $executable ) {
+				continue;
 			}
+			// Multisite: the same file held on another site is another import, so another item.
+			$row_blog = isset( $row['details']['blog_id'] ) ? (int) $row['details']['blog_id'] : 0;
+			if ( $blog_id && $row_blog && $row_blog !== $blog_id ) {
+				continue;
+			}
+			return $row;
 		}
 		return null;
 	}
@@ -1158,8 +1180,10 @@ class Upload_Gate {
 			/* translators: %s: file name */
 			$message = sprintf( __( '"%s" is waiting for administrator approval (CyberGate Security). After approval, upload it again and it will go through.', 'cybergate-security' ), $name );
 		}
-		if ( current_user_can( 'manage_options' ) ) {
-			$message .= ' ' . __( 'Review it under Cyber Security > Reports.', 'cybergate-security' );
+		if ( Admin\Admin::can() ) {
+			$message .= ' ' . ( is_multisite()
+				? __( 'Review it under Network Admin > Cyber Security > Reports.', 'cybergate-security' )
+				: __( 'Review it under Cyber Security > Reports.', 'cybergate-security' ) );
 		}
 		return $message;
 	}

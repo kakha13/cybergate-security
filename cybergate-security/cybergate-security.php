@@ -10,6 +10,7 @@
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       cybergate-security
  * Domain Path:       /languages
+ * Network:           true
  *
  * @package WPCyberSecurity
  */
@@ -17,7 +18,7 @@
 defined( 'ABSPATH' ) || exit;
 
 define( 'WPCYBERSEC_VERSION', '1.0.0' );
-define( 'WPCYBERSEC_DB_VERSION', '4' ); // 4: manifest mtime index (Reports > Recent changes).
+define( 'WPCYBERSEC_DB_VERSION', '5' ); // 4: manifest mtime index (Reports > Recent changes). 5: multisite network mode (Network).
 define( 'WPCYBERSEC_FILE', __FILE__ );
 define( 'WPCYBERSEC_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPCYBERSEC_URL', plugin_dir_url( __FILE__ ) );

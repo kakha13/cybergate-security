@@ -61,7 +61,7 @@ class Hardening {
 			return;
 		}
 		$storage = wpcybersec()->storage;
-		if ( is_object( $storage ) && method_exists( $storage, 'resume_move' ) && get_option( Storage::MOVE_OPTION ) ) {
+		if ( is_object( $storage ) && method_exists( $storage, 'resume_move' ) && Network::get_option( Storage::MOVE_OPTION ) ) {
 			$storage->resume_move();
 		}
 		Config_Editor::secure_backups();
@@ -134,7 +134,7 @@ class Hardening {
 					'id'          => 'wp_version',
 					'label'       => __( 'Open WordPress updates', 'cybergate-security' ),
 					'description' => __( 'Opens Dashboard > Updates where WordPress updates itself with one click.', 'cybergate-security' ),
-					'link'        => admin_url( 'update-core.php' ),
+					'link'        => Network::admin_url( 'update-core.php' ),
 				);
 
 			case 'wp_config_perms':
@@ -206,7 +206,7 @@ class Hardening {
 				);
 
 			case 'disable_wp_cron':
-				$last = (int) get_option( 'wpcybersec_cli_cron_at', 0 );
+				$last = (int) Network::get_option( 'wpcybersec_cli_cron_at', 0 );
 				if ( ( defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON ) || $last < time() - 2 * HOUR_IN_SECONDS || ! Config_Editor::can_edit() ) {
 					return null;
 				}
@@ -345,7 +345,7 @@ class Hardening {
 		$target  = $storage->suggested_outside_dir();
 		$steps   = array();
 		if ( is_multisite() ) {
-			$steps[] = array( 'text' => __( 'All sites of this multisite network share one data folder, so it is moved for the whole network with one line in wp-config.php. The one-click move is not available on a network, and the review below is needed on every site.', 'cybergate-security' ) );
+			$steps[] = array( 'text' => __( 'All sites of this multisite network share one data folder, so it is moved for the whole network with one line in wp-config.php. The one-click move is not available on a network; the review below is done once, in Network Admin.', 'cybergate-security' ) );
 		} elseif ( $this->descriptor( 'data_dir' ) ) {
 			$steps[] = array( 'text' => __( 'Easiest: use the button above. It copies everything, checks the copy, keeps the items held so far working and only then removes the old folder.', 'cybergate-security' ) );
 		}
@@ -413,7 +413,7 @@ class Hardening {
 			Developer_Instructions::clear_failure( $id );
 			/* translators: %s: fix id */
 			wpcybersec()->logger->log( 'hardening_fixed', sprintf( __( 'Applied the one-click fix "%s".', 'cybergate-security' ), $id ), array( 'fix' => $id ) );
-			delete_transient( Sysadmin_Tools::PROBE_TRANSIENT );
+			Network::delete_transient( Sysadmin_Tools::PROBE_TRANSIENT );
 		}
 		return $result;
 	}
@@ -541,7 +541,7 @@ class Hardening {
 		$moved = $storage->relocate( $target, $after );
 		if ( is_wp_error( $moved ) ) {
 			if ( $storage->data_dir() === $target ) {
-				delete_transient( Sysadmin_Tools::PROBE_TRANSIENT ); // Switched over despite the error.
+				Network::delete_transient( Sysadmin_Tools::PROBE_TRANSIENT ); // Switched over despite the error.
 			}
 			return $moved;
 		}
@@ -563,7 +563,7 @@ class Hardening {
 		$result = Config_Editor::set_constant( 'WPCYBERSEC_HMAC_KEY', wp_generate_password( 64, false, false ) );
 		if ( true === $result ) {
 			// The next request seeds the checksum with the new key.
-			delete_option( Allowlist::CHECKSUM_OPTION );
+			Network::delete_option( Allowlist::CHECKSUM_OPTION );
 		}
 		return $result;
 	}

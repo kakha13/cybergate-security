@@ -98,7 +98,7 @@ class Dashboard_Page {
 		$job           = Admin::call( 'scan_job', 'status', array(), array() );
 		$this->job     = is_array( $job ) ? $job : array();
 		$this->trusted     = (int) Admin::call( 'store', 'manifest_count', array( Store::STATE_TRUSTED ), 0 );
-		$this->baseline_at = (int) get_option( 'wpcybersec_baseline_at', 0 );
+		$this->baseline_at = (int) \WPCyberSecurity\Network::get_option( 'wpcybersec_baseline_at', 0 );
 	}
 
 	/**
@@ -694,7 +694,7 @@ class Dashboard_Page {
 			$this->prow( 'calendar-alt', __( 'Scheduled scans', 'cybergate-security' ), __( 'Scans only run when you start them.', 'cybergate-security' ), __( 'Off', 'cybergate-security' ), 'medium' );
 			return;
 		}
-		$next = (int) wp_next_scheduled( 'wpcybersec_scheduled_scan' );
+		$next = (int) \WPCyberSecurity\Network::next_scheduled( 'wpcybersec_scheduled_scan' );
 		if ( $next ) {
 			$desc = sprintf(
 				/* translators: 1: date and time, 2: relative time */

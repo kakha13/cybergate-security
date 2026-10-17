@@ -261,9 +261,9 @@ class Allowlist {
 		if ( ! $key ) {
 			return null;
 		}
-		$stored = get_option( self::CHECKSUM_OPTION, '' );
+		$stored = Network::get_option( self::CHECKSUM_OPTION, '' );
 		if ( '' === $stored ) {
-			update_option( self::CHECKSUM_OPTION, $this->checksum( $key ), false );
+			Network::update_option( self::CHECKSUM_OPTION, $this->checksum( $key ), false );
 			return true;
 		}
 		return hash_equals( $stored, $this->checksum( $key ) );
@@ -323,7 +323,7 @@ class Allowlist {
 		$this->export_guard_file();
 		$key = self::hmac_key();
 		if ( $key ) {
-			update_option( self::CHECKSUM_OPTION, $this->checksum( $key ), false );
+			Network::update_option( self::CHECKSUM_OPTION, $this->checksum( $key ), false );
 		}
 		do_action( 'wpcybersec_allowlist_changed' );
 	}

@@ -595,8 +595,10 @@ class Decisions {
 			wpcybersec()->store->item_update( $item['id'], array( 'status' => Store::STATUS_RESOLVED ) );
 			return new \WP_Error( 'wpcybersec_gone', __( 'The file no longer exists; the item was marked resolved.', 'cybergate-security' ) );
 		}
-		if ( ! Storage::is_within( $abs, Paths::scan_root() ) && ! Storage::is_within( $abs, ABSPATH ) ) {
-			return new \WP_Error( 'wpcybersec_outside', __( 'Refusing to touch a file outside the scanned folder.', 'cybergate-security' ) );
+		// Whatever a whole-site scan covers (also wp-content, plugins or uploads
+		// outside the scan root), never the plugin's own data folder.
+		if ( ! Paths::in_scope( $abs ) || Storage::is_within( $abs, wpcybersec()->storage->data_dir() ) ) {
+			return new \WP_Error( 'wpcybersec_outside', __( 'Refusing to touch a file outside the scanned folders.', 'cybergate-security' ) );
 		}
 		return $abs;
 	}

@@ -16,12 +16,11 @@ defined( 'ABSPATH' ) || exit;
  * was modified".
  *
  * Layout: <data_dir>/snapshots/<k[0:2]>/<k[2:4]>/<k>.gz (mode 0600), where
- * k = HMAC-SHA256( sha256 of the content, random per-site key ). The key means
+ * k = HMAC-SHA256( sha256 of the content, random key ). The key means
  * a leaked fingerprint (the reports, alert emails and webhooks show SHA-256
  * values) can never be turned into a download address on a server that ignores
- * the .htaccess deny rules (nginx). On a multisite network every site but the
- * main one keeps its copies in snapshots/site-<blog id>/ (each site has its
- * own key and tables, and prunes only its own folder).
+ * the .htaccess deny rules (nginx). A multisite network has one store, one key
+ * and one manifest for all its sites (Network).
  *
  * Files that hold secrets are never copied as they are: wp-config.php, .env,
  * .ini and similar names (is_secret_name()), and any other file in which
@@ -133,7 +132,14 @@ class Snapshots {
 		$old_on  = ! empty( $old['snapshots'] );
 		$new_max = isset( $new['snapshot_max_kb'] ) ? (int) $new['snapshot_max_kb'] : 0;
 		$old_max = isset( $old['snapshot_max_kb'] ) ? (int) $old['snapshot_max_kb'] : 0;
-		if ( ( $new_on && ! $old_on ) || ( $new_on && $new_max > $old_max ) ) {
+		// Copies refused while the store was full can be taken once a limit is raised.
+		$raised = false;
+		foreach ( array( 'snapshot_max_files', 'snapshot_max_mb' ) as $key ) {
+			if ( isset( $new[ $key ], $old[ $key ] ) && (int) $new[ $key ] > (int) $old[ $key ] ) {
+				$raised = true;
+			}
+		}
+		if ( ( $new_on && ! $old_on ) || ( $new_on && $new_max > $old_max ) || ( $new_on && $raised ) ) {
 			$this->reset_backfill();
 		}
 	}
@@ -702,7 +708,7 @@ class Snapshots {
 			$this->usage['bytes']   = max( 0, (int) $this->usage['bytes'] - $freed );
 			$this->usage['refused'] = 0;
 			$this->save_usage();
-			delete_transient( self::STATS_TRANSIENT );
+			Network::delete_transient( self::STATS_TRANSIENT );
 			wpcybersec()->logger->log(
 				'snapshots_capped',
 				sprintf(
@@ -726,7 +732,7 @@ class Snapshots {
 	 */
 	private function load_usage() {
 		if ( null === $this->usage ) {
-			$saved       = get_option( self::USAGE_OPTION, array() );
+			$saved       = Network::get_option( self::USAGE_OPTION, array() );
 			$this->usage = array_merge(
 				array(
 					'files'        => 0,
@@ -741,7 +747,7 @@ class Snapshots {
 			if ( ! is_array( $saved ) || ! $saved ) {
 				// First use: start from the cached count when there is one (an
 				// exact count runs in enforce_cap(), never in the middle of a scan).
-				$cached = get_transient( self::STATS_TRANSIENT );
+				$cached = Network::get_transient( self::STATS_TRANSIENT );
 				if ( is_array( $cached ) && isset( $cached['files'], $cached['bytes'] ) ) {
 					$this->usage['files'] = (int) $cached['files'];
 					$this->usage['bytes'] = (int) $cached['bytes'];
@@ -783,7 +789,7 @@ class Snapshots {
 			return;
 		}
 		$this->usage_dirty = 0;
-		update_option( self::USAGE_OPTION, $this->usage, false );
+		Network::update_option( self::USAGE_OPTION, $this->usage, false );
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -791,17 +797,14 @@ class Snapshots {
 	/* ------------------------------------------------------------------ */
 
 	/**
-	 * Folder of this site's copies (no trailing slash): snapshots/, or
-	 * snapshots/site-<blog id>/ for a site of a network other than the main one.
+	 * Folder of the copies (no trailing slash). One folder for a whole
+	 * multisite network, like the manifest (older versions kept a
+	 * snapshots/site-<id>/ folder per site; Network removes those).
 	 *
 	 * @return string
 	 */
 	public function root() {
-		$root = wpcybersec()->storage->path( self::DIR );
-		if ( function_exists( 'is_multisite' ) && is_multisite() && ! is_main_site() ) {
-			$root .= '/site-' . (int) get_current_blog_id();
-		}
-		return $root;
+		return wpcybersec()->storage->path( self::DIR );
 	}
 
 	/**
@@ -824,7 +827,7 @@ class Snapshots {
 	}
 
 	/**
-	 * Random per-site key, created on first use.
+	 * Random key (one per site, or per multisite network), created on first use.
 	 *
 	 * @return string
 	 */
@@ -832,21 +835,21 @@ class Snapshots {
 		if ( null !== $this->key ) {
 			return $this->key;
 		}
-		$key = get_option( self::KEY_OPTION, '' );
+		$key = Network::get_option( self::KEY_OPTION, '' );
 		if ( ! is_string( $key ) || ! preg_match( '/^[a-f0-9]{64}$/', $key ) ) {
 			try {
 				$key = bin2hex( random_bytes( 32 ) );
 			} catch ( \Throwable $e ) {
 				$key = hash( 'sha256', wp_generate_password( 64, true, true ) . uniqid( '', true ) );
 			}
-			if ( ! add_option( self::KEY_OPTION, $key, '', 'no' ) ) {
+			if ( ! Network::add_option( self::KEY_OPTION, $key, '', 'no' ) ) {
 				// Another request created it first: use that one.
-				wp_cache_delete( self::KEY_OPTION, 'options' );
-				$stored = get_option( self::KEY_OPTION, '' );
+				Network::flush_option_cache( self::KEY_OPTION );
+				$stored = Network::get_option( self::KEY_OPTION, '' );
 				if ( is_string( $stored ) && preg_match( '/^[a-f0-9]{64}$/', $stored ) ) {
 					$key = $stored;
 				} else {
-					update_option( self::KEY_OPTION, $key, false );
+					Network::update_option( self::KEY_OPTION, $key, false );
 				}
 			}
 		}
@@ -913,12 +916,12 @@ class Snapshots {
 	 * @return bool Whether it was marked done.
 	 */
 	public function backfill_done( $generation = null ) {
-		wp_cache_delete( self::BACKFILL_OPTION, 'options' );
+		Network::flush_option_cache( self::BACKFILL_OPTION );
 		list( , $current ) = $this->backfill_state();
 		if ( null !== $generation && (int) $generation !== $current ) {
 			return false;
 		}
-		update_option( self::BACKFILL_OPTION, 'done:' . $current, false );
+		Network::update_option( self::BACKFILL_OPTION, 'done:' . $current, false );
 		return true;
 	}
 
@@ -926,24 +929,21 @@ class Snapshots {
 	 * The next scan copies unchanged trusted files again.
 	 */
 	public function reset_backfill() {
-		wp_cache_delete( self::BACKFILL_OPTION, 'options' );
+		Network::flush_option_cache( self::BACKFILL_OPTION );
 		list( , $generation ) = $this->backfill_state();
-		update_option( self::BACKFILL_OPTION, 'pending:' . ( $generation + 1 ), false );
+		Network::update_option( self::BACKFILL_OPTION, 'pending:' . ( $generation + 1 ), false );
 	}
 
 	/**
 	 * @return array { 0: bool done, 1: int generation }
 	 */
 	private function backfill_state() {
-		$value = get_option( self::BACKFILL_OPTION, '' );
+		$value = Network::get_option( self::BACKFILL_OPTION, '' );
 		if ( is_string( $value ) && preg_match( '/^(done|pending):(\d{1,9})$/', $value, $m ) ) {
 			return array( 'done' === $m[1], (int) $m[2] );
 		}
 		if ( 'done' === $value ) {
-			// Copies from before site folders existed were shared by every site
-			// of a network (each pruned the others' copies): a site other than
-			// the main one copies its files again, into its own folder.
-			return array( ! ( function_exists( 'is_multisite' ) && is_multisite() && ! is_main_site() ), 0 );
+			return array( true, 0 ); // Written by older versions.
 		}
 		return array( false, 0 );
 	}
@@ -960,7 +960,7 @@ class Snapshots {
 	 */
 	public function stats( $fresh = false ) {
 		if ( ! $fresh ) {
-			$cached = get_transient( self::STATS_TRANSIENT );
+			$cached = Network::get_transient( self::STATS_TRANSIENT );
 			if ( is_array( $cached ) && isset( $cached['files'], $cached['bytes'] ) ) {
 				return array(
 					'files' => (int) $cached['files'],
@@ -980,7 +980,7 @@ class Snapshots {
 				break;
 			}
 		}
-		set_transient( self::STATS_TRANSIENT, $stats, HOUR_IN_SECONDS );
+		Network::set_transient( self::STATS_TRANSIENT, $stats, HOUR_IN_SECONDS );
 		$this->load_usage();
 		$this->usage['files'] = $stats['files'];
 		$this->usage['bytes'] = $stats['bytes'];
@@ -1004,8 +1004,8 @@ class Snapshots {
 				$deleted += $this->delete_tree( $root . '/' . $top );
 			}
 		}
-		delete_transient( self::STATS_TRANSIENT );
-		delete_option( self::CURSOR_OPTION );
+		Network::delete_transient( self::STATS_TRANSIENT );
+		Network::delete_option( self::CURSOR_OPTION );
 		$this->load_usage();
 		$this->usage['files']   = 0;
 		$this->usage['bytes']   = 0;
@@ -1035,14 +1035,14 @@ class Snapshots {
 		);
 		$root = $this->root();
 		if ( ! @is_dir( $root ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-			delete_option( self::CURSOR_OPTION );
+			Network::delete_option( self::CURSOR_OPTION );
 			return $result;
 		}
 
 		$deadline = microtime( true ) + max( 1.0, (float) $seconds );
 		$secret   = array();
 		$keep     = $this->referenced_names( $secret );
-		$cursor   = (string) get_option( self::CURSOR_OPTION, '' );
+		$cursor   = (string) Network::get_option( self::CURSOR_OPTION, '' );
 
 		// Plain copies of wp-config.php and other secret files made by an
 		// earlier version of the plugin are replaced with redacted ones.
@@ -1094,12 +1094,12 @@ class Snapshots {
 		}
 
 		if ( $result['complete'] ) {
-			delete_option( self::CURSOR_OPTION );
+			Network::delete_option( self::CURSOR_OPTION );
 		} else {
-			update_option( self::CURSOR_OPTION, $cursor, false );
+			Network::update_option( self::CURSOR_OPTION, $cursor, false );
 		}
 		if ( $result['deleted'] ) {
-			delete_transient( self::STATS_TRANSIENT );
+			Network::delete_transient( self::STATS_TRANSIENT );
 			$this->load_usage();
 			// Sizes of pruned copies are not known here: the exact count in
 			// enforce_cap() corrects the bytes; the file count is exact.

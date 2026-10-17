@@ -10,7 +10,8 @@ namespace WPCyberSecurity;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Tables (prefix = $wpdb->prefix . 'wpcybersec_'):
+ * Tables (prefix = $wpdb->base_prefix . 'wpcybersec_', so every site of a
+ * multisite network shares them; on a single site it equals $wpdb->prefix):
  *
  * items     Everything that needs or had an admin decision: held uploads,
  *           held installs, unknown files, malware threats (files and database
@@ -60,7 +61,7 @@ class Store {
 	 */
 	public static function table( $name ) {
 		global $wpdb;
-		return $wpdb->prefix . 'wpcybersec_' . $name;
+		return $wpdb->base_prefix . 'wpcybersec_' . $name;
 	}
 
 	/**

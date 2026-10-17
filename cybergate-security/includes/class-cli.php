@@ -158,7 +158,7 @@ class Cli {
 			array( 'setting' => 'open_threats', 'value' => isset( $counts['threats'] ) ? (int) $counts['threats'] : 0 ),
 			array( 'setting' => 'in_quarantine', 'value' => isset( $counts['quarantined'] ) ? (int) $counts['quarantined'] : 0 ),
 			array( 'setting' => 'files_monitored', 'value' => $store ? (int) $store->manifest_count() : 0 ),
-			array( 'setting' => 'baseline', 'value' => (int) get_option( 'wpcybersec_baseline_at', 0 ) > 0 ? 'recorded ' . $this->when( (int) get_option( 'wpcybersec_baseline_at', 0 ) ) : 'none yet (the next whole-site scan records it)' ),
+			array( 'setting' => 'baseline', 'value' => (int) Network::get_option( 'wpcybersec_baseline_at', 0 ) > 0 ? 'recorded ' . $this->when( (int) Network::get_option( 'wpcybersec_baseline_at', 0 ) ) : 'none yet (the next whole-site scan records it)' ),
 			array( 'setting' => 'allowlist_entries', 'value' => (int) Sysadmin_Tools::call( 'allowlist', 'count', array(), 0 ) ),
 			array( 'setting' => 'scan_root', 'value' => Paths::scan_root() ),
 			array( 'setting' => 'data_dir', 'value' => $settings && Sysadmin_Tools::service( 'storage' ) ? Sysadmin_Tools::service( 'storage' )->data_dir() : '-' ),

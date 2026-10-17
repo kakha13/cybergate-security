@@ -59,7 +59,7 @@ class Settings {
 
 			// Notifications.
 			'notify_mode'              => 'instant',    // instant | digest | off.
-			'notify_emails'            => array(),      // Empty means the site admin email.
+			'notify_emails'            => array(),      // Empty means the site admin email (multisite: network admin email and super admins).
 			'webhook_url'              => '',           // Slack/Discord/Teams compatible incoming webhook.
 
 			// Advanced: scan scope and performance.
@@ -172,7 +172,7 @@ class Settings {
 	 */
 	public function all() {
 		if ( null === $this->cache ) {
-			$saved       = get_option( self::OPTION, array() );
+			$saved       = Network::get_option( self::OPTION, array() );
 			$this->cache = array_merge( self::defaults(), is_array( $saved ) ? $saved : array() );
 		}
 		return $this->cache;
@@ -198,7 +198,7 @@ class Settings {
 		$old         = $this->all();
 		$new         = $this->sanitize( array_merge( $old, $values ) );
 		$this->cache = $new;
-		update_option( self::OPTION, $new, true );
+		Network::update_option( self::OPTION, $new, true );
 
 		/**
 		 * Fires after settings are saved.
@@ -286,12 +286,14 @@ class Settings {
 	}
 
 	/**
-	 * Notification recipients, falling back to the site admin email.
+	 * Notification recipients, falling back to the site admin email (on
+	 * multisite the network admin email and the super admins, the only ones
+	 * who can approve).
 	 *
 	 * @return string[]
 	 */
 	public function recipients() {
 		$emails = $this->get( 'notify_emails', array() );
-		return $emails ? $emails : array( get_option( 'admin_email' ) );
+		return $emails ? $emails : Network::default_recipients();
 	}
 }

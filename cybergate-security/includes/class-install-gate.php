@@ -589,7 +589,7 @@ class Install_Gate {
 		}
 		$minutes = max( 1, min( 240, (int) $minutes ) );
 		$until   = time() + $minutes * MINUTE_IN_SECONDS;
-		update_option( self::UNLOCK_OPTION, $until, false );
+		Network::update_option( self::UNLOCK_OPTION, $until, false );
 		$this->log(
 			'unlocked',
 			/* translators: %d: minutes */
@@ -604,7 +604,7 @@ class Install_Gate {
 	 */
 	public function lock() {
 		$was = $this->unlocked_until();
-		delete_option( self::UNLOCK_OPTION );
+		Network::delete_option( self::UNLOCK_OPTION );
 		if ( $was ) {
 			$this->log( 'locked', __( 'File changes locked again.', 'cybergate-security' ) );
 		}
@@ -621,7 +621,7 @@ class Install_Gate {
 	 * @return int Unix time when the unlock ends, 0 when locked.
 	 */
 	public function unlocked_until() {
-		$until = (int) get_option( self::UNLOCK_OPTION, 0 );
+		$until = (int) Network::get_option( self::UNLOCK_OPTION, 0 );
 		return $until > time() ? $until : 0;
 	}
 
@@ -997,8 +997,10 @@ class Install_Gate {
 			/* translators: %s: plugin or theme name */
 			$message = sprintf( __( '"%s" is waiting for administrator approval (CyberGate Security). After approval, install it again and it will go through.', 'cybergate-security' ), $display );
 		}
-		if ( current_user_can( 'manage_options' ) ) {
-			$message .= ' ' . __( 'Review it under Cyber Security > Reports.', 'cybergate-security' );
+		if ( Admin\Admin::can() ) {
+			$message .= ' ' . ( is_multisite()
+				? __( 'Review it under Network Admin > Cyber Security > Reports.', 'cybergate-security' )
+				: __( 'Review it under Cyber Security > Reports.', 'cybergate-security' ) );
 		}
 		return $message;
 	}

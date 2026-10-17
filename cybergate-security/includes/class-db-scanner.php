@@ -20,6 +20,11 @@ defined( 'ABSPATH' ) || exit;
  * cursor, step() advances it until a deadline, finish() closes the run.
  * run() does all of it at once (WP-CLI, tests).
  *
+ * Multisite: one run covers every site of the network, one site after the
+ * other (cursor "blog", resumable like the chunks). Findings on a site other
+ * than the main one carry it in their place: "db:site:<blog id>:option:<name>",
+ * and every finding records details.blog_id.
+ *
  * Every finding is a threat item with source "database" (Store::SOURCE_DATABASE):
  *   path     "db:option:<name>" or "db:post:<ID>"
  *   sha256   fingerprint of the value at that place (see fingerprint())
@@ -169,21 +174,73 @@ class Db_Scanner {
 	 * @return array
 	 */
 	public function begin( $run_id = '' ) {
-		global $wpdb;
 		$run_id = '' !== (string) $run_id ? (string) $run_id : gmdate( 'YmdHis' ) . substr( md5( uniqid( 'wpcsdb', true ) ), 0, 8 );
-		return array(
+		$cursor = array(
 			'run'           => substr( preg_replace( '/[^A-Za-z0-9_-]/', '', $run_id ), 0, 40 ),
 			'stage'         => 'options',
 			'last'          => 0,
-			'max'           => (int) $wpdb->get_var( "SELECT MAX(option_id) FROM {$wpdb->options}" ), // phpcs:ignore WordPress.DB
-			'options_total' => (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options}" ), // phpcs:ignore WordPress.DB
+			'max'           => 0,
+			'options_total' => 0,
 			'posts_total'   => 0,
 			'options'       => 0,
 			'posts'         => 0,
 			'findings'      => 0,
 			'new'           => 0,
 			'started'       => time(),
+			'blog'          => 0,
+			'sites'         => 0,
 		);
+		if ( Network::active() ) {
+			$first = Network::site_ids_after( 0, 1 );
+			$this->with_blog(
+				$first ? $first[0] : (int) get_current_blog_id(),
+				function () use ( &$cursor, $first ) {
+					$this->enter_blog( $cursor, $first ? $first[0] : (int) get_current_blog_id() );
+				}
+			);
+		} else {
+			$this->enter_blog( $cursor, 0 );
+		}
+		return $cursor;
+	}
+
+	/**
+	 * Points the cursor at the options of a site (the current one, already
+	 * switched to on multisite).
+	 *
+	 * @param array $cursor  Cursor.
+	 * @param int   $blog_id Site id (0 on a single site).
+	 */
+	private function enter_blog( array &$cursor, $blog_id ) {
+		global $wpdb;
+		$cursor['blog']           = (int) $blog_id;
+		$cursor['stage']          = 'options';
+		$cursor['last']           = 0;
+		$cursor['max']            = (int) $wpdb->get_var( "SELECT MAX(option_id) FROM {$wpdb->options}" ); // phpcs:ignore WordPress.DB
+		$cursor['options_total'] += (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->options}" ); // phpcs:ignore WordPress.DB
+		++$cursor['sites'];
+	}
+
+	/**
+	 * Runs $fn on site $blog_id (multisite) and returns its result.
+	 *
+	 * @param int      $blog_id Site id.
+	 * @param callable $fn      Callback.
+	 * @return mixed
+	 */
+	private function with_blog( $blog_id, callable $fn ) {
+		$blog_id  = (int) $blog_id;
+		$switched = Network::active() && $blog_id > 0 && $blog_id !== (int) get_current_blog_id();
+		if ( $switched ) {
+			switch_to_blog( $blog_id );
+		}
+		try {
+			return call_user_func( $fn );
+		} finally {
+			if ( $switched ) {
+				restore_current_blog();
+			}
+		}
 	}
 
 	/**
@@ -195,6 +252,50 @@ class Db_Scanner {
 	 * @return bool True when the run is complete.
 	 */
 	public function step( array &$cursor, $deadline, $stop = null ) {
+		if ( ! Network::active() || empty( $cursor['blog'] ) ) {
+			return $this->step_site( $cursor, $deadline, $stop );
+		}
+		// Multisite: the sites one after the other, each in its own context.
+		while ( true ) {
+			$blog = (int) $cursor['blog'];
+			$done = get_site( $blog )
+				? $this->with_blog(
+					$blog,
+					function () use ( &$cursor, $deadline, $stop ) {
+						return $this->step_site( $cursor, $deadline, $stop );
+					}
+				)
+				: true; // Deleted while the run was going on.
+			if ( ! $done ) {
+				return false;
+			}
+			$next = Network::site_ids_after( $blog, 1 );
+			if ( ! $next ) {
+				$cursor['stage'] = 'done';
+				return true;
+			}
+			$this->own_hosts = null;
+			$this->with_blog(
+				$next[0],
+				function () use ( &$cursor, $next ) {
+					$this->enter_blog( $cursor, $next[0] );
+				}
+			);
+			if ( microtime( true ) >= (float) $deadline || ( is_callable( $stop ) && call_user_func( $stop ) ) ) {
+				return false;
+			}
+		}
+	}
+
+	/**
+	 * Advances the run on the current site until $deadline.
+	 *
+	 * @param array         $cursor   Cursor (updated).
+	 * @param float         $deadline Microtime.
+	 * @param callable|null $stop     Cancel check.
+	 * @return bool True when this site is complete.
+	 */
+	private function step_site( array &$cursor, $deadline, $stop = null ) {
 		$first = true;
 		while ( 'done' !== $cursor['stage'] ) {
 			if ( ! $first && ( microtime( true ) >= (float) $deadline || ( is_callable( $stop ) && call_user_func( $stop ) ) ) ) {
@@ -229,13 +330,14 @@ class Db_Scanner {
 			'finished_at'   => time(),
 			'options_total' => (int) $cursor['options_total'],
 			'posts_total'   => (int) $cursor['posts_total'],
+			'sites'         => isset( $cursor['sites'] ) ? (int) $cursor['sites'] : 1,
 			'options'       => (int) $cursor['options'],
 			'posts'         => (int) $cursor['posts'],
 			'findings'      => (int) $cursor['findings'],
 			'new'           => (int) $cursor['new'],
 			'resolved'      => $resolved,
 		);
-		update_option( self::LAST_OPTION, $summary, false );
+		Network::update_option( self::LAST_OPTION, $summary, false );
 		wpcybersec()->logger->log(
 			'db_scan_finished',
 			sprintf(
@@ -269,7 +371,7 @@ class Db_Scanner {
 	 * @return array Empty when the database was never scanned.
 	 */
 	public function last_run() {
-		$last = get_option( self::LAST_OPTION, array() );
+		$last = Network::get_option( self::LAST_OPTION, array() );
 		return is_array( $last ) ? $last : array();
 	}
 
@@ -328,7 +430,7 @@ class Db_Scanner {
 			$hits    = $this->inspect( (string) $row['val'], $context, array_key_exists( $name, self::CODE_OPTIONS ) ? self::CODE_OPTIONS[ $name ] : '' );
 			if ( $hits ) {
 				$this->report(
-					'option:' . $name,
+					$this->loc( $cursor, 'option:' . $name ),
 					array(
 						'table' => 'options',
 						'key'   => $name,
@@ -336,7 +438,7 @@ class Db_Scanner {
 						'label' => sprintf( __( 'Option %s', 'cybergate-security' ), $name ),
 					),
 					$hits,
-					self::fingerprint( 'option:' . $name, (string) $row['val'], (int) $row['len'] ),
+					self::fingerprint( $this->loc( $cursor, 'option:' . $name ), (string) $row['val'], (int) $row['len'] ),
 					(int) $row['len'],
 					$cursor
 				);
@@ -353,7 +455,7 @@ class Db_Scanner {
 			$cursor['stage']       = 'posts';
 			$cursor['last']        = 0;
 			$cursor['max']         = (int) $wpdb->get_var( "SELECT MAX(ID) FROM {$wpdb->posts}" ); // phpcs:ignore WordPress.DB
-			$cursor['posts_total'] = $this->count_posts();
+			$cursor['posts_total'] += $this->count_posts();
 		}
 	}
 
@@ -395,7 +497,7 @@ class Db_Scanner {
 				$title = Store::db_text( (string) $row['post_title'] );
 				$title = function_exists( 'mb_substr' ) ? mb_substr( $title, 0, 120 ) : substr( $title, 0, 120 );
 				$this->report(
-					'post:' . $id,
+					$this->loc( $cursor, 'post:' . $id ),
 					array(
 						'table'       => 'posts',
 						'key'         => $id,
@@ -409,7 +511,7 @@ class Db_Scanner {
 							: sprintf( __( 'Post #%d', 'cybergate-security' ), $id ),
 					),
 					$hits,
-					self::fingerprint( 'post:' . $id, (string) $row['val'], (int) $row['len'] ),
+					self::fingerprint( $this->loc( $cursor, 'post:' . $id ), (string) $row['val'], (int) $row['len'] ),
 					(int) $row['len'],
 					$cursor
 				);
@@ -480,7 +582,7 @@ class Db_Scanner {
 			$name = Store::db_text( (string) $row['name'] );
 			$name = function_exists( 'mb_substr' ) ? mb_substr( $name, 0, 100 ) : substr( $name, 0, 100 );
 			$this->report(
-				$stage . ':' . $id,
+				$this->loc( $cursor, $stage . ':' . $id ),
 				array(
 					'table'  => $def['table'],
 					'key'    => $id,
@@ -492,7 +594,7 @@ class Db_Scanner {
 						: sprintf( __( '%1$s snippet #%2$d', 'cybergate-security' ), $def['plugin'], $id ),
 				),
 				$hits,
-				self::fingerprint( $stage . ':' . $id, (string) $row['val'], (int) $row['len'] ),
+				self::fingerprint( $this->loc( $cursor, $stage . ':' . $id ), (string) $row['val'], (int) $row['len'] ),
 				(int) $row['len'],
 				$cursor
 			);
@@ -524,6 +626,23 @@ class Db_Scanner {
 	/* ------------------------------------------------------------------ */
 	/* Findings                                                            */
 	/* ------------------------------------------------------------------ */
+
+	/**
+	 * Place of a finding: "option:<name>", or on a site of a network other
+	 * than the main one "site:<blog id>:option:<name>" (so the same option of
+	 * two sites are two places, with their own fingerprints).
+	 *
+	 * @param array  $cursor   Cursor.
+	 * @param string $location Place on the site.
+	 * @return string
+	 */
+	private function loc( array $cursor, $location ) {
+		$blog = isset( $cursor['blog'] ) ? (int) $cursor['blog'] : 0;
+		if ( $blog > 0 && Network::active() && $blog !== Network::main_site_id() ) {
+			return 'site:' . $blog . ':' . $location;
+		}
+		return $location;
+	}
 
 	/**
 	 * Creates (or refreshes) the threat item for one finding.
@@ -559,6 +678,9 @@ class Db_Scanner {
 				'seen_run'    => (string) $cursor['run'],
 			)
 		);
+		if ( ! empty( $cursor['blog'] ) ) {
+			$details['blog_id'] = (int) $cursor['blog'];
+		}
 		$id = $store->item_insert(
 			array(
 				'type'     => Store::TYPE_THREAT,
@@ -1061,7 +1183,7 @@ class Db_Scanner {
 		if ( ! empty( $details['label'] ) ) {
 			return (string) $details['label'];
 		}
-		$path = (string) $item['path'];
+		$path = self::site_path( (string) $item['path'] );
 		if ( 0 === strpos( $path, 'db:option:' ) ) {
 			/* translators: %s: option name */
 			return sprintf( __( 'Option %s', 'cybergate-security' ), substr( $path, 10 ) );
@@ -1080,7 +1202,37 @@ class Db_Scanner {
 	 * @return int
 	 */
 	public static function post_id( array $item ) {
-		$path = (string) $item['path'];
+		$path = self::site_path( (string) $item['path'] );
 		return 0 === strpos( $path, 'db:post:' ) ? (int) substr( $path, 8 ) : 0;
+	}
+
+	/**
+	 * Site of a finding (multisite): details.blog_id, else the site in the
+	 * path, else the main site.
+	 *
+	 * @param array $item Item.
+	 * @return int 0 on a single site.
+	 */
+	public static function blog_id( array $item ) {
+		if ( ! Network::active() ) {
+			return 0;
+		}
+		if ( ! empty( $item['details']['blog_id'] ) ) {
+			return (int) $item['details']['blog_id'];
+		}
+		if ( preg_match( '/^db:site:(\d+):/', (string) $item['path'], $m ) ) {
+			return (int) $m[1];
+		}
+		return Network::main_site_id();
+	}
+
+	/**
+	 * "db:site:<id>:option:x" without the site part ("db:option:x").
+	 *
+	 * @param string $path Item path.
+	 * @return string
+	 */
+	private static function site_path( $path ) {
+		return (string) preg_replace( '/^db:site:\d+:/', 'db:', $path );
 	}
 }

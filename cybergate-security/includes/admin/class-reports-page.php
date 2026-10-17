@@ -470,7 +470,7 @@ class Reports_Page {
 		}
 		echo '</form>';
 
-		echo '<form class="wpcs-filters" method="get" action="' . esc_url( admin_url( 'admin.php' ) ) . '">';
+		echo '<form class="wpcs-filters" method="get" action="' . esc_url( Admin::admin_page_base() ) . '">';
 		echo '<input type="hidden" name="page" value="' . esc_attr( Admin::PAGE_REPORTS ) . '">';
 		echo '<input type="hidden" name="tab" value="' . esc_attr( $this->tab ) . '">';
 
@@ -691,7 +691,16 @@ class Reports_Page {
 	private function db_location_html( array $item ) {
 		$label   = Db_Scanner::location_label( $item );
 		$post_id = Db_Scanner::post_id( $item );
-		$link    = $post_id ? get_edit_post_link( $post_id, 'raw' ) : '';
+		$link    = '';
+		if ( $post_id ) {
+			// Multisite: the edit screen of the site the post belongs to.
+			$link = (string) \WPCyberSecurity\Network::on_site(
+				Db_Scanner::blog_id( $item ),
+				static function () use ( $post_id ) {
+					return get_edit_post_link( $post_id, 'raw' );
+				}
+			);
+		}
 		if ( $link ) {
 			return '<a class="wpcs-item-name" href="' . esc_url( $link ) . '">' . esc_html( $label ) . '</a>';
 		}
@@ -860,6 +869,11 @@ class Reports_Page {
 
 		$html  = '<span class="wpcs-source__who">' . esc_html( $who ) . '</span>';
 		$html .= '<span class="wpcs-sub">' . esc_html( $context ) . '</span>';
+		$site  = isset( $details['blog_id'] ) ? \WPCyberSecurity\Network::site_label( (int) $details['blog_id'] ) : '';
+		if ( '' !== $site ) {
+			/* translators: %s: site name and address */
+			$html .= '<span class="wpcs-sub wpcs-source__site">' . esc_html( sprintf( __( 'Site: %s', 'cybergate-security' ), $site ) ) . '</span>';
+		}
 		if ( '' !== (string) $item['ip'] ) {
 			$html .= '<span class="wpcs-sub wpcs-mono">' . esc_html( (string) $item['ip'] ) . '</span>';
 		}
@@ -1847,7 +1861,7 @@ class Reports_Page {
 		) . '</p>';
 
 		echo '<div class="wpcs-toolbar"><div></div>';
-		echo '<form class="wpcs-filters" method="get" action="' . esc_url( admin_url( 'admin.php' ) ) . '">';
+		echo '<form class="wpcs-filters" method="get" action="' . esc_url( Admin::admin_page_base() ) . '">';
 		echo '<input type="hidden" name="page" value="' . esc_attr( Admin::PAGE_REPORTS ) . '"><input type="hidden" name="tab" value="recent">';
 		$days = array();
 		foreach ( Recent_Changes::WINDOWS as $n ) {
@@ -2174,7 +2188,7 @@ class Reports_Page {
 		$total = isset( $result['total'] ) ? (int) $result['total'] : 0;
 
 		echo '<div class="wpcs-toolbar"><div></div>';
-		echo '<form class="wpcs-filters" method="get" action="' . esc_url( admin_url( 'admin.php' ) ) . '">';
+		echo '<form class="wpcs-filters" method="get" action="' . esc_url( Admin::admin_page_base() ) . '">';
 		echo '<input type="hidden" name="page" value="' . esc_attr( Admin::PAGE_REPORTS ) . '"><input type="hidden" name="tab" value="allowlist">';
 		$this->select(
 			'kind',
@@ -2313,7 +2327,7 @@ class Reports_Page {
 		}
 
 		echo '<div class="wpcs-toolbar"><div></div>';
-		echo '<form class="wpcs-filters" method="get" action="' . esc_url( admin_url( 'admin.php' ) ) . '">';
+		echo '<form class="wpcs-filters" method="get" action="' . esc_url( Admin::admin_page_base() ) . '">';
 		echo '<input type="hidden" name="page" value="' . esc_attr( Admin::PAGE_REPORTS ) . '"><input type="hidden" name="tab" value="activity">';
 		$this->select( 'event', $this->filters['event'], $options, __( 'Filter by event', 'cybergate-security' ) );
 		$this->search_box( __( 'Search messages', 'cybergate-security' ) );

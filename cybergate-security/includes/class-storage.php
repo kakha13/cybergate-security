@@ -107,7 +107,7 @@ class Storage {
 		if ( is_multisite() ) {
 			return '';
 		}
-		$moved = get_option( self::DIR_OPTION, '' );
+		$moved = Network::get_option( self::DIR_OPTION, '' );
 		if ( is_string( $moved ) && '' !== $moved && Paths::is_absolute( wp_normalize_path( $moved ) ) && @is_dir( $moved ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			return untrailingslashit( wp_normalize_path( $moved ) );
 		}
@@ -168,7 +168,7 @@ class Storage {
 		// config live there) until its data is moved away; the folder of a move
 		// that has switched over is the old one and no longer counts.
 		$fallback = $this->stored_fallback();
-		$move     = get_option( self::MOVE_OPTION, null );
+		$move     = Network::get_option( self::MOVE_OPTION, null );
 		$leaving  = is_array( $move ) && ! empty( $move['source'] ) && 'switched' === ( isset( $move['phase'] ) ? $move['phase'] : '' ) ? untrailingslashit( wp_normalize_path( (string) $move['source'] ) ) : '';
 		if ( '' !== $fallback && $fallback !== $leaving && @is_dir( $fallback ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			$candidates[] = array( $fallback, 'fallback' );
@@ -261,7 +261,7 @@ class Storage {
 	 * @return string
 	 */
 	public function stored_fallback() {
-		$value = is_multisite() ? get_site_option( self::FALLBACK_OPTION, '' ) : get_option( self::FALLBACK_OPTION, '' );
+		$value = Network::get_option( self::FALLBACK_OPTION, '' );
 		if ( ! is_string( $value ) || '' === $value || ! Paths::is_absolute( wp_normalize_path( $value ) ) ) {
 			return '';
 		}
@@ -297,11 +297,7 @@ class Storage {
 			return ''; // Nothing to remember while uploads is not writable either.
 		}
 		$dir = $base . '/wpcybersec-' . strtolower( wp_generate_password( 16, false, false ) );
-		if ( is_multisite() ) {
-			update_site_option( self::FALLBACK_OPTION, $dir );
-		} else {
-			update_option( self::FALLBACK_OPTION, $dir, true );
-		}
+		Network::update_option( self::FALLBACK_OPTION, $dir, true );
 		return $dir;
 	}
 
@@ -314,10 +310,10 @@ class Storage {
 	public function check() {
 		self::reset();
 		$status = $this->resolve();
-		$saved  = get_option( self::STATUS_OPTION, array() );
+		$saved  = Network::get_option( self::STATUS_OPTION, array() );
 		$saved  = is_array( $saved ) ? $saved : array();
 		if ( ! isset( $saved['state'], $saved['dir'] ) || $saved['state'] !== $status['state'] || $saved['dir'] !== $status['dir'] ) {
-			update_option(
+			Network::update_option(
 				self::STATUS_OPTION,
 				array(
 					'state'   => $status['state'],
@@ -413,7 +409,8 @@ class Storage {
 	 */
 	public static function site_id() {
 		global $wpdb;
-		$prefix = ( isset( $wpdb ) && is_object( $wpdb ) && isset( $wpdb->prefix ) ) ? (string) $wpdb->prefix : '';
+		// The base prefix: every site of a multisite network shares one id (and one data folder).
+		$prefix = ( isset( $wpdb ) && is_object( $wpdb ) && isset( $wpdb->base_prefix ) ) ? (string) $wpdb->base_prefix : '';
 		return substr( md5( ABSPATH . $prefix ), 0, 8 );
 	}
 
@@ -425,7 +422,7 @@ class Storage {
 	 * @return string
 	 */
 	public function suggested_outside_dir() {
-		$host = (string) wp_parse_url( home_url(), PHP_URL_HOST );
+		$host = (string) wp_parse_url( Network::home_url(), PHP_URL_HOST );
 		$slug = sanitize_key( str_replace( '.', '-', $host ) );
 		$name = 'wpcybersec-' . ( $slug ? $slug : 'data' ) . '-' . self::site_id();
 
@@ -524,7 +521,7 @@ class Storage {
 	 */
 	public function write_marker( $dir ) {
 		$file = untrailingslashit( wp_normalize_path( (string) $dir ) ) . '/' . self::MARKER_FILE;
-		$text = "CyberGate Security data folder. uninstall.php only removes it when the site id matches.\nsite: " . self::site_id() . "\nhome: " . home_url( '/' ) . "\n";
+		$text = "CyberGate Security data folder. uninstall.php only removes it when the site id matches.\nsite: " . self::site_id() . "\nhome: " . Network::home_url( '/' ) . "\n";
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
 		return false !== @file_put_contents( $file, $text );
 	}
@@ -640,7 +637,7 @@ class Storage {
 			if ( $state && 'copy' === $state['phase'] ) {
 				// The copying request died. Nothing was switched: drop the partial copy.
 				$this->drop_partial_copy( $state['target'] );
-				delete_option( self::MOVE_OPTION );
+				Network::delete_option( self::MOVE_OPTION );
 				$result = true;
 			} else {
 				$result = $this->finish_move_locked();
@@ -666,7 +663,7 @@ class Storage {
 	 * @return array|null { source, target, phase, time }
 	 */
 	private function move_state() {
-		$state = get_option( self::MOVE_OPTION, null );
+		$state = Network::get_option( self::MOVE_OPTION, null );
 		if ( ! is_array( $state ) || empty( $state['source'] ) || empty( $state['target'] ) || empty( $state['phase'] ) ) {
 			return null;
 		}
@@ -684,7 +681,7 @@ class Storage {
 	 * @param string $phase  copy | switched.
 	 */
 	private function save_move_state( $source, $target, $phase ) {
-		update_option(
+		Network::update_option(
 			self::MOVE_OPTION,
 			array(
 				'source' => $source,
@@ -733,7 +730,7 @@ class Storage {
 				$resume = true; // Same move again: files already copied are kept.
 			} else {
 				$this->drop_partial_copy( $state['target'] );
-				delete_option( self::MOVE_OPTION );
+				Network::delete_option( self::MOVE_OPTION );
 			}
 		}
 
@@ -769,7 +766,7 @@ class Storage {
 		$import_lock = self::lock_file( $source . '/spool/guard-import.lock', 30 );
 		if ( false === $import_lock ) {
 			$this->undo_copy( $target, array(), $owned, $created_root );
-			delete_option( self::MOVE_OPTION );
+			Network::delete_option( self::MOVE_OPTION );
 			return new \WP_Error( 'wpcybersec_storage_busy', __( 'The early guard is importing held uploads right now. Nothing was moved; try again in a minute.', 'cybergate-security' ) );
 		}
 
@@ -779,7 +776,7 @@ class Storage {
 		if ( is_wp_error( $copied ) ) {
 			self::unlock_file( $import_lock );
 			$this->undo_copy( $target, $created, $owned, $created_root );
-			delete_option( self::MOVE_OPTION );
+			Network::delete_option( self::MOVE_OPTION );
 			return new \WP_Error(
 				'wpcybersec_storage_move',
 				/* translators: 1: error message, 2: folder */
@@ -789,7 +786,7 @@ class Storage {
 
 		// Phase 2: switch over.
 		$this->save_move_state( $source, $target, 'switched' );
-		update_option( self::DIR_OPTION, $target, true );
+		Network::update_option( self::DIR_OPTION, $target, true );
 		self::reset();
 		$this->ensure();
 		$this->rewrite_item_paths( $source, $target );
@@ -831,7 +828,7 @@ class Storage {
 		}
 		if ( ! is_dir( $source ) ) {
 			$this->rewrite_item_paths( $source, $target );
-			delete_option( self::MOVE_OPTION );
+			Network::delete_option( self::MOVE_OPTION );
 			return true;
 		}
 		if ( self::guard_uses( $source ) ) {
@@ -862,7 +859,7 @@ class Storage {
 			Fs::delete( $source . '/spool/guard-import.lock' );
 			Fs::rmdir( $source . '/spool' );
 			Fs::rmdir( $source );
-			delete_option( self::MOVE_OPTION );
+			Network::delete_option( self::MOVE_OPTION );
 			return true;
 		}
 		return false;
@@ -877,7 +874,7 @@ class Storage {
 	 * @return bool
 	 */
 	private static function guard_uses( $dir ) {
-		if ( ! get_option( 'wpcybersec_guard_installed', false ) ) {
+		if ( ! Network::get_option( 'wpcybersec_guard_installed', false ) ) {
 			return false;
 		}
 		$bootstrap = ABSPATH . 'wpcybersec-guard.php';

@@ -231,6 +231,62 @@ class Config_Editor {
 	}
 
 	/**
+	 * Removes only the define( $name, ... ) lines this plugin added: a define
+	 * alone on its line right below the "// Added by CyberGate Security on
+	 * <date>." comment (set_constant() writes both). A define written by hand,
+	 * or one set_constant() replaced in place, has no such comment and stays.
+	 * Nothing is written unless wp-config.php parses before and after.
+	 *
+	 * @param string $name Constant.
+	 * @return bool|\WP_Error True when lines were removed, false when there were none.
+	 */
+	public static function remove_marked_constant( $name ) {
+		$path = self::path();
+		if ( ! $path || ! is_readable( $path ) ) {
+			return false;
+		}
+		$code  = (string) file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$spans = self::define_spans( $code, $name );
+		if ( ! $spans ) {
+			return false;
+		}
+		if ( ! self::can_check() || ! self::parses( $code ) ) {
+			return new \WP_Error( 'wpcybersec_config_parse', __( 'wp-config.php could not be checked for errors, so it was not changed.', 'cybergate-security' ) );
+		}
+		if ( ! self::is_writable() ) {
+			return new \WP_Error( 'wpcybersec_config_readonly', __( 'wp-config.php is read-only for WordPress.', 'cybergate-security' ) );
+		}
+		$new = $code;
+		foreach ( array_reverse( $spans ) as $span ) {
+			list( $start, $end ) = $span;
+			$line_start = strrpos( substr( $new, 0, $start ), "\n" );
+			$line_start = false === $line_start ? 0 : $line_start + 1;
+			$eol        = strpos( $new, "\n", $end );
+			$line_end   = false === $eol ? strlen( $new ) : $eol + 1;
+			if ( '' !== trim( substr( $new, $line_start, $start - $line_start ) ) || '' !== trim( substr( $new, $end, $line_end - $end ) ) || 0 === $line_start ) {
+				continue;
+			}
+			$prev_start = strrpos( substr( $new, 0, $line_start - 1 ), "\n" );
+			$prev_start = false === $prev_start ? 0 : $prev_start + 1;
+			if ( ! preg_match( '#^// Added by (?:CyberGate|WP Cyber) Security on [0-9-]+\.\r?\n\z#', substr( $new, $prev_start, $line_start - $prev_start ) ) ) {
+				continue; // Not ours.
+			}
+			// The blank line set_constant() leaves after the block goes too.
+			if ( "\n" === substr( $new, $line_end, 1 ) ) {
+				++$line_end;
+			} elseif ( "\r\n" === substr( $new, $line_end, 2 ) ) {
+				$line_end += 2;
+			}
+			$new = substr( $new, 0, $prev_start ) . substr( $new, $line_end );
+		}
+		if ( $new === $code ) {
+			return false;
+		}
+		$written = self::write( $path, $code, (string) $new, $name );
+		return is_wp_error( $written ) ? $written : true;
+	}
+
+	/**
 	 * Byte ranges of the define( 'NAME', ... ); statements PHP would run: a
 	 * define inside a comment, a string or inline HTML does not count.
 	 *

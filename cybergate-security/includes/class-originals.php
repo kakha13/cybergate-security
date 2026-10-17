@@ -23,7 +23,7 @@ defined( 'ABSPATH' ) || exit;
  * This plugin's own files have no remote original. Accepted originals are kept
  * in Snapshots (put_content); a failed lookup is remembered for 6 hours (1 hour
  * after a network error, for the whole network), a successful one for a week
- * (per site: on a multisite network each site keeps its own copies).
+ * (one Snapshots store for a whole multisite network, so the hit is shared too).
  */
 class Originals {
 
@@ -143,14 +143,14 @@ class Originals {
 		$snapshots = wpcybersec()->snapshots;
 		$key       = md5( $loc['source'] . '|' . $loc['slug'] . '|' . $loc['version'] . '|' . $loc['path'] );
 
-		// The copy lives in this site's Snapshots folder, so the hit is remembered per site.
-		$hit = get_transient( self::HIT_PREFIX . $key );
+		// The copy lives in the Snapshots store (one per network on multisite).
+		$hit = Network::get_transient( self::HIT_PREFIX . $key );
 		if ( Snapshots::is_sha( $hit ) ) {
 			$content = $snapshots->get( $hit );
 			if ( null !== $content && self::accept( $loc, $content ) ) {
 				return self::result( $loc, $content, $hit, '' );
 			}
-			delete_transient( self::HIT_PREFIX . $key );
+			Network::delete_transient( self::HIT_PREFIX . $key );
 		}
 		if ( get_site_transient( self::MISS_PREFIX . $key ) ) {
 			return null;
@@ -186,7 +186,7 @@ class Originals {
 			}
 			$sha = $snapshots->put_content( $content );
 			if ( '' !== $sha ) {
-				set_transient( self::HIT_PREFIX . $key, $sha, self::HIT_TTL );
+				Network::set_transient( self::HIT_PREFIX . $key, $sha, self::HIT_TTL );
 			}
 			return self::result( $loc, $content, '' !== $sha ? $sha : hash( 'sha256', $content ), $url );
 		}

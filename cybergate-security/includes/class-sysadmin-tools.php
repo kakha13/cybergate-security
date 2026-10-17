@@ -74,7 +74,7 @@ class Sysadmin_Tools {
 			$before = isset( $old[ $key ] ) ? (string) $old[ $key ] : '';
 			$after  = isset( $new[ $key ] ) ? (string) $new[ $key ] : '';
 			if ( $before !== $after ) {
-				delete_option( 'wpcybersec_baseline_at' );
+				Network::delete_option( 'wpcybersec_baseline_at' );
 				return;
 			}
 		}
@@ -137,7 +137,7 @@ class Sysadmin_Tools {
 					'balanced' => __( 'Balanced', 'cybergate-security' ),
 					'relaxed'  => __( 'Relaxed', 'cybergate-security' ),
 				),
-				'threatsUrl' => admin_url( 'admin.php?page=wpcybersec-reports&tab=threats' ),
+				'threatsUrl' => Network::admin_url( 'admin.php?page=wpcybersec-reports&tab=threats' ),
 				'i18n'       => array(
 					'starting'       => __( 'Starting the scan...', 'cybergate-security' ),
 					'waitOther'      => __( 'Another scan is running. The baseline scan starts as soon as it finishes.', 'cybergate-security' ),
@@ -289,7 +289,7 @@ class Sysadmin_Tools {
 		if ( 'advanced' === $tab && ! isset( $args['section'] ) && 0 === strpos( (string) $hash, 'wpcs-' ) ) {
 			$args['section'] = substr( (string) $hash, 5 );
 		}
-		$url = add_query_arg( array_merge( array( 'page' => self::SETTINGS_PAGE, 'tab' => $tab ), $args ), admin_url( 'admin.php' ) );
+		$url = add_query_arg( array_merge( array( 'page' => self::SETTINGS_PAGE, 'tab' => $tab ), $args ), Network::admin_url( 'admin.php' ) );
 		return $url . ( $hash ? '#' . $hash : '' );
 	}
 
@@ -303,7 +303,7 @@ class Sysadmin_Tools {
 		if ( $step ) {
 			$query['step'] = $step;
 		}
-		return add_query_arg( array_merge( $query, $args ), admin_url( 'admin.php' ) );
+		return add_query_arg( array_merge( $query, $args ), Network::admin_url( 'admin.php' ) );
 	}
 
 	/**
@@ -814,7 +814,7 @@ class Sysadmin_Tools {
 	 */
 	private function check_cron() {
 		$disabled = defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON;
-		$next     = wp_next_scheduled( 'wpcybersec_scheduled_scan' );
+		$next     = Network::next_scheduled( 'wpcybersec_scheduled_scan' );
 		$check    = array(
 			'id'    => 'wp_cron',
 			'label' => __( 'Scheduled tasks (cron)', 'cybergate-security' ),
@@ -1310,7 +1310,7 @@ class Sysadmin_Tools {
 	 * @return array|null
 	 */
 	private function cached_probe( $key ) {
-		$all = get_transient( self::PROBE_TRANSIENT );
+		$all = Network::get_transient( self::PROBE_TRANSIENT );
 		return ( is_array( $all ) && isset( $all[ $key ] ) && is_array( $all[ $key ] ) ) ? $all[ $key ] : null;
 	}
 
@@ -1319,10 +1319,10 @@ class Sysadmin_Tools {
 	 * @param array  $result Result.
 	 */
 	private function cache_probe( $key, array $result ) {
-		$all         = get_transient( self::PROBE_TRANSIENT );
+		$all         = Network::get_transient( self::PROBE_TRANSIENT );
 		$all         = is_array( $all ) ? $all : array();
 		$all[ $key ] = $result;
-		set_transient( self::PROBE_TRANSIENT, $all, HOUR_IN_SECONDS );
+		Network::set_transient( self::PROBE_TRANSIENT, $all, HOUR_IN_SECONDS );
 	}
 
 	/**
@@ -1530,7 +1530,12 @@ class Sysadmin_Tools {
 	 * @return string Absolute uploads folder ('' when unknown).
 	 */
 	private static function uploads_dir() {
-		$uploads = wp_upload_dir( null, false );
+		// Multisite: the main site's uploads folder holds every site's (sites/<id>/).
+		$uploads = Network::on_main(
+			static function () {
+				return wp_upload_dir( null, false );
+			}
+		);
 		return empty( $uploads['basedir'] ) ? '' : untrailingslashit( wp_normalize_path( $uploads['basedir'] ) );
 	}
 
@@ -1710,10 +1715,10 @@ class Sysadmin_Tools {
 			}
 		}
 
-		$all = get_transient( self::PROBE_TRANSIENT );
+		$all = Network::get_transient( self::PROBE_TRANSIENT );
 		if ( is_array( $all ) && isset( $all['uploads_php'] ) ) {
 			unset( $all['uploads_php'] );
-			set_transient( self::PROBE_TRANSIENT, $all, HOUR_IN_SECONDS );
+			Network::set_transient( self::PROBE_TRANSIENT, $all, HOUR_IN_SECONDS );
 		}
 		if ( $trust_new ) {
 			self::call( 'file_monitor', 'trust_file', array( $file ) );
@@ -1789,6 +1794,19 @@ class Sysadmin_Tools {
 		$cron    = self::shell_arg( wp_normalize_path( WPCYBERSEC_DIR ) . 'bin/cron.php' );
 		$wp      = self::shell_arg( self::abspath() ) . self::cron_url_arg();
 		$wp_cron = self::shell_arg( self::abspath() . '/wp-cron.php' );
+		$path    = self::shell_arg( self::abspath() );
+
+		if ( is_multisite() ) {
+			// "php wp-cron.php" cannot tell which site of a network to load (no
+			// host name on the command line): request the main site's
+			// wp-cron.php over HTTP, where every plugin event lives, and let
+			// WP-CLI run the other sites' events with --url.
+			$main_cron  = "*/5 * * * * curl -s -o /dev/null --max-time 120 " . self::shell_arg( network_site_url( 'wp-cron.php?doing_wp_cron' ) );
+			$wpcli_cron = "*/5 * * * * wp site list --field=url --path={$path} | xargs -I{} wp cron event run --due-now --url={} --path={$path} --quiet";
+		} else {
+			$main_cron  = "*/5 * * * * {$php} {$wp_cron} > /dev/null 2>&1";
+			$wpcli_cron = "*/5 * * * * wp cron event run --due-now --path={$wp} --quiet";
+		}
 
 		return array(
 			array(
@@ -1798,9 +1816,11 @@ class Sysadmin_Tools {
 				'code'  => "# CyberGate Security: quick scan every hour, full malware scan every night.\n"
 					. "17 * * * * {$php} {$cron} --wp={$wp} > /dev/null 2>&1\n"
 					. "30 3 * * * {$php} {$cron} --full --wp={$wp} > /dev/null 2>&1\n"
-					. "# Run the rest of WordPress cron every 5 minutes.\n"
-					. "*/5 * * * * {$php} {$wp_cron} > /dev/null 2>&1",
-				'help'  => __( 'Add these lines to the crontab of the user that owns the site files (often www-data). Only one scan runs at a time, so overlapping runs are harmless.', 'cybergate-security' ),
+					. ( is_multisite() ? "# Run WordPress cron of the main site every 5 minutes.\n" : "# Run the rest of WordPress cron every 5 minutes.\n" )
+					. $main_cron,
+				'help'  => is_multisite()
+					? __( 'Add these lines to the crontab of the user that owns the site files (often www-data). Only one scan runs at a time, so overlapping runs are harmless. On a multisite network the plugin runs on the main site only; the other sites keep their own WP-Cron, so do not switch WP-Cron off unless the WP-CLI variant below runs it for every site.', 'cybergate-security' )
+					: __( 'Add these lines to the crontab of the user that owns the site files (often www-data). Only one scan runs at a time, so overlapping runs are harmless.', 'cybergate-security' ),
 			),
 			array(
 				'id'    => 'wpcli',
@@ -1808,8 +1828,10 @@ class Sysadmin_Tools {
 				'file'  => __( 'crontab -e (as the web server user)', 'cybergate-security' ),
 				'code'  => "17 * * * * wp wpcybersec scan --path={$wp} --quiet\n"
 					. "30 3 * * * wp wpcybersec scan --full --path={$wp} --quiet\n"
-					. "*/5 * * * * wp cron event run --due-now --path={$wp} --quiet",
-				'help'  => __( 'Use this variant when WP-CLI is installed. Use the full path to wp if cron cannot find it.', 'cybergate-security' ),
+					. $wpcli_cron,
+				'help'  => is_multisite()
+					? __( 'Use this variant when WP-CLI is installed. Use the full path to wp if cron cannot find it. The last line runs the due WordPress cron events of every site of the network.', 'cybergate-security' )
+					: __( 'Use this variant when WP-CLI is installed. Use the full path to wp if cron cannot find it.', 'cybergate-security' ),
 			),
 			array(
 				'id'    => 'wpconfig',
@@ -2406,7 +2428,7 @@ class Sysadmin_Tools {
 	public function send_test_email( array $emails = array() ) {
 		$emails   = array_values( array_unique( array_filter( array_map( 'sanitize_email', $emails ), 'is_email' ) ) );
 		$settings = self::service( 'settings' );
-		$saved    = $settings ? (array) $settings->recipients() : array( get_option( 'admin_email' ) );
+		$saved    = $settings ? (array) $settings->recipients() : Network::default_recipients();
 		if ( ! $emails ) {
 			$emails = $saved;
 		}
@@ -2483,7 +2505,7 @@ class Sysadmin_Tools {
 			wp_send_json_error( array( 'message' => $result->get_error_message() ) );
 		}
 		$settings = self::service( 'settings' );
-		$sent_to  = $valid ? $valid : ( $settings ? $settings->recipients() : array( get_option( 'admin_email' ) ) );
+		$sent_to  = $valid ? $valid : ( $settings ? $settings->recipients() : Network::default_recipients() );
 		wp_send_json_success( array( 'message' => self::test_sent_message( $sent_to ) ) );
 	}
 
@@ -2565,7 +2587,7 @@ class Sysadmin_Tools {
 			if ( is_wp_error( $result ) ) {
 				self::flash( $result->get_error_message(), 'bad' );
 			} else {
-				self::flash( __( 'Saved.', 'cybergate-security' ) . ' ' . self::test_sent_message( $settings ? $settings->recipients() : array( get_option( 'admin_email' ) ) ), 'ok' );
+				self::flash( __( 'Saved.', 'cybergate-security' ) . ' ' . self::test_sent_message( $settings ? $settings->recipients() : Network::default_recipients() ), 'ok' );
 			}
 		}
 	}
@@ -2807,6 +2829,8 @@ class Sysadmin_Tools {
 			'min_severity'    => isset( $post['min_severity'] ) ? max( 1, min( 3, (int) $post['min_severity'] ) ) : $old['min_severity'],
 			'snapshots'       => self::post_bool( $post, 'snapshots' ),
 			'snapshot_max_kb' => isset( $post['snapshot_max_kb'] ) ? max( 16, min( 4096, (int) $post['snapshot_max_kb'] ) ) : $old['snapshot_max_kb'],
+			'snapshot_max_files' => isset( $post['snapshot_max_files'] ) ? max( 1000, min( 1000000, (int) $post['snapshot_max_files'] ) ) : $old['snapshot_max_files'],
+			'snapshot_max_mb'    => isset( $post['snapshot_max_mb'] ) ? max( 10, min( 10240, (int) $post['snapshot_max_mb'] ) ) : $old['snapshot_max_mb'],
 		);
 
 		$valid_roles = function_exists( 'wp_roles' ) ? array_keys( wp_roles()->get_names() ) : array( 'administrator' );
@@ -3229,7 +3253,7 @@ class Sysadmin_Tools {
 			self::flash( $result->get_error_message(), 'bad' );
 		} else {
 			$settings = self::service( 'settings' );
-			self::flash( self::test_sent_message( $settings ? $settings->recipients() : array( get_option( 'admin_email' ) ) ), 'ok' );
+			self::flash( self::test_sent_message( $settings ? $settings->recipients() : Network::default_recipients() ), 'ok' );
 		}
 		$this->redirect_back( self::settings_url( 'general', array(), 'wpcs-notifications' ) );
 	}
