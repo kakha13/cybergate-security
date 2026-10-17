@@ -23,7 +23,100 @@ defined( 'ABSPATH' ) || exit;
  */
 class Decisions {
 
-	const ACTIONS = array( 'approve', 'deny', 'ignore', 'quarantine', 'restore', 'delete' );
+	const ACTIONS = array( 'approve', 'deny', 'ignore', 'quarantine', 'restore', 'delete', 'restore_official' );
+
+	/**
+	 * Files in the WordPress folder that the site cannot start without. They
+	 * are never quarantined or deleted, whatever the settings or a bulk action
+	 * say: moving one away takes the whole site down (including this screen).
+	 */
+	const CRITICAL_ROOT = array( 'wp-config.php', 'wp-load.php', 'wp-settings.php', 'wp-blog-header.php', 'index.php', '.htaccess' );
+
+	/** @var array<string,bool> is_critical_path() results for this request. */
+	private static $critical = array();
+
+	/**
+	 * Whether a file is critical: wp-config.php (also one folder up), the root
+	 * bootstrap files listed in CRITICAL_ROOT, or a file in wp-admin/ or
+	 * wp-includes/ that is part of the installed WordPress release (verified
+	 * against the official core checksums; without them nothing there counts).
+	 *
+	 * @param string $abs Absolute path.
+	 * @return bool
+	 */
+	public static function is_critical_path( $abs ) {
+		$abs = wp_normalize_path( (string) $abs );
+		if ( '' === $abs ) {
+			return false;
+		}
+		if ( isset( self::$critical[ $abs ] ) ) {
+			return self::$critical[ $abs ];
+		}
+		$result = false;
+		$config = Config_Editor::path();
+		$root   = trailingslashit( wp_normalize_path( ABSPATH ) );
+		if ( '' !== $config && $config === $abs ) {
+			$result = true;
+		} elseif ( 0 === strpos( $abs, $root ) ) {
+			$rel = substr( $abs, strlen( $root ) );
+			if ( in_array( $rel, self::CRITICAL_ROOT, true ) ) {
+				$result = true;
+			} elseif ( preg_match( '~^wp-(?:admin|includes)/~', $rel ) ) {
+				$scanner = function_exists( 'wpcybersec' ) ? wpcybersec()->scanner : null;
+				$map     = ( $scanner && method_exists( $scanner, 'core_map' ) ) ? $scanner->core_map() : false;
+				$result  = is_array( $map ) && isset( $map[ $rel ] );
+			}
+		}
+		self::$critical[ $abs ] = $result;
+		return $result;
+	}
+
+	/**
+	 * Whether an item is about a critical file (see is_critical_path()).
+	 *
+	 * @param array $item Item row.
+	 * @return bool
+	 */
+	public static function is_critical( array $item ) {
+		if ( ! in_array( $item['type'], array( Store::TYPE_FILE, Store::TYPE_THREAT ), true ) || Db_Scanner::is_db_item( $item ) ) {
+			return false;
+		}
+		return self::is_critical_path( self::item_abs( $item ) );
+	}
+
+	/**
+	 * Absolute path of a file item (where it lives, or lived before quarantine).
+	 *
+	 * @param array $item Item row.
+	 * @return string
+	 */
+	private static function item_abs( array $item ) {
+		return wp_normalize_path( (string) ( ! empty( $item['original_path'] ) ? $item['original_path'] : Paths::abs( (string) $item['path'] ) ) );
+	}
+
+	/**
+	 * Where the official copy of a critical core file comes from, when the
+	 * live file differs from it and can be replaced by it.
+	 *
+	 * @param array $item Item row.
+	 * @return array|null Originals::locate() result.
+	 */
+	public static function official_source( array $item ) {
+		if ( '' !== (string) $item['quarantine_path'] || ! self::is_critical( $item ) || ! class_exists( __NAMESPACE__ . '\\Originals' ) ) {
+			return null;
+		}
+		$abs = self::item_abs( $item );
+		if ( ! @is_file( $abs ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return null;
+		}
+		$loc = ( new Originals() )->locate( (string) $item['path'] );
+		// Localized WordPress builds set $wp_local_package in version.php: never swap it for the English copy.
+		if ( ! is_array( $loc ) || 'core' !== $loc['source'] || '' === $loc['md5'] || 'wp-includes/version.php' === $loc['path'] ) {
+			return null;
+		}
+		$md5 = (string) @md5_file( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		return ( '' !== $md5 && ! hash_equals( $loc['md5'], $md5 ) ) ? $loc : null;
+	}
 
 	/**
 	 * Which actions make sense for an item right now.
@@ -32,6 +125,28 @@ class Decisions {
 	 * @return string[]
 	 */
 	public static function available( array $item ) {
+		$actions = self::available_raw( $item );
+		if ( $actions && self::is_critical( $item ) ) {
+			// Never move or delete a file the site needs to start.
+			$actions = array_values( array_diff( $actions, array( 'quarantine', 'delete', 'deny' ) ) );
+			$held    = '' !== (string) $item['quarantine_path'];
+			if ( $held && ! in_array( 'restore', $actions, true ) && in_array( $item['status'], array( Store::STATUS_PENDING, Store::STATUS_QUARANTINED ), true ) ) {
+				$actions[] = 'restore'; // Already held (older rule or settings): it must be possible to put it back.
+			}
+			if ( in_array( $item['status'], array( Store::STATUS_PENDING, Store::STATUS_RESTORED ), true ) && self::official_source( $item ) ) {
+				$actions[] = 'restore_official';
+			}
+		}
+		return $actions;
+	}
+
+	/**
+	 * Actions by type and status, before the critical file rule.
+	 *
+	 * @param array $item Item row.
+	 * @return string[]
+	 */
+	private static function available_raw( array $item ) {
 		$held = '' !== (string) $item['quarantine_path'];
 		// Not files: no quarantine, restore or delete, and nothing after the decision.
 		if ( Store::TYPE_USER === $item['type'] ) {
@@ -78,6 +193,13 @@ class Decisions {
 			if ( Store::STATUS_PENDING === $item['status'] && Store::TYPE_USER === $item['type'] ) {
 				return new \WP_Error( 'wpcybersec_action', __( 'For an administrator account, use Allow or Remove admin role.', 'cybergate-security' ) );
 			}
+			if ( in_array( $action, array( 'quarantine', 'delete', 'deny' ), true ) && self::is_critical( $item ) ) {
+				/* translators: %s: file path */
+				return new \WP_Error( 'wpcybersec_critical', sprintf( __( '%s is a critical file: it cannot be quarantined or deleted. If you did not make this change, restore it from a backup or the official copy.', 'cybergate-security' ), (string) $item['path'] ) );
+			}
+			if ( 'restore_official' === $action ) {
+				return new \WP_Error( 'wpcybersec_action', __( 'The official copy is only offered for a changed WordPress core file that is still in place.', 'cybergate-security' ) );
+			}
 			/* translators: 1: action, 2: status */
 			return new \WP_Error( 'wpcybersec_action', sprintf( __( 'Cannot %1$s an item that is %2$s.', 'cybergate-security' ), $action, $item['status'] ) );
 		}
@@ -100,6 +222,9 @@ class Decisions {
 				break;
 			case 'delete':
 				$result = $this->delete( $item );
+				break;
+			case 'restore_official':
+				$result = $this->restore_official( $item );
 				break;
 			default:
 				$result = new \WP_Error( 'wpcybersec_action', __( 'Unknown action.', 'cybergate-security' ) );
@@ -363,6 +488,63 @@ class Decisions {
 		}
 		/* translators: %s: file path or name of the item */
 		return $this->finish( $item, Store::STATUS_DELETED, 'item_deleted', __( 'Deleted %s permanently.', 'cybergate-security' ), array( 'quarantine_path' => '' ) );
+	}
+
+	/**
+	 * Replaces a changed critical core file with the verified official copy.
+	 * The current version is saved as a copy first (so the changes view can
+	 * still show it), and the file is swapped atomically: the site never sees
+	 * a missing or half written file.
+	 *
+	 * @param array $item Item.
+	 * @return true|\WP_Error
+	 */
+	private function restore_official( array $item ) {
+		$abs = $this->live_path( $item );
+		if ( is_wp_error( $abs ) ) {
+			return $abs;
+		}
+		$loc = self::official_source( $item );
+		if ( ! $loc ) {
+			return new \WP_Error( 'wpcybersec_official', __( 'This file already matches the official copy, or no official copy is known for it.', 'cybergate-security' ) );
+		}
+		$official = ( new Originals() )->fetch( (string) $item['path'] );
+		if ( ! is_array( $official ) || ! Originals::accept( $loc, $official['content'] ) ) {
+			return new \WP_Error( 'wpcybersec_official', __( 'The official copy could not be downloaded and verified, so nothing was changed. Restore the file from a backup, or try again later.', 'cybergate-security' ) );
+		}
+		$current = @file_get_contents( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file.
+		$plugin  = wpcybersec();
+		$kept    = ( false !== $current && $plugin->snapshots ) ? $plugin->snapshots->put_content( (string) $current ) : '';
+		if ( '' === $kept ) {
+			return new \WP_Error( 'wpcybersec_official', __( 'The current version could not be saved as a copy first, so nothing was changed. Check that the plugin\'s data folder is writable.', 'cybergate-security' ) );
+		}
+		$dir = dirname( $abs );
+		$tmp = $dir . '/.wpcs-restore-' . strtolower( wp_generate_password( 10, false, false ) ) . '.tmp';
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, WordPress.PHP.NoSilencedErrors -- temporary file next to the target for an atomic replace.
+		if ( strlen( $official['content'] ) !== (int) @file_put_contents( $tmp, $official['content'], LOCK_EX ) ) {
+			Fs::delete( $tmp );
+			/* translators: %s: folder path */
+			return new \WP_Error( 'wpcybersec_official', sprintf( __( 'WordPress cannot write to %s, so the file was not replaced. Upload the official file there yourself (SFTP or your hosting file manager).', 'cybergate-security' ), $dir ) );
+		}
+		$perms = @fileperms( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( $perms ) {
+			Fs::chmod( $tmp, $perms & 0777 );
+		}
+		if ( ! hash_equals( $loc['md5'], (string) md5_file( $tmp ) ) || ! Fs::replace( $tmp, $abs ) ) {
+			Fs::delete( $tmp );
+			/* translators: %s: file path */
+			return new \WP_Error( 'wpcybersec_official', sprintf( __( 'Could not replace %s. Upload the official file there yourself (SFTP or your hosting file manager).', 'cybergate-security' ), $abs ) );
+		}
+		clearstatcache( true, $abs );
+		$plugin->file_monitor->trust_file( $abs, hash( 'sha256', $official['content'] ) );
+		return $this->finish(
+			$item,
+			Store::STATUS_RESOLVED,
+			'core_restored',
+			/* translators: %s: file path */
+			__( 'Replaced %s with the official WordPress file. The changed version was kept as a copy.', 'cybergate-security' ),
+			array( 'details' => array( 'replaced_sha256' => $kept ) )
+		);
 	}
 
 	/* ------------------------------------------------------------------ */

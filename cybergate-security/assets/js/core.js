@@ -23,6 +23,7 @@
  *   <span data-wpcs-count="pending|threats|quarantined">3</span>
  *   <button class="wpcs-copy" data-wpcs-copy>                              inside .wpcs-code (copies its <pre>)
  *   <a data-wpcs-confirm="Message">                                        asks before following a link / submitting
+ *   <button data-wpcs-clamav-enable>                                       turns on ClamAV for uploads, then reloads
  *
  * Progress markup:
  *   <div class="wpcs-progress">
@@ -324,7 +325,8 @@
 		ignored: { text: i18n.ignored || 'Marked safe', cls: 'ok' },
 		quarantined: { text: i18n.quarantined || 'Quarantined', cls: 'medium' },
 		restored: { text: i18n.restored || 'Restored', cls: 'info' },
-		deleted: { text: i18n.deleted || 'Deleted', cls: 'muted' }
+		deleted: { text: i18n.deleted || 'Deleted', cls: 'muted' },
+		resolved: { text: i18n.resolved || 'Resolved', cls: 'muted' }
 	};
 
 	function bindItemActions() {
@@ -417,10 +419,25 @@
 				return;
 			}
 			copyText(src.value !== undefined && src.tagName === 'TEXTAREA' ? src.value : src.textContent).then(function () {
-				var old = btn.textContent;
-				btn.textContent = i18n.copied || 'Copied';
-				setTimeout(function () {
-					btn.textContent = old;
+				// Keep an icon inside the button: swap only the text.
+				var label = btn.querySelector('.wpcs-btn-label');
+				if (!label) {
+					label = document.createElement('span');
+					label.className = 'wpcs-btn-label';
+					Array.prototype.slice.call(btn.childNodes).forEach(function (n) {
+						if (n.nodeType === 3) {
+							label.appendChild(n);
+						}
+					});
+					btn.appendChild(label);
+				}
+				clearTimeout(btn._wpcsCopied);
+				if (!btn.hasAttribute('data-label')) {
+					btn.setAttribute('data-label', label.textContent);
+				}
+				label.textContent = i18n.copied || 'Copied';
+				btn._wpcsCopied = setTimeout(function () {
+					label.textContent = btn.getAttribute('data-label');
 				}, 1500);
 			});
 		});
@@ -434,6 +451,35 @@
 				e.stopImmediatePropagation();
 			}
 		}, true);
+	}
+
+	function bindClamavEnable() {
+		document.addEventListener('click', function (e) {
+			var btn = e.target.closest('[data-wpcs-clamav-enable]');
+			if (!btn) {
+				return;
+			}
+			e.preventDefault();
+			if (btn.disabled) {
+				return;
+			}
+			btn.disabled = true;
+			btn.setAttribute('aria-busy', 'true');
+			ajax('clamav_enable')
+				.then(function (res) {
+					toast(res && res.message ? res.message : '');
+					// The settings form must not warn about unsaved changes on this reload.
+					window.wpcsSkipUnload = true;
+					setTimeout(function () {
+						window.location.reload();
+					}, 1200);
+				})
+				.catch(function (err) {
+					btn.disabled = false;
+					btn.removeAttribute('aria-busy');
+					toast(err.message, true);
+				});
+		});
 	}
 
 	function bindOptionCards() {
@@ -466,6 +512,7 @@
 		bindScanButtons();
 		bindItemActions();
 		bindCopy();
+		bindClamavEnable();
 		bindOptionCards();
 		autoAttach();
 	}

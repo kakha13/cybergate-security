@@ -2,3 +2,6 @@
 .claude/settings.local.json
 dist/
 .claude.local.md
+
+# Site-specific paste blocks generated from server-tools/cgav.sh
+server-tools/install-*.txt

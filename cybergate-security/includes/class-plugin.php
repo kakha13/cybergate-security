@@ -59,6 +59,8 @@ final class Plugin {
 	public $sysadmin;
 	/** @var Hardening */
 	public $hardening;
+	/** @var Developer_Instructions */
+	public $developer;
 	/** @var Ajax */
 	public $ajax;
 	/** @var Admin\Admin|null */
@@ -114,6 +116,7 @@ final class Plugin {
 		$this->guard_manager = new Guard_Manager();
 		$this->sysadmin      = new Sysadmin_Tools();
 		$this->hardening     = new Hardening();
+		$this->developer     = new Developer_Instructions();
 		$this->ajax          = new Ajax();
 
 		$modules = array(
@@ -129,6 +132,7 @@ final class Plugin {
 			$this->guard_manager,
 			$this->sysadmin,
 			$this->hardening,
+			$this->developer,
 			$this->ajax,
 		);
 		foreach ( $modules as $module ) {

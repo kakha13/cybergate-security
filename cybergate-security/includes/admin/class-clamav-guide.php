@@ -63,7 +63,7 @@ class Clamav_Guide {
 			Settings_Page::notice( __( 'ClamAV is installed, but its background service (clamd) is not running. Uploads can be scanned already; start the service (step 3 below) so whole-site scans can use it too.', 'cybergate-security' ), 'info' );
 			return;
 		}
-		Settings_Page::notice( __( 'ClamAV and its background service are ready. Turn on "Also scan uploads with ClamAV" above and save.', 'cybergate-security' ), 'ok' );
+		Settings_Page::notice( __( 'ClamAV and its background service are ready. Nothing to install.', 'cybergate-security' ), 'ok' );
 	}
 
 	/**
@@ -104,9 +104,41 @@ class Clamav_Guide {
 		}
 		echo '</div>';
 
-		$url = Sysadmin_Tools::settings_url( 'advanced', array( 'recheck' => 1 ), 'wpcs-clamav' );
+		$url = Sysadmin_Tools::settings_url( 'advanced', array( 'recheck' => 1 ), 'wpcs-antivirus' );
 		echo '<p class="wpcs-guide-actions"><a class="button" href="' . esc_url( $url ) . '"><span class="dashicons dashicons-update" aria-hidden="true"></span>' . esc_html__( 'Check again', 'cybergate-security' ) . '</a></p>';
 		echo '</div>';
+	}
+
+	/**
+	 * Install steps for this server (the developer instructions use them).
+	 *
+	 * @return array[]
+	 */
+	public static function install_steps() {
+		switch ( self::platform() ) {
+			case 'debian':
+				return self::steps_debian();
+			case 'rhel':
+				return self::steps_rhel();
+			case 'macos':
+				return self::steps_macos();
+		}
+		return self::steps_shared();
+	}
+
+	/**
+	 * Linux Malware Detect install commands alone.
+	 *
+	 * @return array[]
+	 */
+	public static function maldet_install_steps() {
+		$steps = self::maldet_steps();
+		return array(
+			array(
+				'text' => __( 'As root, download and install Linux Malware Detect from rfxn.com, then update its signatures. When ClamAV is installed, the installer links the signatures into ClamAV:', 'cybergate-security' ),
+				'code' => $steps[0]['code'],
+			),
+		);
 	}
 
 	/**
@@ -162,7 +194,7 @@ class Clamav_Guide {
 			),
 			self::test_step( 'clamdscan --fdpass' ),
 			...self::maldet_steps(),
-			array( 'text' => __( 'Come back here, press "Check again", then turn on "Also scan uploads with ClamAV" and save. The database updates itself several times a day from now on.', 'cybergate-security' ) ),
+			array( 'text' => __( 'Come back to Settings > Advanced > Antivirus engines, press "Check again", then "Turn on ClamAV for uploads". The database updates itself several times a day from now on.', 'cybergate-security' ) ),
 		);
 	}
 
@@ -189,7 +221,7 @@ class Clamav_Guide {
 			),
 			self::test_step( 'clamdscan --fdpass' ),
 			...self::maldet_steps(),
-			array( 'text' => __( 'Come back here, press "Check again", then turn on "Also scan uploads with ClamAV" and save.', 'cybergate-security' ) ),
+			array( 'text' => __( 'Come back to Settings > Advanced > Antivirus engines, press "Check again", then "Turn on ClamAV for uploads".', 'cybergate-security' ) ),
 		);
 	}
 
@@ -206,7 +238,7 @@ class Clamav_Guide {
 				/* translators: %s: site domain */
 				'code' => sprintf( __( "Hello, please install ClamAV with the clamd service (clamdscan) on the server that hosts %s and keep its virus database updated with freshclam. My WordPress security plugin scans uploads with /usr/bin/clamdscan, so PHP needs to be allowed to run it (proc_open or exec enabled for my account). Thank you.", 'cybergate-security' ), $site ? $site : 'my site' ),
 			),
-			array( 'text' => __( 'When the host confirms, come back here and press "Check again".', 'cybergate-security' ) ),
+			array( 'text' => __( 'When the host confirms, open Settings > Advanced > Antivirus engines and press "Check again".', 'cybergate-security' ) ),
 		);
 	}
 
@@ -228,7 +260,7 @@ class Clamav_Guide {
 				'code' => "freshclam\nclamd",
 			),
 			self::test_step( 'clamdscan --fdpass' ),
-			array( 'text' => __( 'Come back here and press "Check again". On a Mac the service stops at restart; run "clamd" again after a reboot.', 'cybergate-security' ) ),
+			array( 'text' => __( 'Open Settings > Advanced > Antivirus engines and press "Check again". On a Mac the service stops at restart; run "clamd" again after a reboot.', 'cybergate-security' ) ),
 		);
 	}
 }

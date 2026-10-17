@@ -26,6 +26,7 @@ defined( 'ABSPATH' ) || exit;
  *   unlock       minutes=<int>                                 -> { unlocked_until }
  *   lock                                                       -> { unlocked_until: 0 }
  *   diff_summary id=<int>                                      -> Diff::summary() { mode, added, removed, base_label, text }
+ *   clamav_enable                                              -> { message } (turns on "Also scan uploads with ClamAV" when ClamAV is ready)
  */
 class Ajax {
 
@@ -41,7 +42,7 @@ class Ajax {
 	const CRON_TAKEOVER = 90;
 
 	public function register() {
-		$endpoints = array( 'scan_start', 'scan_tick', 'scan_status', 'scan_cancel', 'item_action', 'bulk_action', 'counts', 'unlock', 'lock', 'diff_summary' );
+		$endpoints = array( 'scan_start', 'scan_tick', 'scan_status', 'scan_cancel', 'item_action', 'bulk_action', 'counts', 'unlock', 'lock', 'diff_summary', 'clamav_enable' );
 		foreach ( $endpoints as $endpoint ) {
 			add_action( 'wp_ajax_wpcybersec_' . $endpoint, array( $this, $endpoint ) );
 		}
@@ -256,5 +257,23 @@ class Ajax {
 		$this->guard();
 		wpcybersec()->install_gate->lock();
 		wp_send_json_success( array( 'unlocked_until' => 0 ) );
+	}
+
+	/**
+	 * One-click "Turn on ClamAV for uploads" (Settings, Dashboard, wizard).
+	 */
+	public function clamav_enable() {
+		$this->guard();
+		$scanner = wpcybersec()->scanner;
+		if ( ! $scanner || ! method_exists( $scanner, 'clamav_available' ) || ! $scanner->clamav_available() ) {
+			wp_send_json_error( array( 'message' => __( 'ClamAV is not ready on this server, so it was not turned on. Settings > Advanced > Antivirus engines shows what is missing.', 'cybergate-security' ) ) );
+		}
+		wpcybersec()->settings->update( array( 'clamav_enabled' => true ) );
+		$info    = $scanner->clamav_info();
+		$message = ! empty( $info['daemon'] )
+			? __( 'ClamAV is on: it now checks every upload, and whole-site scans use it too.', 'cybergate-security' )
+			: __( 'ClamAV is on: it now checks every upload.', 'cybergate-security' );
+		wpcybersec()->logger->log( 'clamav_enabled', $message );
+		wp_send_json_success( array( 'message' => $message ) );
 	}
 }

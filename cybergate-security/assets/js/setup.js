@@ -7,6 +7,7 @@
  *   - wizard baseline scan runner with progress and result
  *   - test email button (AJAX, falls back to the form submit without JS)
  *   - freeze lock Unlock / Lock buttons
+ *   - Settings > Advanced section chips work as tabs (one section at a time)
  *   - custom scan folder field toggle
  *   - unsaved changes warning on the settings form
  */
@@ -399,12 +400,34 @@
 	/* ------------------------------------------------------------------ */
 
 	function setLockState(until) {
+		var unlocked = !!(until && until * 1000 > Date.now());
 		each(document.querySelectorAll('[data-wpcs-lock-state]'), function (el) {
-			var unlocked = until && until * 1000 > Date.now();
 			el.className = 'wpcs-badge wpcs-badge--' + (unlocked ? 'medium' : 'ok');
 			el.textContent = unlocked
 				? fmt(i18n.unlockedUntil || '%s', new Date(until * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
 				: i18n.locked || '';
+		});
+		// Only the button that makes sense now.
+		each(document.querySelectorAll('[data-wpcs-unlock]'), function (b) {
+			b.hidden = unlocked;
+		});
+		each(document.querySelectorAll('[data-wpcs-lock]'), function (b) {
+			b.hidden = !unlocked;
+		});
+	}
+
+	function bindUnlockMinutes() {
+		document.addEventListener('input', function (e) {
+			if (!e.target.matches('#wpcs-unlock-minutes')) {
+				return;
+			}
+			var minutes = parseInt(e.target.value, 10);
+			if (!minutes || minutes < 1) {
+				return;
+			}
+			each(document.querySelectorAll('[data-wpcs-unlock-label]'), function (el) {
+				el.textContent = fmt(minutes === 1 ? i18n.unlockFor1 || '%s' : i18n.unlockFor || '%s', minutes);
+			});
 		});
 	}
 
@@ -428,14 +451,18 @@
 			}
 			request
 				.then(function (res) {
+					button.disabled = false;
 					setLockState(res && res.unlocked_until ? parseInt(res.unlocked_until, 10) : 0);
 					toast(unlock ? i18n.unlockedToast : i18n.lockedToast);
+					// Keep the keyboard focus on the button that replaced this one.
+					var other = document.querySelector(unlock ? '[data-wpcs-lock]' : '[data-wpcs-unlock]');
+					if (other && !other.hidden) {
+						other.focus();
+					}
 				})
 				.catch(function (err) {
-					toast(err.message, true);
-				})
-				.then(function () {
 					button.disabled = false;
+					toast(err.message, true);
 				});
 		});
 	}
@@ -482,7 +509,7 @@
 			});
 		});
 		window.addEventListener('beforeunload', function (e) {
-			if (dirty) {
+			if (dirty && !window.wpcsSkipUnload) {
 				e.preventDefault();
 				e.returnValue = '';
 				return '';
@@ -500,7 +527,167 @@
 		});
 	}
 
+	/* ------------------------------------------------------------------ */
+	/* Advanced sections as tabs                                           */
+	/* ------------------------------------------------------------------ */
+
+	/**
+	 * The chips above Settings > Advanced become a tablist: one section shows
+	 * at a time. Hidden sections stay inside the settings form (only hidden),
+	 * so Save still sends every field. The open section is kept in the URL
+	 * (?section=) and in the form, so a reload and the redirect after saving
+	 * come back to it. Without scripts every section stays visible.
+	 */
+	function bindSections() {
+		var nav = document.querySelector('[data-wpcs-sections]');
+		if (!nav) {
+			return;
+		}
+		var tabs = Array.prototype.slice.call(nav.querySelectorAll('[data-wpcs-section]'));
+		var panels = {};
+		each(document.querySelectorAll('[data-wpcs-panel]'), function (p) {
+			panels[p.getAttribute('data-wpcs-panel')] = p;
+		});
+		var input = document.querySelector('[data-wpcs-section-input]');
+		var savebar = document.querySelector('[data-wpcs-savebar]');
+		var aliases = { clamav: 'antivirus' };
+
+		nav.setAttribute('role', 'tablist');
+		document.body.classList.add('wpcs-has-tabs');
+
+		function keyFor(name) {
+			name = String(name || '').replace(/^#/, '').replace(/^wpcs-(panel-|tab-)?/, '');
+			name = aliases[name] || name;
+			return panels[name] ? name : '';
+		}
+
+		/** Section that contains an element with this id (for links to inner anchors). */
+		function keyForId(id) {
+			var direct = keyFor(id);
+			if (direct) {
+				return direct;
+			}
+			var el = id ? document.getElementById(id) : null;
+			var panel = el ? el.closest('[data-wpcs-panel]') : null;
+			return panel ? panel.getAttribute('data-wpcs-panel') : '';
+		}
+
+		function select(key, opts) {
+			opts = opts || {};
+			if (!panels[key]) {
+				return;
+			}
+			tabs.forEach(function (tab) {
+				var on = tab.getAttribute('data-wpcs-section') === key;
+				tab.setAttribute('aria-selected', on ? 'true' : 'false');
+				tab.setAttribute('tabindex', on ? '0' : '-1');
+				tab.classList.toggle('is-active', on);
+				if (on && opts.focus) {
+					tab.focus();
+				}
+				if (on && tab.scrollIntoView && nav.scrollWidth > nav.clientWidth) {
+					// Narrow screens: keep the chosen chip in view inside the scrolling row.
+					var left = tab.offsetLeft - nav.offsetLeft;
+					if (left < nav.scrollLeft || left + tab.offsetWidth > nav.scrollLeft + nav.clientWidth) {
+						nav.scrollLeft = Math.max(0, left - 24);
+					}
+				}
+			});
+			Object.keys(panels).forEach(function (k) {
+				var on = k === key;
+				panels[k].hidden = !on;
+				panels[k].classList.toggle('is-active', on);
+			});
+			if (input) {
+				input.value = key;
+			}
+			if (savebar) {
+				savebar.classList.toggle('is-idle', panels[key].getAttribute('data-has-fields') !== '1');
+			}
+			if (opts.url !== false && window.history && window.history.replaceState) {
+				var url = new URL(window.location.href);
+				url.searchParams.set('section', key);
+				url.searchParams.delete('recheck');
+				url.searchParams.delete('settings-updated');
+				url.hash = '';
+				window.history.replaceState(null, '', url.toString());
+			}
+		}
+
+		tabs.forEach(function (tab) {
+			var key = tab.getAttribute('data-wpcs-section');
+			tab.setAttribute('role', 'tab');
+			if (panels[key]) {
+				panels[key].setAttribute('role', 'tabpanel');
+				panels[key].setAttribute('aria-labelledby', tab.id);
+				panels[key].setAttribute('tabindex', '-1');
+			}
+			tab.addEventListener('click', function (e) {
+				e.preventDefault();
+				select(key);
+			});
+		});
+
+		nav.addEventListener('keydown', function (e) {
+			var current = tabs.indexOf(document.activeElement);
+			if (current === -1) {
+				return;
+			}
+			var next = -1;
+			if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+				next = (current + 1) % tabs.length;
+			} else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+				next = (current - 1 + tabs.length) % tabs.length;
+			} else if (e.key === 'Home') {
+				next = 0;
+			} else if (e.key === 'End') {
+				next = tabs.length - 1;
+			} else if (e.key === ' ' || e.key === 'Spacebar') {
+				e.preventDefault();
+				select(tabs[current].getAttribute('data-wpcs-section'));
+				return;
+			}
+			if (next !== -1) {
+				e.preventDefault();
+				select(tabs[next].getAttribute('data-wpcs-section'), { focus: true });
+			}
+		});
+
+		// Links inside the page to another section ("Developer instructions", "Antivirus engines"):
+		// data-wpcs-goto="<key>", or a plain "#wpcs-..." fragment. Links that change the query
+		// (such as "Check again" with recheck=1) load the page as usual.
+		document.addEventListener('click', function (e) {
+			var link = e.target.closest('[data-wpcs-goto], a[href^="#wpcs-"]');
+			if (!link || link.closest('[data-wpcs-sections]')) {
+				return;
+			}
+			var key = link.getAttribute('data-wpcs-goto') ? keyFor(link.getAttribute('data-wpcs-goto')) : keyForId(link.getAttribute('href').slice(1));
+			if (!key) {
+				return;
+			}
+			e.preventDefault();
+			select(key);
+			window.scrollTo({ top: Math.max(0, nav.getBoundingClientRect().top + window.pageYOffset - 48), behavior: 'smooth' });
+		});
+
+		// Start: a fragment (#wpcs-guard, an old #wpcs-clamav link) wins over ?section=.
+		var fromHash = keyForId(window.location.hash.slice(1));
+		var fromQuery = keyFor(new URL(window.location.href).searchParams.get('section'));
+		var active = nav.querySelector('.is-active');
+		var start = fromHash || fromQuery || (active ? active.getAttribute('data-wpcs-section') : '') || tabs[0].getAttribute('data-wpcs-section');
+		select(start, { url: !!fromHash });
+
+		window.addEventListener('hashchange', function () {
+			var key = keyForId(window.location.hash.slice(1));
+			if (key) {
+				select(key, { url: false });
+			}
+		});
+	}
+
 	function init() {
+		bindSections();
+		bindUnlockMinutes();
 		bindLevels();
 		bindBaseline();
 		bindTestEmail();

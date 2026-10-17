@@ -584,14 +584,19 @@ class Wizard {
 			<div class="wpcs-section__head">
 				<span class="dashicons dashicons-clock" aria-hidden="true"></span>
 				<h3><?php esc_html_e( 'Real cron job', 'cybergate-security' ); ?></h3>
+				<?php $cron_runs = (int) get_option( 'wpcybersec_cli_cron_at', 0 ) > time() - 2 * HOUR_IN_SECONDS; ?>
+				<?php if ( $cron_runs ) : ?>
+					<span class="wpcs-badge wpcs-badge--ok"><?php esc_html_e( 'Running', 'cybergate-security' ); ?></span>
+				<?php endif; ?>
 			</div>
 			<p><?php esc_html_e( 'WordPress normally runs scheduled tasks only when someone visits the site. A real cron job makes scans run on time. Cron jobs are set up in your hosting control panel (or with crontab on your own server), so this one cannot be done from here.', 'cybergate-security' ); ?></p>
 			<?php
 			$hardening = Sysadmin_Tools::service( 'hardening' );
 			if ( $hardening && method_exists( $hardening, 'manual_steps' ) ) {
-				echo '<div class="wpcs-manual wpcs-manual--open"><span class="wpcs-sub wpcs-check__fix">' . esc_html__( 'In a hosting control panel:', 'cybergate-security' ) . '</span>';
+				// A real cron job already runs: the steps stay available but folded away.
+				echo $cron_runs ? '<details class="wpcs-manual"><summary>' . esc_html__( 'In a hosting control panel', 'cybergate-security' ) . '</summary>' : '<div class="wpcs-manual wpcs-manual--open"><span class="wpcs-sub wpcs-check__fix">' . esc_html__( 'In a hosting control panel:', 'cybergate-security' ) . '</span>';
 				Settings_Page::render_steps( $hardening->manual_steps( 'wp_cron' ) );
-				echo '</div>';
+				echo $cron_runs ? '</details>' : '</div>';
 				echo '<details class="wpcs-manual"><summary>' . esc_html__( 'On your own server (crontab)', 'cybergate-security' ) . '</summary>';
 				echo Settings_Page::code( $cron[0]['code'], $cron[0]['file'] ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
 				echo '</details>';
@@ -634,6 +639,8 @@ class Wizard {
 			?>
 		</div>
 
+		<?php $this->render_antivirus_section(); ?>
+
 		<div class="wpcs-section">
 			<div class="wpcs-section__head">
 				<span class="dashicons dashicons-media-code" aria-hidden="true"></span>
@@ -661,6 +668,67 @@ class Wizard {
 			?>
 		</div>
 		<?php
+		$this->render_developer_link();
+	}
+
+	/**
+	 * Optional antivirus engines (ClamAV, Linux Malware Detect) on the Server step.
+	 */
+	private function render_antivirus_section() {
+		$av = Sysadmin_Tools::call( 'sysadmin', 'antivirus_status', array(), null );
+		if ( ! is_array( $av ) ) {
+			return;
+		}
+		$clam   = $av['clamav'];
+		$maldet = $av['maldet'];
+		$guide  = Sysadmin_Tools::settings_url( 'advanced', array(), 'wpcs-antivirus' );
+		echo '<div class="wpcs-section">';
+		echo '<div class="wpcs-section__head"><span class="dashicons dashicons-sos" aria-hidden="true"></span><h3>' . esc_html__( 'Antivirus (optional)', 'cybergate-security' ) . '</h3>';
+		echo '<span class="wpcs-badge wpcs-badge--' . esc_attr( $clam['tone'] ) . '">' . esc_html( 'ClamAV: ' . $clam['label'] ) . '</span>';
+		echo '</div>';
+		echo '<p>' . esc_html__( 'ClamAV and Linux Malware Detect know many more existing infections and give every upload a second opinion. They find more, but they do not block attacks.', 'cybergate-security' ) . '</p>';
+		$facts = array();
+		$facts[] = '' !== $clam['binary']
+			/* translators: %s: program path */
+			? sprintf( __( 'ClamAV found at %s.', 'cybergate-security' ), $clam['binary'] )
+			: __( 'ClamAV is not installed.', 'cybergate-security' );
+		if ( '' !== $maldet['binary'] ) {
+			/* translators: %s: program path */
+			$facts[] = sprintf( __( 'Linux Malware Detect found at %s.', 'cybergate-security' ), $maldet['binary'] );
+		} elseif ( $maldet['supported'] ) {
+			$facts[] = __( 'Linux Malware Detect is not installed.', 'cybergate-security' );
+		}
+		echo '<p class="wpcs-muted">' . esc_html( implode( ' ', $facts ) ) . '</p>';
+		echo '<p class="wpcs-row">';
+		if ( 'ready_off' === $clam['state'] ) {
+			echo '<button type="button" class="button button-primary" data-wpcs-clamav-enable><span class="dashicons dashicons-yes" aria-hidden="true"></span>' . esc_html__( 'Turn on ClamAV for uploads', 'cybergate-security' ) . '</button>';
+			echo '<a href="' . esc_url( $guide ) . '">' . esc_html__( 'Details', 'cybergate-security' ) . '</a>';
+		} elseif ( in_array( $clam['state'], array( 'uploads', 'uploads_scans' ), true ) ) {
+			echo '<a class="button" href="' . esc_url( $guide ) . '">' . esc_html__( 'Antivirus settings', 'cybergate-security' ) . '</a>';
+		} else {
+			echo '<a class="button" href="' . esc_url( $guide ) . '"><span class="dashicons dashicons-book" aria-hidden="true"></span>' . esc_html__( 'Install guide', 'cybergate-security' ) . '</a>';
+		}
+		echo '</p></div>';
+	}
+
+	/**
+	 * Link to the developer instructions while something needs server access.
+	 */
+	private function render_developer_link() {
+		$count = (int) Sysadmin_Tools::call( 'developer', 'count', array(), 0 );
+		if ( $count < 1 ) {
+			return;
+		}
+		echo '<div class="wpcs-notice wpcs-devnote"><span class="dashicons dashicons-clipboard" aria-hidden="true"></span><p>';
+		echo esc_html(
+			sprintf(
+				/* translators: %d: number of steps */
+				_n( '%d step needs someone with server access (SSH, SFTP or the hosting panel).', '%d steps need someone with server access (SSH, SFTP or the hosting panel).', $count, 'cybergate-security' ),
+				$count
+			)
+		) . ' ';
+		echo '<a href="' . esc_url( Sysadmin_Tools::settings_url( 'advanced', array(), 'wpcs-developer' ) ) . '">' . esc_html__( 'Open the developer instructions', 'cybergate-security' ) . '</a>';
+		echo '</p></div>';
 	}
 
 	/**

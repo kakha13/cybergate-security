@@ -68,6 +68,7 @@ class Assets {
 					'ignored'        => __( 'Marked safe', 'cybergate-security' ),
 					'quarantined'    => __( 'Quarantined', 'cybergate-security' ),
 					'restored'       => __( 'Restored', 'cybergate-security' ),
+					'resolved'       => __( 'Resolved', 'cybergate-security' ),
 					'deleted'        => __( 'Deleted', 'cybergate-security' ),
 				),
 			)

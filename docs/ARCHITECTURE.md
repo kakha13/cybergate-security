@@ -64,6 +64,8 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
 | install_gate | `Install_Gate` | gates |
 | guard_manager | `Guard_Manager` | gates |
 | sysadmin | `Sysadmin_Tools` | setup |
+| hardening | `Hardening` | setup (one-click fixes) |
+| developer | `Developer_Instructions` | setup (steps that need server access) |
 | admin | `Admin\Admin` | admin UI |
 
 Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` (core), `Cli` (setup),
@@ -94,10 +96,15 @@ Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` 
   `restore($item)`, `to_temp($item)`, `purge($item)`, `exists($item)`, `stream($item)`.
 - `Logger`: `log($event, $message, $context = array())`.
 - `Decisions`: `ACTIONS`, static `available($item)`, `apply($action, $id)`, `bulk($action, $ids)`.
+  Critical files (static `is_critical_path($abs)` / `is_critical($item)`: wp-config.php, the root
+  `CRITICAL_ROOT` files, and wp-admin/ or wp-includes/ files listed in the core checksums) are never
+  offered or allowed `quarantine` or `delete`, and Scan_Job never auto-quarantines them. A changed
+  critical core file still in place gets `restore_official` (verified `Originals` copy, current
+  version kept as a snapshot first, atomic `Fs::replace()`, item becomes `resolved`).
 - `Guard_Config` (static): `file()`, `allow_file()`, `read()`, `write($config)`,
   `set_enabled($bool)`, `atomic_write($file, $content)`.
 - `Ajax`: endpoints listed in `class-ajax.php` (scan_start/tick/status/cancel, item_action,
-  bulk_action, counts, unlock, lock). Nonce action `Ajax::NONCE` = `wpcybersec_ajax`.
+  bulk_action, counts, unlock, lock, diff_summary, clamav_enable). Nonce action `Ajax::NONCE` = `wpcybersec_ajax`.
 - `Admin\Assets`: `register()`, `enqueue()`. Handles `wpcybersec-base` (css) and
   `wpcybersec-core` (js, exposes `window.WPCyberSec`, see header comment in `assets/js/core.js`).
 - `Installer`: `CRON_HOOKS`, `REDIRECT_OPTION` (`wpcybersec_activation_redirect`, set on activation),
@@ -424,13 +431,23 @@ Files: `includes/admin/class-wizard.php`, `includes/admin/class-settings-page.ph
   Baseline step runs `WPCyberSec.scan.run({mode:'baseline', malware:true, trigger:'wizard'})`.
   Completing sets `wizard_completed`.
 - Settings page tabs: General (protection level presets + fine-grained upload/install/file
-  monitor/schedule/notification settings) and Advanced for system administrators (data dir,
-  scan root, exclusions, limits, early guard install + snippets, real cron, freeze lock,
-  hardening snippets, fapolicyd/inotify/maldet, ClamAV, tamper checksum, import/export,
-  uninstall behavior). Saves via admin-post `wpcybersec_save_settings`.
+  monitor/schedule/notification settings) and Advanced for system administrators (server health,
+  antivirus engines (ClamAV + maldet), developer instructions, data dir, scan root, exclusions,
+  limits, early guard install + snippets, real cron, freeze lock, hardening snippets,
+  fapolicyd/inotify, tamper checksum, import/export, uninstall behavior). Saves via admin-post
+  `wpcybersec_save_settings`. Advanced is one form split into sections
+  (`Settings_Page::advanced_sections()`, card id `wpcs-<key>`) that setup.js shows one at a time as
+  tabs; hidden sections stay in the form. The open section travels as `?section=<key>` (also the
+  hidden `section` field, kept through the save redirect); `Sysadmin_Tools::settings_url('advanced',
+  [], 'wpcs-<key>')` adds it from the fragment.
+- `Developer_Instructions`: `items($checks = null)` (each `{ id, title, why, steps, error, at,
+  optional }`), `count()` (cached), static `record_failure($id, $message)` / `clear_failure($id)`
+  (option `wpcybersec_fix_failures`; Hardening::run(), the guard and uploads/.htaccess handlers call
+  them), `as_text($items)`, admin-post `wpcybersec_dev_instructions` (.txt download). No secrets.
 - `Sysadmin_Tools`: `diagnostics()` (list of `{ id, label, status pass|warn|fail|info, detail, fix }`),
   `cron_snippets()`, `apache_uploads_rules()`, `nginx_rules()`, `permission_commands()`,
-  `fapolicyd_trust_export()`, `fapolicyd_rules()`, `inotify_script()`, `maldet_snippet()`,
+  `fapolicyd_trust_export()`, `fapolicyd_rules()`, `inotify_script()`, `maldet_steps()`,
+  `antivirus_status()`, static `maldet_detect()`, `inotifywait_installed()`,
   `write_uploads_htaccess()`, `hmac_snippet()`.
 - `Cli`: static `register()` -> `WP_CLI::add_command('wpcybersec', ...)` with `status`, `scan`,
   `pending`, `approve`, `deny`, `allowlist`, `guard`, `unlock`, `lock`, `report`.

@@ -22,6 +22,18 @@ class Settings_Page {
 	/** @var bool Whether a card section is open (for error recovery). */
 	private $card_is_open = false;
 
+	/** @var string Open section of the Advanced tab. */
+	private $section = 'health';
+
+	/**
+	 * Sections of the Advanced tab with fields that the Save button saves; the
+	 * others only hold buttons that act at once.
+	 */
+	const SECTIONS_WITH_FIELDS = array( 'antivirus', 'scan', 'guard', 'freeze', 'data' );
+
+	/** Old section anchors that now live elsewhere. */
+	const SECTION_ALIASES = array( 'clamav' => 'antivirus' );
+
 	/* ------------------------------------------------------------------ */
 	/* Shared UI helpers                                                   */
 	/* ------------------------------------------------------------------ */
@@ -131,6 +143,26 @@ class Settings_Page {
 			$html .= '<span class="wpcs-field__help">' . esc_html( $help ) . '</span>';
 		}
 		return $html . '</div>';
+	}
+
+	/**
+	 * A long command snippet folded under "Show commands", so a card shows its
+	 * explanation first. Copy keeps working inside (it copies the <pre>).
+	 *
+	 * @param string $code  Code.
+	 * @param string $label What it is or where it goes (shown in the summary).
+	 * @param string $help  Optional help below the block.
+	 * @param bool   $open  Open by default (the related check fails, or it is the only content).
+	 * @return string HTML.
+	 */
+	public static function commands( $code, $label = '', $help = '', $open = false ) {
+		$html  = '<details class="wpcs-cmds"' . ( $open ? ' open' : '' ) . '>';
+		$html .= '<summary><span class="dashicons dashicons-editor-code" aria-hidden="true"></span><span class="wpcs-cmds__show">' . esc_html__( 'Show commands', 'cybergate-security' ) . '</span>';
+		if ( '' !== $label ) {
+			$html .= '<span class="wpcs-cmds__label">' . esc_html( $label ) . '</span>';
+		}
+		$html .= '</summary>' . self::code( $code, '', $help ) . '</details>';
+		return $html;
 	}
 
 	/**
@@ -597,6 +629,9 @@ class Settings_Page {
 		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="wpcs-settings-form" data-wpcs-level-form="settings">
 			<input type="hidden" name="action" value="wpcybersec_save_settings">
 			<input type="hidden" name="tab" value="<?php echo esc_attr( $tab ); ?>">
+			<?php if ( 'advanced' === $tab ) : ?>
+				<input type="hidden" name="section" value="<?php echo esc_attr( $this->section ); ?>" data-wpcs-section-input>
+			<?php endif; ?>
 			<?php wp_nonce_field( 'wpcybersec_save_settings' ); ?>
 			<button type="submit" class="wpcs-default-submit" tabindex="-1" aria-hidden="true"><?php esc_html_e( 'Save changes', 'cybergate-security' ); ?></button>
 		<?php
@@ -606,10 +641,11 @@ class Settings_Page {
 	 * Sticky save bar and end of the form.
 	 *
 	 * @param string $note Text next to the button.
+	 * @param bool   $idle Hidden while the open section has no fields (with scripts only).
 	 */
-	private function form_close( $note ) {
+	private function form_close( $note, $idle = false ) {
 		?>
-			<div class="wpcs-savebar">
+			<div class="wpcs-savebar<?php echo $idle ? ' is-idle' : ''; ?>" data-wpcs-savebar>
 				<span class="wpcs-savebar__note"><?php echo esc_html( $note ); ?></span>
 				<button type="submit" class="button button-primary button-large"><?php esc_html_e( 'Save changes', 'cybergate-security' ); ?></button>
 			</div>
@@ -894,38 +930,60 @@ class Settings_Page {
 		$s     = $this->settings();
 		$tools = $this->tools();
 
-		$toc = array(
-			'wpcs-health'       => __( 'Server health', 'cybergate-security' ),
-			'wpcs-storage'      => __( 'Storage', 'cybergate-security' ),
-			'wpcs-scan'         => __( 'Scan scope', 'cybergate-security' ),
-			'wpcs-guard'        => __( 'Early guard', 'cybergate-security' ),
-			'wpcs-cron'         => __( 'Real cron', 'cybergate-security' ),
-			'wpcs-freeze'       => __( 'Freeze lock', 'cybergate-security' ),
-			'wpcs-hardening'    => __( 'Web server', 'cybergate-security' ),
-			'wpcs-integrations' => __( 'Integrations', 'cybergate-security' ),
-			'wpcs-clamav'       => __( 'ClamAV', 'cybergate-security' ),
-			'wpcs-tamper'       => __( 'Tamper check', 'cybergate-security' ),
-			'wpcs-data'         => __( 'Data', 'cybergate-security' ),
-			'wpcs-transfer'     => __( 'Import and export', 'cybergate-security' ),
+		$sections = self::advanced_sections();
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- navigation only.
+		$asked = isset( $_GET['section'] ) ? sanitize_key( wp_unslash( $_GET['section'] ) ) : '';
+		$asked = isset( self::SECTION_ALIASES[ $asked ] ) ? self::SECTION_ALIASES[ $asked ] : $asked;
+		$this->section = isset( $sections[ $asked ] ) ? $asked : 'health';
+
+		// Computed once: Server health, the developer instructions and the command blocks use them.
+		$checks = array();
+		try {
+			// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read only.
+			$checks = $tools->diagnostics( ! empty( $_GET['recheck'] ) );
+		} catch ( \Throwable $e ) {
+			$checks = array();
+		}
+		$attention = array_values(
+			array_filter(
+				$checks,
+				static function ( $c ) {
+					return in_array( $c['status'], array( 'warn', 'fail' ), true );
+				}
+			)
 		);
-		echo '<nav class="wpcs-toc" aria-label="' . esc_attr__( 'Advanced sections', 'cybergate-security' ) . '">';
-		foreach ( $toc as $id => $label ) {
-			echo '<a href="#' . esc_attr( $id ) . '">' . esc_html( $label ) . '</a>';
+		$developer = Sysadmin_Tools::service( 'developer' );
+		$dev_items = array();
+		if ( $developer && method_exists( $developer, 'items' ) ) {
+			try {
+				$dev_items = $developer->items( $checks );
+			} catch ( \Throwable $e ) {
+				$dev_items = array();
+			}
+		}
+		$counts = array(
+			'health'    => count( $attention ),
+			'developer' => count( $dev_items ),
+		);
+
+		// Section chips: plain links to the cards without scripts, tabs with them (setup.js).
+		echo '<nav class="wpcs-toc" aria-label="' . esc_attr__( 'Advanced sections', 'cybergate-security' ) . '" data-wpcs-sections>';
+		foreach ( $sections as $key => $label ) {
+			$active = $key === $this->section;
+			echo '<a href="#wpcs-' . esc_attr( $key ) . '" id="wpcs-tab-' . esc_attr( $key ) . '" class="wpcs-toc__chip' . ( $active ? ' is-active' : '' ) . '" data-wpcs-section="' . esc_attr( $key ) . '" aria-controls="wpcs-panel-' . esc_attr( $key ) . '">' . esc_html( $label );
+			if ( ! empty( $counts[ $key ] ) ) {
+				echo '<span class="wpcs-toc__count">' . esc_html( number_format_i18n( $counts[ $key ] ) ) . '</span>';
+			}
+			echo '</a>';
 		}
 		echo '</nav>';
 
-		// Server health: open recommendations with one-click fixes (outside the settings form).
+		// One form for every section except Import and export (its own forms), so
+		// fields of hidden sections are always saved with their current values.
+		$this->form_open( 'advanced' );
+
+		$this->panel_open( 'health' );
 		try {
-			// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read only.
-			$checks    = $tools->diagnostics( ! empty( $_GET['recheck'] ) );
-			$attention = array_values(
-				array_filter(
-					$checks,
-					static function ( $c ) {
-						return in_array( $c['status'], array( 'warn', 'fail' ), true );
-					}
-				)
-			);
 			$this->card_open( 'wpcs-health', 'heart', __( 'Server health', 'cybergate-security' ), __( 'Recommendations for this server. Use the buttons to fix them here, or follow the steps to do it by hand.', 'cybergate-security' ) );
 			if ( $attention ) {
 				$fixable = self::auto_fix_ids( $attention );
@@ -939,18 +997,44 @@ class Settings_Page {
 			} else {
 				self::notice( __( 'No open recommendations. Everything important looks good.', 'cybergate-security' ), 'ok' );
 			}
+			if ( $dev_items ) {
+				echo '<p class="wpcs-card__foot-note"><span class="dashicons dashicons-clipboard" aria-hidden="true"></span><span>';
+				printf(
+					/* translators: %s: link to the developer instructions */
+					esc_html__( 'Steps that need server access are collected in %s.', 'cybergate-security' ),
+					'<a href="' . esc_url( Sysadmin_Tools::settings_url( 'advanced', array(), 'wpcs-developer' ) ) . '" data-wpcs-goto="developer">' . esc_html__( 'Developer instructions', 'cybergate-security' ) . '</a>'
+				);
+				echo '</span></p>';
+			}
 			$this->card_close();
 		} catch ( \Throwable $e ) {
 			if ( $this->card_is_open ) {
 				$this->card_close();
 			}
 		}
+		$this->panel_close();
 
-		$this->form_open( 'advanced' );
-		$sections = array( 'section_storage', 'section_scan', 'section_guard', 'section_cron', 'section_freeze', 'section_hardening', 'section_integrations', 'section_clamav', 'section_tamper', 'section_data' );
-		foreach ( $sections as $section ) {
+		$by_id = array();
+		foreach ( $checks as $check ) {
+			$by_id[ (string) $check['id'] ] = $check;
+		}
+		$parts = array(
+			'antivirus'    => array( 'section_antivirus', array( $s, $tools ) ),
+			'developer'    => array( 'section_developer', array( $dev_items ) ),
+			'storage'      => array( 'section_storage', array( $s, $tools ) ),
+			'scan'         => array( 'section_scan', array( $s, $tools ) ),
+			'guard'        => array( 'section_guard', array( $s, $tools ) ),
+			'cron'         => array( 'section_cron', array( $s, $tools, $by_id ) ),
+			'freeze'       => array( 'section_freeze', array( $s, $tools ) ),
+			'hardening'    => array( 'section_hardening', array( $s, $tools, $by_id ) ),
+			'integrations' => array( 'section_integrations', array( $s, $tools ) ),
+			'tamper'       => array( 'section_tamper', array( $s, $tools ) ),
+			'data'         => array( 'section_data', array( $s, $tools ) ),
+		);
+		foreach ( $parts as $key => $part ) {
+			$this->panel_open( $key );
 			try {
-				$this->$section( $s, $tools );
+				call_user_func_array( array( $this, $part[0] ), $part[1] );
 			} catch ( \Throwable $e ) {
 				/* translators: %s: error message */
 				self::notice( sprintf( __( 'This section could not be shown: %s', 'cybergate-security' ), $e->getMessage() ), 'bad' );
@@ -958,10 +1042,282 @@ class Settings_Page {
 					$this->card_close();
 				}
 			}
+			$this->panel_close();
 		}
-		$this->form_close( __( 'Saves the fields on this tab. The buttons inside the cards act immediately.', 'cybergate-security' ) );
+		$this->form_close(
+			__( 'Saves the settings of every section. Buttons inside the cards act at once.', 'cybergate-security' ),
+			! in_array( $this->section, self::SECTIONS_WITH_FIELDS, true )
+		);
 
+		$this->panel_open( 'transfer' );
 		$this->section_transfer();
+		$this->panel_close();
+	}
+
+	/**
+	 * Sections of the Advanced tab, in order: key => chip label. The card of a
+	 * section has the id "wpcs-<key>".
+	 *
+	 * @return array
+	 */
+	public static function advanced_sections() {
+		return array(
+			'health'       => __( 'Server health', 'cybergate-security' ),
+			'antivirus'    => __( 'Antivirus engines', 'cybergate-security' ),
+			'developer'    => __( 'Developer instructions', 'cybergate-security' ),
+			'storage'      => __( 'Storage', 'cybergate-security' ),
+			'scan'         => __( 'Scan scope', 'cybergate-security' ),
+			'guard'        => __( 'Early guard', 'cybergate-security' ),
+			'cron'         => __( 'Real cron', 'cybergate-security' ),
+			'freeze'       => __( 'Freeze lock', 'cybergate-security' ),
+			'hardening'    => __( 'Web server', 'cybergate-security' ),
+			'integrations' => __( 'Integrations', 'cybergate-security' ),
+			'tamper'       => __( 'Tamper check', 'cybergate-security' ),
+			'data'         => __( 'Data', 'cybergate-security' ),
+			'transfer'     => __( 'Import and export', 'cybergate-security' ),
+		);
+	}
+
+	/**
+	 * Opens the wrapper of one section. Without scripts every section shows;
+	 * setup.js turns the chips into tabs and hides the others.
+	 *
+	 * @param string $key Section key.
+	 */
+	private function panel_open( $key ) {
+		$fields = in_array( $key, self::SECTIONS_WITH_FIELDS, true );
+		echo '<div class="wpcs-tabpanel' . ( $key === $this->section ? ' is-active' : '' ) . '" id="wpcs-panel-' . esc_attr( $key ) . '" data-wpcs-panel="' . esc_attr( $key ) . '" data-has-fields="' . ( $fields ? '1' : '0' ) . '">';
+	}
+
+	/**
+	 * Closes a section wrapper.
+	 */
+	private function panel_close() {
+		echo '</div>';
+	}
+
+	/**
+	 * Check status by id ('' when the check did not run).
+	 *
+	 * @param array[] $by_id Checks by id.
+	 * @param string  $id    Check id.
+	 * @return string
+	 */
+	private static function check_status( array $by_id, $id ) {
+		return isset( $by_id[ $id ]['status'] ) ? (string) $by_id[ $id ]['status'] : '';
+	}
+
+	/**
+	 * @param string $status Check status.
+	 * @return bool Whether it needs attention.
+	 */
+	private static function is_open( $status ) {
+		return in_array( $status, array( 'warn', 'fail' ), true );
+	}
+
+	/**
+	 * Antivirus engines: ClamAV and Linux Malware Detect.
+	 *
+	 * @param array          $s     Settings.
+	 * @param Sysadmin_Tools $tools Tools.
+	 */
+	private function section_antivirus( array $s, Sysadmin_Tools $tools ) {
+		$av     = $tools->antivirus_status();
+		$clam   = $av['clamav'];
+		$maldet = $av['maldet'];
+		$yes    = __( 'Yes', 'cybergate-security' );
+		$no     = __( 'No', 'cybergate-security' );
+
+		$this->card_open( 'wpcs-antivirus', 'sos', __( 'Antivirus engines', 'cybergate-security' ), __( 'ClamAV and Linux Malware Detect know many more existing infections (web shells, phishing kits, infected uploads) and give a second opinion next to the plugin\'s own signatures. They find more, but they do not block attacks.', 'cybergate-security' ) );
+
+		if ( 'ready_off' === $clam['state'] ) {
+			echo '<div class="wpcs-callout">';
+			echo '<span class="wpcs-callout__icon" aria-hidden="true"><span class="dashicons dashicons-sos"></span></span>';
+			echo '<div class="wpcs-callout__text"><strong>' . esc_html__( 'ClamAV is installed and ready, but not in use', 'cybergate-security' ) . '</strong>';
+			echo '<span class="wpcs-sub">' . esc_html( $clam['daemon'] ? __( 'Turn it on to check every upload with ClamAV too. Its background service runs, so whole-site scans use it as well.', 'cybergate-security' ) : __( 'Turn it on to check every upload with ClamAV too.', 'cybergate-security' ) ) . '</span></div>';
+			echo '<button type="button" class="button button-primary" data-wpcs-clamav-enable><span class="dashicons dashicons-yes" aria-hidden="true"></span>' . esc_html__( 'Turn on ClamAV for uploads', 'cybergate-security' ) . '</button>';
+			echo '</div>';
+		}
+
+		echo '<div class="wpcs-engines">';
+		// ClamAV.
+		$used = array(
+			'missing'       => __( 'Nothing (not installed)', 'cybergate-security' ),
+			'blocked'       => __( 'Nothing (PHP cannot run it)', 'cybergate-security' ),
+			'ready_off'     => __( 'Nothing yet', 'cybergate-security' ),
+			'uploads'       => __( 'Uploads', 'cybergate-security' ),
+			'uploads_scans' => __( 'Uploads and whole-site scans', 'cybergate-security' ),
+		);
+		$rows = array(
+			__( 'Program', 'cybergate-security' )            => '' !== $clam['binary'] ? '<code class="wpcs-path">' . esc_html( $clam['binary'] ) . '</code>' : esc_html__( 'Not found', 'cybergate-security' ),
+			__( 'Background service (clamd)', 'cybergate-security' ) => 'missing' === $clam['state'] ? esc_html__( 'Not installed', 'cybergate-security' ) : ( $clam['daemon'] ? $this->badge( __( 'Running', 'cybergate-security' ), 'ok' ) : $this->badge( __( 'Not running', 'cybergate-security' ), 'muted' ) ),
+			__( 'PHP may run it', 'cybergate-security' )     => $clam['exec'] ? $this->badge( $yes, 'ok' ) : $this->badge( __( 'No: exec() and proc_open() are disabled', 'cybergate-security' ), 'high' ),
+			__( 'Used for', 'cybergate-security' )           => esc_html( $used[ $clam['state'] ] ),
+		);
+		$this->engine( 'ClamAV', $clam['label'], $clam['tone'], $rows );
+
+		// Linux Malware Detect.
+		if ( null === $maldet['linked'] ) {
+			$linked = esc_html__( 'Unknown', 'cybergate-security' );
+		} else {
+			$linked = $maldet['linked'] ? $this->badge( $yes, 'ok' ) : $this->badge( $no, 'medium' );
+		}
+		$rows = array(
+			__( 'Program', 'cybergate-security' ) => '' !== $maldet['binary'] ? '<code class="wpcs-path">' . esc_html( $maldet['binary'] ) . '</code>' : esc_html__( 'Not found', 'cybergate-security' ),
+		);
+		if ( '' !== $maldet['binary'] ) {
+			$rows[ __( 'Signature version', 'cybergate-security' ) ]       = '' !== $maldet['version'] ? '<code>' . esc_html( $maldet['version'] ) . '</code>' : esc_html__( 'Unknown', 'cybergate-security' );
+			$rows[ __( 'Signatures linked into ClamAV', 'cybergate-security' ) ] = $linked;
+			$rows[ __( 'Real-time monitor', 'cybergate-security' ) ]             = $maldet['monitor'] ? $this->badge( __( 'Available', 'cybergate-security' ), 'ok' ) : $this->badge( __( 'Unavailable: install inotify-tools', 'cybergate-security' ), 'medium' );
+		} elseif ( ! $maldet['supported'] ) {
+			$rows[ __( 'Note', 'cybergate-security' ) ] = esc_html__( 'maldet runs on Linux servers only.', 'cybergate-security' );
+		} else {
+			$rows[ __( 'Note', 'cybergate-security' ) ] = esc_html__( 'Optional. Adds signatures made for website malware such as PHP web shells.', 'cybergate-security' );
+		}
+		$this->engine( __( 'Linux Malware Detect (maldet)', 'cybergate-security' ), $maldet['label'], $maldet['tone'], $rows );
+		echo '</div>';
+
+		// Is it running on the server right now.
+		$states = array(
+			'ok'      => array( 'yes-alt', 'ok' ),
+			'bad'     => array( 'dismiss', 'high' ),
+			'unknown' => array( 'editor-help', 'muted' ),
+			'na'      => array( 'minus', 'muted' ),
+		);
+		echo '<h3 class="wpcs-subhead">' . esc_html__( 'On the server now', 'cybergate-security' ) . '</h3>';
+		echo '<ul class="wpcs-live">';
+		foreach ( $tools->antivirus_live() as $row ) {
+			$state = isset( $states[ $row['state'] ] ) ? $states[ $row['state'] ] : $states['unknown'];
+			echo '<li class="wpcs-live__row is-' . esc_attr( $row['state'] ) . '"><span class="dashicons dashicons-' . esc_attr( $state[0] ) . '" aria-hidden="true"></span><span class="wpcs-live__label">' . esc_html( $row['label'] ) . '</span>' . $this->badge( $row['text'], $state[1] ) . '</li>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- badge is escaped.
+		}
+		echo '</ul>';
+
+		$this->field(
+			__( 'ClamAV scanning', 'cybergate-security' ),
+			self::toggle_row( 'clamav_enabled', ! empty( $s['clamav_enabled'] ), __( 'Also scan uploads with ClamAV', 'cybergate-security' ), __( 'Uploads take a little longer. clamdscan is much faster than clamscan when the clamd service runs; with it, whole-site scans use ClamAV too.', 'cybergate-security' ) )
+		);
+		$this->field(
+			__( 'ClamAV program', 'cybergate-security' ),
+			'<input type="text" id="wpcs-clamav-binary" name="clamav_binary" value="' . esc_attr( $s['clamav_binary'] ) . '" placeholder="' . esc_attr( '' !== $clam['binary'] ? $clam['binary'] : '/usr/bin/clamdscan' ) . '" class="wpcs-mono">',
+			__( 'Leave empty to detect it automatically. Only clamscan or clamdscan binaries are accepted.', 'cybergate-security' ),
+			'wpcs-clamav-binary'
+		);
+
+		// ClamAV install guide: open while ClamAV is missing, folded away once it works.
+		$info  = Sysadmin_Tools::call( 'scanner', 'clamav_info', array(), array() );
+		$ready = in_array( $clam['state'], array( 'ready_off', 'uploads', 'uploads_scans' ), true ) && ! empty( $info['daemon'] );
+		if ( $ready ) {
+			echo '<details class="wpcs-disclosure"><summary>' . esc_html__( 'ClamAV install guide', 'cybergate-security' ) . '</summary>';
+		} else {
+			echo '<h3 class="wpcs-guide-title">' . esc_html__( 'How to install ClamAV', 'cybergate-security' ) . '</h3>';
+		}
+		Clamav_Guide::render( (string) $tools->clamav_detect(), (bool) $clam['exec'], ! empty( $info['daemon'] ) );
+		if ( $ready ) {
+			echo '</details>';
+		}
+
+		// One server script for both engines.
+		$block = Sysadmin_Tools::cgav_install_block();
+		if ( '' !== $block ) {
+			echo '<h3 class="wpcs-subhead">' . esc_html__( 'Server script (cgav)', 'cybergate-security' ) . '</h3>';
+			echo '<p class="wpcs-muted">' . esc_html__( 'One script for root that installs and checks ClamAV and Linux Malware Detect for this site. Every section prints the status before and after, and is safe to run again; nothing deletes or moves site files.', 'cybergate-security' ) . '</p>';
+			echo '<p class="wpcs-row"><a class="button" href="' . esc_url( $this->action_url( 'cgav' ) ) . '"><span class="dashicons dashicons-download" aria-hidden="true"></span>' . esc_html__( 'Download server script (cgav)', 'cybergate-security' ) . '</a></p>';
+			echo '<details class="wpcs-cmds"><summary><span class="dashicons dashicons-editor-code" aria-hidden="true"></span><span class="wpcs-cmds__show">' . esc_html__( 'Show commands', 'cybergate-security' ) . '</span><span class="wpcs-cmds__label">' . esc_html__( 'Install everything in one paste (as root)', 'cybergate-security' ) . '</span></summary><div class="wpcs-cmds__body">';
+			echo '<p class="wpcs-sub">' . esc_html__( 'Paste the whole block into an SSH session as root. It saves the script, installs the cgav command for this site and shows the status.', 'cybergate-security' ) . '</p>';
+			echo self::code( $block ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+			echo '</div></details>';
+			echo '<dl class="wpcs-cgav">';
+			foreach ( Sysadmin_Tools::cgav_commands() as $command => $what ) {
+				echo '<div><dt><code>' . esc_html( $command ) . '</code></dt><dd>' . esc_html( $what ) . '</dd></div>';
+			}
+			echo '</dl>';
+		}
+
+		// maldet by hand, moved here from Integrations.
+		echo '<h3 class="wpcs-subhead">' . esc_html__( 'Linux Malware Detect step by step', 'cybergate-security' ) . '</h3>';
+		if ( '' === $maldet['binary'] && $maldet['supported'] ) {
+			$install = Clamav_Guide::maldet_install_steps();
+			echo '<p class="wpcs-muted">' . esc_html( $install[0]['text'] ) . '</p>';
+			echo self::commands( $install[0]['code'], __( 'Install (as root)', 'cybergate-security' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
+		}
+		$no_monitor = '' !== $maldet['binary'] && false === $maldet['monitor'];
+		if ( $no_monitor ) {
+			self::notice( __( 'maldet is installed, but its real-time monitor is unavailable: install inotify-tools (step 1 below).', 'cybergate-security' ), 'warn' );
+		}
+		echo '<p class="wpcs-muted">' . esc_html__( 'Watch this site in real time, start the monitor on every boot, and scan recently changed files in the background. Run as root.', 'cybergate-security' ) . '</p>';
+		echo '<details class="wpcs-cmds"' . ( $no_monitor ? ' open' : '' ) . '><summary><span class="dashicons dashicons-editor-code" aria-hidden="true"></span><span class="wpcs-cmds__show">' . esc_html__( 'Show commands', 'cybergate-security' ) . '</span><span class="wpcs-cmds__label">' . esc_html__( 'Real-time monitor and scans', 'cybergate-security' ) . '</span></summary><div class="wpcs-cmds__body">';
+		self::render_steps( $tools->maldet_steps() );
+		echo '</div></details>';
+		$this->card_close();
+	}
+
+	/**
+	 * One engine block of the Antivirus card.
+	 *
+	 * @param string $name  Engine name.
+	 * @param string $state State label.
+	 * @param string $tone  Badge tone.
+	 * @param array  $rows  label => escaped HTML.
+	 */
+	private function engine( $name, $state, $tone, array $rows ) {
+		echo '<div class="wpcs-engine">';
+		echo '<div class="wpcs-engine__head"><strong>' . esc_html( $name ) . '</strong>' . $this->badge( $state, $tone ) . '</div>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- badge is escaped.
+		echo '<dl class="wpcs-engine__rows">';
+		foreach ( $rows as $label => $value ) {
+			echo '<div><dt>' . esc_html( $label ) . '</dt><dd>' . $value . '</dd></div>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- built from escaped parts.
+		}
+		echo '</dl></div>';
+	}
+
+	/**
+	 * Developer instructions: what needs someone with server access.
+	 *
+	 * @param array[] $items Developer_Instructions::items().
+	 */
+	private function section_developer( array $items ) {
+		$this->card_open( 'wpcs-developer', 'clipboard', __( 'Developer instructions', 'cybergate-security' ), __( 'Steps this server did not let the plugin do from the admin panel, and setup that always needs server access. Send them to your developer or host: each one has the exact commands for this server.', 'cybergate-security' ) );
+		if ( ! $items ) {
+			self::notice( __( 'Nothing needs server access right now.', 'cybergate-security' ), 'ok' );
+			$this->card_close();
+			return;
+		}
+		echo '<div class="wpcs-devbar"><span class="wpcs-devbar__count">' . esc_html(
+			/* translators: %d: number of items */
+			sprintf( _n( '%d item needs server access', '%d items need server access', count( $items ), 'cybergate-security' ), count( $items ) )
+		) . '</span>';
+		echo '<button type="button" class="button" data-wpcs-copy="#wpcs-dev-text"><span class="dashicons dashicons-admin-page" aria-hidden="true"></span>' . esc_html__( 'Copy all', 'cybergate-security' ) . '</button>';
+		echo '<a class="button" href="' . esc_url( \WPCyberSecurity\Developer_Instructions::download_url() ) . '"><span class="dashicons dashicons-download" aria-hidden="true"></span>' . esc_html__( 'Download as .txt', 'cybergate-security' ) . '</a>';
+		echo '</div>';
+		echo '<ol class="wpcs-devlist">';
+		foreach ( $items as $item ) {
+			echo '<li class="wpcs-devlist__item">';
+			echo '<div class="wpcs-devlist__head"><strong>' . esc_html( $item['title'] ) . '</strong>';
+			if ( '' !== $item['error'] ) {
+				echo $this->badge( __( 'Failed from the admin panel', 'cybergate-security' ), 'high' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in badge().
+			}
+			if ( $item['optional'] ) {
+				echo $this->badge( __( 'Optional', 'cybergate-security' ), 'muted' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in badge().
+			}
+			echo '</div>';
+			if ( '' !== $item['why'] ) {
+				echo '<p class="wpcs-sub">' . esc_html( $item['why'] ) . '</p>';
+			}
+			if ( '' !== $item['error'] ) {
+				echo '<p class="wpcs-devlist__error"><span class="dashicons dashicons-warning" aria-hidden="true"></span>' . esc_html(
+					sprintf(
+						/* translators: 1: date and time, 2: error message */
+						__( 'Tried %1$s: %2$s', 'cybergate-security' ),
+						Admin::ago( (int) $item['at'] ),
+						$item['error']
+					)
+				) . '</p>';
+			}
+			self::render_steps( $item['steps'] );
+			echo '</li>';
+		}
+		echo '</ol>';
+		echo '<textarea id="wpcs-dev-text" class="wpcs-offscreen" readonly tabindex="-1" aria-hidden="true">' . esc_textarea( \WPCyberSecurity\Developer_Instructions::as_text( $items ) ) . '</textarea>';
+		$this->card_close();
 	}
 
 	/**
@@ -1004,7 +1360,7 @@ class Settings_Page {
 			$snippet = $tools->data_dir_snippet();
 			$this->field(
 				__( 'Move it outside the web root', 'cybergate-security' ),
-				self::code( $snippet['shell'], __( 'Shell (as root)', 'cybergate-security' ) ) . self::code( $snippet['config'], 'wp-config.php' ),
+				self::commands( $snippet['shell'], __( 'Shell (as root)', 'cybergate-security' ), '', true ) . self::code( $snippet['config'], 'wp-config.php' ),
 				__( 'Run the commands, then add the line to wp-config.php above "That\'s all, stop editing!". The plugin switches to the new folder on the next page load.', 'cybergate-security' )
 			);
 		}
@@ -1195,11 +1551,16 @@ class Settings_Page {
 	 * @param array          $s     Settings.
 	 * @param Sysadmin_Tools $tools Tools.
 	 */
-	private function section_cron( array $s, Sysadmin_Tools $tools ) {
+	private function section_cron( array $s, Sysadmin_Tools $tools, array $by_id = array() ) {
 		$this->card_open( 'wpcs-cron', 'clock', __( 'Real cron', 'cybergate-security' ), __( 'WordPress runs scheduled tasks only when someone visits the site. A cron job on the server makes scans run on time and lets long scans finish without a browser.', 'cybergate-security' ) );
 		$disabled = defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON;
 		$next     = wp_next_scheduled( 'wpcybersec_scheduled_scan' );
+		$last_cli = (int) get_option( 'wpcybersec_cli_cron_at', 0 );
 		$state    = $disabled ? $this->badge( __( 'WP-Cron on page visits is off', 'cybergate-security' ), 'ok' ) : $this->badge( __( 'WP-Cron runs on page visits', 'cybergate-security' ), 'muted' );
+		if ( $last_cli ) {
+			/* translators: %s: time ago */
+			$state .= ' ' . $this->badge( sprintf( __( 'Real cron last ran %s', 'cybergate-security' ), Admin::ago( $last_cli ) ), $last_cli > time() - 2 * HOUR_IN_SECONDS ? 'ok' : 'medium' );
+		}
 		if ( $next ) {
 			$state .= ' <span class="wpcs-muted">' . esc_html(
 				/* translators: %s: date and time */
@@ -1209,8 +1570,12 @@ class Settings_Page {
 			$state .= ' <span class="wpcs-muted">' . esc_html__( 'No scan is scheduled yet.', 'cybergate-security' ) . '</span>';
 		}
 		echo '<div class="wpcs-inline-status wpcs-card__lead">' . $state . '</div>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- built from escaped parts.
-		foreach ( $tools->cron_snippets() as $snippet ) {
-			echo self::code( $snippet['code'], $snippet['label'] . ' - ' . $snippet['file'], $snippet['help'] ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+		// The first variant opens when no real cron job runs yet, or scheduled tasks are late.
+		$missing = $last_cli < time() - 2 * HOUR_IN_SECONDS || self::is_open( self::check_status( $by_id, 'wp_cron' ) );
+		foreach ( $tools->cron_snippets() as $i => $snippet ) {
+			echo '<div class="wpcs-cmd-block"><strong class="wpcs-cmd-block__title">' . esc_html( $snippet['label'] ) . '</strong>';
+			echo self::commands( $snippet['code'], $snippet['file'], $snippet['help'], 0 === $i && $missing ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
+			echo '</div>';
 		}
 		$this->card_close();
 	}
@@ -1240,23 +1605,24 @@ class Settings_Page {
 
 		if ( ! $gate || ! method_exists( $gate, 'unlocked_until' ) ) {
 			$this->field( __( 'Current state', 'cybergate-security' ), '<span class="wpcs-muted">' . esc_html__( 'The install gate module is not available.', 'cybergate-security' ) . '</span>' );
+		} elseif ( empty( $s['freeze_mods'] ) ) {
+			$html = '<div class="wpcs-row">' . $this->badge( __( 'Off - changes allowed', 'cybergate-security' ), 'muted' ) . '</div>';
+			$this->field( __( 'Current state', 'cybergate-security' ), $html, __( 'Plugins, themes and core can be changed as usual. Turn on Freeze mode and save to lock them.', 'cybergate-security' ) );
 		} else {
-			$until = (int) Sysadmin_Tools::call( 'install_gate', 'unlocked_until', array(), 0 );
-			if ( $until > time() ) {
-				/* translators: %s: time */
-				$text = sprintf( __( 'Unlocked until %s', 'cybergate-security' ), wp_date( get_option( 'time_format' ), $until ) );
-				$type = 'medium';
-			} else {
-				$text = __( 'Locked', 'cybergate-security' );
-				$type = 'ok';
-			}
+			$until    = (int) Sysadmin_Tools::call( 'install_gate', 'unlocked_until', array(), 0 );
+			$unlocked = $until > time();
+			$minutes  = max( 1, (int) $s['unlock_minutes'] );
+			/* translators: %s: time */
+			$text  = $unlocked ? sprintf( __( 'Unlocked until %s', 'cybergate-security' ), wp_date( get_option( 'time_format' ), $until ) ) : __( 'Locked', 'cybergate-security' );
 			$html  = '<div class="wpcs-row">';
-			$html .= '<span class="wpcs-badge wpcs-badge--' . esc_attr( $type ) . '" data-wpcs-lock-state>' . esc_html( $text ) . '</span>';
-			$html .= '<button type="button" class="button" data-wpcs-unlock data-minutes-input="#wpcs-unlock-minutes"><span class="dashicons dashicons-unlock" aria-hidden="true"></span>' . esc_html__( 'Unlock now', 'cybergate-security' ) . '</button>';
-			$html .= '<button type="button" class="button" data-wpcs-lock><span class="dashicons dashicons-lock" aria-hidden="true"></span>' . esc_html__( 'Lock now', 'cybergate-security' ) . '</button>';
+			$html .= '<span class="wpcs-badge wpcs-badge--' . ( $unlocked ? 'medium' : 'ok' ) . '" data-wpcs-lock-state>' . esc_html( $text ) . '</span>';
+			$html .= '<button type="button" class="button" data-wpcs-unlock data-minutes-input="#wpcs-unlock-minutes"' . ( $unlocked ? ' hidden' : '' ) . '><span class="dashicons dashicons-unlock" aria-hidden="true"></span><span data-wpcs-unlock-label>' . esc_html(
+				/* translators: %s: number of minutes */
+				sprintf( _n( 'Unlock for %s minute', 'Unlock for %s minutes', $minutes, 'cybergate-security' ), number_format_i18n( $minutes ) )
+			) . '</span></button>';
+			$html .= '<button type="button" class="button" data-wpcs-lock' . ( $unlocked ? '' : ' hidden' ) . '><span class="dashicons dashicons-lock" aria-hidden="true"></span>' . esc_html__( 'Lock now', 'cybergate-security' ) . '</button>';
 			$html .= '</div>';
-			$help = empty( $s['freeze_mods'] ) ? __( 'Freeze mode is off, so changes are allowed anyway. Turn it on and save to use the lock.', 'cybergate-security' ) : '';
-			$this->field( __( 'Current state', 'cybergate-security' ), $html, $help );
+			$this->field( __( 'Current state', 'cybergate-security' ), $html );
 		}
 		$this->card_close();
 	}
@@ -1265,7 +1631,7 @@ class Settings_Page {
 	 * @param array          $s     Settings.
 	 * @param Sysadmin_Tools $tools Tools.
 	 */
-	private function section_hardening( array $s, Sysadmin_Tools $tools ) {
+	private function section_hardening( array $s, Sysadmin_Tools $tools, array $by_id = array() ) {
 		unset( $s );
 		$status = $tools->uploads_htaccess_status();
 		$server = Sysadmin_Tools::server_type();
@@ -1281,13 +1647,16 @@ class Settings_Page {
 		echo '<a class="button" href="' . esc_url( $this->action_url( 'write_htaccess' ) ) . '"><span class="dashicons dashicons-media-text" aria-hidden="true"></span>' . esc_html( 'ours' === $status ? __( 'Refresh uploads/.htaccess rules', 'cybergate-security' ) : __( 'Write uploads/.htaccess for me', 'cybergate-security' ) ) . '</a>';
 		echo '<span class="wpcs-muted wpcs-inline-help">' . esc_html__( 'Adds the block between markers and keeps everything else. If the server answers with an error afterwards, the change is undone.', 'cybergate-security' ) . '</span>';
 		echo '</div>';
-		echo self::code( $tools->apache_uploads_rules(), 'wp-content/uploads/.htaccess' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+		echo self::commands( $tools->apache_uploads_rules(), 'wp-content/uploads/.htaccess', '', 'none' === $status && 'nginx' !== $server ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
 
 		echo '<h3 class="wpcs-subhead">nginx' . ( 'nginx' === $server ? ' ' . $this->badge( __( 'This server', 'cybergate-security' ), 'info' ) : '' ) . '</h3>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- badge is escaped.
-		echo self::code( $tools->nginx_rules(), __( 'Server block', 'cybergate-security' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+		$nginx_open = 'nginx' === $server && ( self::is_open( self::check_status( $by_id, 'uploads_php' ) ) || self::is_open( self::check_status( $by_id, 'quarantine_web' ) ) );
+		echo self::commands( $tools->nginx_rules(), __( 'Server block', 'cybergate-security' ), '', $nginx_open ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
 
 		echo '<h3 class="wpcs-subhead">' . esc_html__( 'File permissions', 'cybergate-security' ) . '</h3>';
-		echo self::code( $tools->permission_commands(), __( 'Shell', 'cybergate-security' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+		$perms_open = self::is_open( self::check_status( $by_id, 'wp_config_perms' ) ) || 'fail' === self::check_status( $by_id, 'data_dir' );
+		echo '<p class="wpcs-muted">' . esc_html__( 'Safe owners and permissions for the WordPress folder, wp-config.php and the data folder.', 'cybergate-security' ) . '</p>';
+		echo self::commands( $tools->permission_commands(), __( 'Shell (as root)', 'cybergate-security' ), '', $perms_open ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
 		echo '<p class="wpcs-muted">';
 		printf(
 			/* translators: %s: link to the environment check */
@@ -1309,49 +1678,20 @@ class Settings_Page {
 		echo '<h3 class="wpcs-subhead">' . esc_html__( 'fapolicyd (RHEL, Rocky, Alma, Fedora)', 'cybergate-security' ) . '</h3>';
 		echo '<p>' . esc_html__( 'Let PHP open only the PHP files you trust. The trust list contains every trusted file with its size and SHA-256, taken from the last baseline and approvals.', 'cybergate-security' ) . '</p>';
 		echo '<div class="wpcs-row wpcs-card__actions"><a class="button" href="' . esc_url( $this->action_url( 'export', array( 'type' => 'fapolicyd' ) ) ) . '"><span class="dashicons dashicons-download" aria-hidden="true"></span>' . esc_html__( 'Download trust list', 'cybergate-security' ) . '</a></div>';
-		echo self::code( $tools->fapolicyd_rules(), __( 'Rules', 'cybergate-security' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+		echo self::commands( $tools->fapolicyd_rules(), __( 'Rules', 'cybergate-security' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
 
 		echo '<h3 class="wpcs-subhead">' . esc_html__( 'inotify watcher', 'cybergate-security' ) . '</h3>';
 		echo '<p>' . esc_html__( 'Starts a scan seconds after files change on disk, instead of waiting for the next scheduled scan.', 'cybergate-security' ) . '</p>';
-		echo self::code( $tools->inotify_script(), '/usr/local/bin/wpcybersec-watch.sh' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+		echo self::commands( $tools->inotify_script(), '/usr/local/bin/wpcybersec-watch.sh' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
 
 		echo '<h3 class="wpcs-subhead">' . esc_html__( 'Linux Malware Detect (maldet)', 'cybergate-security' ) . '</h3>';
-		echo self::code( $tools->maldet_snippet(), __( 'Shell (as root)', 'cybergate-security' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
-		$this->card_close();
-	}
-
-	/**
-	 * @param array          $s     Settings.
-	 * @param Sysadmin_Tools $tools Tools.
-	 */
-	private function section_clamav( array $s, Sysadmin_Tools $tools ) {
-		$detected = $tools->clamav_detect();
-		$exec     = Sysadmin_Tools::function_available( 'exec' ) || Sysadmin_Tools::function_available( 'proc_open' );
-		$ready    = Sysadmin_Tools::call( 'scanner', 'clamav_available', array(), null );
-
-		$this->card_open( 'wpcs-clamav', 'sos', __( 'ClamAV', 'cybergate-security' ), __( 'A second opinion on uploads from the open source ClamAV engine, next to the plugin\'s own signatures.', 'cybergate-security' ) );
-		$this->field(
-			__( 'ClamAV scanning', 'cybergate-security' ),
-			self::toggle_row( 'clamav_enabled', ! empty( $s['clamav_enabled'] ), __( 'Also scan uploads with ClamAV', 'cybergate-security' ), __( 'Uploads take a little longer. clamdscan is much faster than clamscan when the clamd service runs.', 'cybergate-security' ) )
+		echo '<p class="wpcs-muted">';
+		printf(
+			/* translators: %s: link to the Antivirus engines section */
+			esc_html__( 'Its status and commands are in %s.', 'cybergate-security' ),
+			'<a href="' . esc_url( Sysadmin_Tools::settings_url( 'advanced', array(), 'wpcs-antivirus' ) ) . '" data-wpcs-goto="antivirus">' . esc_html__( 'Antivirus engines', 'cybergate-security' ) . '</a>'
 		);
-		$this->field(
-			__( 'Binary', 'cybergate-security' ),
-			'<input type="text" id="wpcs-clamav-binary" name="clamav_binary" value="' . esc_attr( $s['clamav_binary'] ) . '" placeholder="' . esc_attr( $detected ? $detected : '/usr/bin/clamdscan' ) . '" class="wpcs-mono">',
-			__( 'Leave empty to detect it automatically. Only clamscan or clamdscan binaries are accepted.', 'cybergate-security' ),
-			'wpcs-clamav-binary'
-		);
-		$badges  = $exec ? $this->badge( __( 'Command execution available', 'cybergate-security' ), 'ok' ) : $this->badge( __( 'exec() and proc_open() disabled', 'cybergate-security' ), 'high' );
-		/* translators: %s: binary path */
-		$badges .= ' ' . ( $detected ? $this->badge( sprintf( __( 'Found: %s', 'cybergate-security' ), $detected ), 'ok' ) : $this->badge( __( 'ClamAV not found', 'cybergate-security' ), 'muted' ) );
-		if ( null !== $ready ) {
-			$badges .= ' ' . ( $ready ? $this->badge( __( 'Ready to scan', 'cybergate-security' ), 'ok' ) : $this->badge( __( 'Not in use', 'cybergate-security' ), 'muted' ) );
-		}
-		$this->field( __( 'Status', 'cybergate-security' ), '<div class="wpcs-badges">' . $badges . '</div>' );
-
-		// Step-by-step install guide with copyable commands.
-		$info = Sysadmin_Tools::call( 'scanner', 'clamav_info', array(), array() );
-		echo '<h3 class="wpcs-guide-title">' . esc_html__( 'How to install ClamAV', 'cybergate-security' ) . '</h3>';
-		Clamav_Guide::render( (string) $detected, (bool) $exec, ! empty( $info['daemon'] ) );
+		echo '</p>';
 		$this->card_close();
 	}
 

@@ -50,7 +50,7 @@ class Sysadmin_Tools {
 		add_action( 'in_admin_header', array( $this, 'quiet_wizard_notices' ), 1 );
 		add_filter( 'admin_body_class', array( $this, 'body_class' ) );
 
-		$handlers = array( 'wizard', 'save_settings', 'guard', 'export', 'import', 'write_htaccess', 'test_email', 'snapshots_clear' );
+		$handlers = array( 'wizard', 'save_settings', 'guard', 'export', 'import', 'write_htaccess', 'test_email', 'snapshots_clear', 'cgav' );
 		foreach ( $handlers as $handler ) {
 			add_action( 'admin_post_wpcybersec_' . $handler, array( $this, 'handle_' . $handler ) );
 		}
@@ -156,6 +156,10 @@ class Sysadmin_Tools {
 					/* translators: %s: time */
 					'unlockedUntil'  => __( 'Unlocked until %s', 'cybergate-security' ),
 					'locked'         => __( 'Locked', 'cybergate-security' ),
+					/* translators: %s: number of minutes */
+					'unlockFor'      => __( 'Unlock for %s minutes', 'cybergate-security' ),
+					/* translators: %s: number of minutes (always 1) */
+					'unlockFor1'     => __( 'Unlock for %s minute', 'cybergate-security' ),
 					'unlockedToast'  => __( 'Changes are allowed for a few minutes.', 'cybergate-security' ),
 					'lockedToast'    => __( 'Locked again.', 'cybergate-security' ),
 					/* translators: %s: protection level name */
@@ -281,6 +285,10 @@ class Sysadmin_Tools {
 	 * @return string
 	 */
 	public static function settings_url( $tab = 'general', array $args = array(), $hash = '' ) {
+		// Advanced is split into sections shown one at a time: open the one the fragment points to.
+		if ( 'advanced' === $tab && ! isset( $args['section'] ) && 0 === strpos( (string) $hash, 'wpcs-' ) ) {
+			$args['section'] = substr( (string) $hash, 5 );
+		}
 		$url = add_query_arg( array_merge( array( 'page' => self::SETTINGS_PAGE, 'tab' => $tab ), $args ), admin_url( 'admin.php' ) );
 		return $url . ( $hash ? '#' . $hash : '' );
 	}
@@ -842,7 +850,7 @@ class Sysadmin_Tools {
 
 		$settings = self::service( 'settings' );
 		if ( $clam && self::function_available( 'exec' ) && $settings && ! $settings->get( 'clamav_enabled', false ) ) {
-			$check['fix'] = __( 'Turn on ClamAV in Settings > Advanced for a second opinion on uploads.', 'cybergate-security' );
+			$check['fix'] = __( 'Turn on ClamAV in Settings > Advanced > Antivirus engines for a second opinion on uploads.', 'cybergate-security' );
 		} elseif ( ! $clam || '' === $maldet ) {
 			$check['fix'] = __( 'Optional. ClamAV and Linux Malware Detect know many more existing infections (web shells, phishing kits, infected uploads) and are a good second opinion, but they do not block attacks. With root access (VPS or dedicated server): install ClamAV and Linux Malware Detect (maldet). Without root (shared hosting): run the malware scanner of your hosting panel, for example cPanel Virus Scanner or Imunify360.', 'cybergate-security' );
 		}
@@ -850,17 +858,136 @@ class Sysadmin_Tools {
 	}
 
 	/**
-	 * Linux Malware Detect binary when installed in a standard place.
+	 * Linux Malware Detect binary: a standard install place, or "maldet" in PATH.
 	 *
 	 * @return string Path, '' when not found.
 	 */
-	private static function maldet_detect() {
-		foreach ( array( '/usr/local/sbin/maldet', '/usr/local/maldetect/maldet', '/usr/sbin/maldet', '/usr/bin/maldet' ) as $bin ) {
+	public static function maldet_detect() {
+		$candidates = array( '/usr/local/maldetect/maldet', '/usr/local/sbin/maldet', '/usr/sbin/maldet', '/usr/bin/maldet', '/usr/local/bin/maldet' );
+		$path       = (string) getenv( 'PATH' );
+		foreach ( '' !== $path ? explode( PATH_SEPARATOR, $path ) : array() as $dir ) {
+			$dir = trim( $dir );
+			if ( '' !== $dir && '/' === $dir[0] ) {
+				$candidates[] = rtrim( $dir, '/' ) . '/maldet';
+			}
+		}
+		foreach ( array_unique( $candidates ) as $bin ) {
 			if ( @is_file( $bin ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-				return $bin;
+				return wp_normalize_path( $bin );
 			}
 		}
 		return '';
+	}
+
+	/**
+	 * Status of the antivirus engines for the settings card, the Dashboard
+	 * and the wizard.
+	 *
+	 * clamav.state:
+	 *   missing        no ClamAV binary found
+	 *   blocked        installed, but PHP may not run programs
+	 *   ready_off      ready to scan, "Also scan uploads with ClamAV" is off
+	 *   uploads        scans uploads (clamscan only: whole-site scans skip it)
+	 *   uploads_scans  scans uploads and whole-site scans (clamd running)
+	 *
+	 * @return array { clamav: { state, label, tone, binary, exec, daemon, enabled }, maldet: { supported, binary, version, linked (bool|null), monitor (inotifywait found; null without maldet), label, tone } }
+	 */
+	public function antivirus_status() {
+		$binary   = $this->clamav_detect();
+		$exec     = self::function_available( 'exec' ) || self::function_available( 'proc_open' );
+		$ready    = (bool) self::call( 'scanner', 'clamav_available', array(), false );
+		$info     = self::call( 'scanner', 'clamav_info', array(), array() );
+		$daemon   = $ready && ! empty( $info['daemon'] );
+		$settings = self::service( 'settings' );
+		$enabled  = $settings ? (bool) $settings->get( 'clamav_enabled', false ) : false;
+
+		if ( '' === $binary && ! $ready ) {
+			$state = 'missing';
+			$label = __( 'Not installed', 'cybergate-security' );
+			$tone  = 'muted';
+		} elseif ( ! $ready ) {
+			$state = 'blocked';
+			$label = $exec ? __( 'Installed, cannot run', 'cybergate-security' ) : __( 'Installed, PHP cannot run it', 'cybergate-security' );
+			$tone  = 'medium';
+		} elseif ( ! $enabled ) {
+			$state = 'ready_off';
+			$label = __( 'Ready, not in use', 'cybergate-security' );
+			$tone  = 'medium';
+		} elseif ( $daemon ) {
+			$state = 'uploads_scans';
+			$label = __( 'In use for uploads and scans', 'cybergate-security' );
+			$tone  = 'ok';
+		} else {
+			$state = 'uploads';
+			$label = __( 'In use for uploads', 'cybergate-security' );
+			$tone  = 'ok';
+		}
+
+		$maldet    = self::maldet_detect();
+		$supported = 'Linux' === PHP_OS_FAMILY;
+		$version   = '';
+		$linked    = null;
+		if ( '' !== $maldet ) {
+			$real = @realpath( $maldet ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$home = ( $real && @is_dir( dirname( $real ) . '/sigs' ) ) ? dirname( $real ) : '/usr/local/maldetect'; // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$file = $home . '/sigs/maldet.sigs.ver';
+			if ( @is_readable( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				$raw     = (string) @file_get_contents( $file, false, null, 0, 64 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+				$version = preg_replace( '/[^0-9A-Za-z._-]/', '', (string) strtok( $raw . "\n", "\n" ) );
+			}
+			// maldet copies its signatures (rfxn.*) into ClamAV's database folder when it is linked.
+			$seen = false;
+			foreach ( array( '/var/lib/clamav', '/var/clamav', '/usr/local/share/clamav', '/usr/share/clamav', '/usr/local/var/lib/clamav', '/opt/homebrew/var/lib/clamav' ) as $db ) {
+				if ( ! @is_dir( $db ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					continue;
+				}
+				$seen = true;
+				foreach ( array( 'rfxn.ndb', 'rfxn.hdb', 'rfxn.yara' ) as $sig ) {
+					if ( @is_file( $db . '/' . $sig ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+						$linked = true;
+						break 2;
+					}
+				}
+			}
+			if ( null === $linked && $seen ) {
+				$linked = false;
+			}
+		}
+		$monitor = '' !== $maldet ? self::inotifywait_installed() : null;
+		if ( '' !== $maldet && ! $monitor ) {
+			$m_label = __( 'Installed, real-time monitor unavailable', 'cybergate-security' );
+			$m_tone  = 'medium';
+		} elseif ( '' !== $maldet ) {
+			$m_label = __( 'Installed', 'cybergate-security' );
+			$m_tone  = 'ok';
+		} elseif ( $supported ) {
+			$m_label = __( 'Not installed', 'cybergate-security' );
+			$m_tone  = 'muted';
+		} else {
+			$m_label = __( 'Linux only', 'cybergate-security' );
+			$m_tone  = 'muted';
+		}
+
+		return array(
+			'clamav' => array(
+				'state'   => $state,
+				'label'   => $label,
+				'tone'    => $tone,
+				'binary'  => '' !== $binary ? $binary : ( isset( $info['binary'] ) ? (string) $info['binary'] : '' ),
+				'exec'    => $exec,
+				'daemon'  => $daemon,
+				'enabled' => $enabled,
+			),
+			'maldet' => array(
+				'supported' => $supported,
+				'binary'    => $maldet,
+				'version'   => $version,
+				'linked'    => $linked,
+				'monitor'   => $monitor,
+				'label'     => $m_label,
+				'tone'      => $m_tone,
+			),
+		);
 	}
 
 	/**
@@ -1751,20 +1878,332 @@ class Sysadmin_Tools {
 	}
 
 	/**
-	 * Linux Malware Detect (maldet) commands for this site.
+	 * Linux Malware Detect (maldet) steps for this site: inotify-tools first
+	 * (maldet --monitor stops with "could not find inotifywait command"
+	 * without it), then the monitored path, the monitor itself, more inotify
+	 * watches for big sites, start on boot, and a background scan. The package
+	 * commands of the detected server family come first.
 	 *
-	 * @return string
+	 * @return array[] Each { text, code }.
 	 */
-	public function maldet_snippet() {
-		$root = self::shell_arg( rtrim( Paths::scan_root(), '/' ) );
-		return '# ' . __( 'Linux Malware Detect (maldet) as a second scanner. Install it from rfxn.com first.', 'cybergate-security' ) . "\n"
-			. '# ' . __( 'Scan files changed in the last 2 days, in the background:', 'cybergate-security' ) . "\n"
-			. "maldet -b -r {$root} 2\n\n"
-			. '# ' . __( 'Watch the site in real time (inotify monitor mode):', 'cybergate-security' ) . "\n"
-			. "echo {$root} >> /usr/local/maldetect/monitor_paths\n"
-			. "maldet --monitor /usr/local/maldetect/monitor_paths\n\n"
-			. '# ' . __( 'Use ClamAV signatures inside maldet: set scan_clamscan="1" in /usr/local/maldetect/conf.maldet', 'cybergate-security' ) . "\n"
-			. '# ' . __( 'Keep maldet quarantine off (quarantine_hits="0") and let CyberGate Security decide, or both will move files.', 'cybergate-security' );
+	public function maldet_steps() {
+		$root     = rtrim( Paths::scan_root(), '/' );
+		$path     = self::shell_arg( $root );
+		$list     = '/usr/local/maldetect/monitor_paths';
+		$platform = class_exists( '\WPCyberSecurity\Admin\Clamav_Guide' ) ? Admin\Clamav_Guide::platform() : 'other';
+		$apt      = 'apt-get install -y inotify-tools';
+		$dnf      = 'dnf install -y epel-release && dnf install -y inotify-tools';
+		if ( 'rhel' === $platform ) {
+			$install = $dnf . "\n# Debian or Ubuntu: " . $apt;
+		} else {
+			$install = $apt . "\n# AlmaLinux, Rocky, CentOS or CloudLinux: " . $dnf;
+		}
+		$mode = 'MONITOR_MODE="' . $list . '"';
+		$boot = array();
+		foreach ( 'rhel' === $platform ? array( '/etc/sysconfig/maldet', '/etc/default/maldet' ) : array( '/etc/default/maldet', '/etc/sysconfig/maldet' ) as $i => $file ) {
+			$lines = array(
+				"sed -i 's|^MONITOR_MODE=.*|" . $mode . "|' " . $file,
+				"grep -q '^MONITOR_MODE=' " . $file . ' || echo ' . self::shell_arg( $mode ) . ' >> ' . $file,
+			);
+			if ( 0 === $i ) {
+				$boot = array_merge( $boot, $lines );
+			} else {
+				/* translators: %s: file path */
+				$boot[] = '# ' . sprintf( __( 'On the other server family the file is %s:', 'cybergate-security' ), $file );
+				foreach ( $lines as $line ) {
+					$boot[] = '# ' . $line;
+				}
+			}
+		}
+		$boot[] = 'systemctl enable --now maldet';
+
+		return array(
+			array(
+				'text' => __( 'Install inotify-tools: the real-time monitor needs its inotifywait command (without it, maldet --monitor stops with "could not find inotifywait command").', 'cybergate-security' ),
+				'code' => $install,
+			),
+			array(
+				'text' => __( 'Add this site to the monitored folders (safe to run again):', 'cybergate-security' ),
+				'code' => 'grep -qxF ' . $path . ' ' . $list . ' || echo ' . $path . ' >> ' . $list,
+			),
+			array(
+				'text' => __( 'Start the monitor, then check its log:', 'cybergate-security' ),
+				'code' => 'maldet --monitor ' . $list . "\ntail -n 20 /usr/local/maldetect/logs/inotify_log",
+			),
+			array(
+				'text' => __( 'Big sites: allow more inotify watches, now and after a reboot:', 'cybergate-security' ),
+				'code' => "sysctl -w fs.inotify.max_user_watches=524288\ngrep -q '^fs.inotify.max_user_watches' /etc/sysctl.conf || echo 'fs.inotify.max_user_watches=524288' >> /etc/sysctl.conf",
+			),
+			array(
+				'text' => __( 'Start the monitor on every boot:', 'cybergate-security' ),
+				'code' => implode( "\n", $boot ),
+			),
+			array(
+				'text' => __( 'Scan the files of this site changed in the last 2 days, in the background:', 'cybergate-security' ),
+				'code' => 'maldet -b -r ' . $path . ' 2',
+			),
+			array( 'text' => __( 'Keep maldet\'s own quarantine off (quarantine_hits="0" in /usr/local/maldetect/conf.maldet) and let CyberGate Security decide, or both will move files.', 'cybergate-security' ) ),
+		);
+	}
+
+	/* ------------------------------------------------------------------ */
+	/* cgav server script                                                  */
+	/* ------------------------------------------------------------------ */
+
+	/**
+	 * The cgav server script (ClamAV + maldet helper) with this site filled in.
+	 * Shipped as includes/admin/cgav-script.txt (a .sh file would be flagged as
+	 * an application file); SITE="${SITE:-<this site>}" goes right after the
+	 * shebang, so /etc/cgav.conf still wins once self-install wrote it.
+	 *
+	 * @return string '' when the template is missing.
+	 */
+	public static function cgav_script() {
+		$file = WPCYBERSEC_DIR . 'includes/admin/cgav-script.txt';
+		$code = @is_readable( $file ) ? (string) @file_get_contents( $file ) : ''; // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- the plugin's own template.
+		if ( '' === $code ) {
+			return '';
+		}
+		$code = str_replace( "\r\n", "\n", $code );
+		$site = untrailingslashit( wp_normalize_path( ABSPATH ) );
+		// Inside double quotes only \ " $ and ` are special.
+		$line = 'SITE="${SITE:-' . addcslashes( $site, '\\"$`' ) . '}"';
+		$pos  = strpos( $code, "\n" );
+		if ( 0 === strpos( $code, '#!' ) && false !== $pos ) {
+			return substr( $code, 0, $pos + 1 ) . $line . "\n" . substr( $code, $pos + 1 );
+		}
+		return $line . "\n" . $code;
+	}
+
+	/**
+	 * One copy-paste block that writes the script, installs it and shows the status.
+	 *
+	 * @return string '' when the template is missing.
+	 */
+	public static function cgav_install_block() {
+		$script = self::cgav_script();
+		if ( '' === $script ) {
+			return '';
+		}
+		return "cat > /root/cgav.sh <<'CGAV_EOF'\n" . rtrim( $script, "\n" ) . "\nCGAV_EOF\n"
+			. 'bash /root/cgav.sh self-install ' . self::shell_arg( untrailingslashit( wp_normalize_path( ABSPATH ) ) ) . "\n"
+			. 'cgav status';
+	}
+
+	/**
+	 * Sections of the cgav script, for the short list next to the block.
+	 *
+	 * @return array command => what it does
+	 */
+	public static function cgav_commands() {
+		return array(
+			'cgav status'                     => __( 'What is installed and running. Run it before and after anything.', 'cybergate-security' ),
+			'cgav install-clamav'             => __( 'Install ClamAV, download signatures, start the scanner service.', 'cybergate-security' ),
+			'cgav install-maldet'             => __( 'Install Linux Malware Detect and inotify-tools, watch this site in real time, start on boot, report-only.', 'cybergate-security' ),
+			'cgav monitor start|stop|status'  => __( 'Control the maldet real-time monitor.', 'cybergate-security' ),
+			'cgav test'                       => __( 'Harmless EICAR test file: both engines must report it.', 'cybergate-security' ),
+			'cgav update'                     => __( 'Update the ClamAV and maldet signatures.', 'cybergate-security' ),
+			'cgav scan'                       => __( 'Scan the whole site now with maldet (and ClamAV when present).', 'cybergate-security' ),
+			'cgav logs'                       => __( 'Last lines of the maldet monitor and event logs.', 'cybergate-security' ),
+		);
+	}
+
+	/**
+	 * admin-post: downloads the cgav script as cgav.sh.
+	 */
+	public function handle_cgav() {
+		$this->check_request( 'wpcybersec_cgav' );
+		$script = self::cgav_script();
+		if ( '' === $script ) {
+			self::flash( __( 'The server script is missing from this installation of the plugin.', 'cybergate-security' ), 'bad' );
+			$this->redirect( self::settings_url( 'advanced', array(), 'wpcs-antivirus' ) );
+		}
+		nocache_headers();
+		header( 'Content-Type: text/x-shellscript; charset=utf-8' );
+		header( 'Content-Disposition: attachment; filename="cgav.sh"' );
+		header( 'X-Content-Type-Options: nosniff' );
+		echo $script; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- shell script download.
+		exit;
+	}
+
+	/**
+	 * Whether open_basedir lets PHP look at a path (true when it is not set).
+	 *
+	 * @param string $path Absolute path.
+	 * @return bool
+	 */
+	private static function path_allowed( $path ) {
+		$limit = trim( (string) ini_get( 'open_basedir' ) );
+		if ( '' === $limit ) {
+			return true;
+		}
+		foreach ( explode( PATH_SEPARATOR, $limit ) as $dir ) {
+			$dir = rtrim( trim( $dir ), '/' );
+			if ( '' !== $dir && ( $path === $dir || 0 === strpos( $path, $dir . '/' ) ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Runs a fixed command when exec() is allowed.
+	 *
+	 * @param string $cmd Command (already escaped).
+	 * @return int|null Exit code, null when commands cannot run here.
+	 */
+	private static function exit_code( $cmd ) {
+		if ( ! self::function_available( 'exec' ) ) {
+			return null;
+		}
+		$out  = array();
+		$code = 127;
+		@exec( $cmd . ' >/dev/null 2>&1', $out, $code ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		return (int) $code;
+	}
+
+	/**
+	 * "Is it running on the server" rows for the Antivirus card. Never fatal:
+	 * a check that the hosting does not let PHP do (open_basedir, no exec,
+	 * no /proc) is reported as unknown.
+	 *
+	 * @return array[] Each { label, state ok|bad|unknown|na, text }.
+	 */
+	public function antivirus_live() {
+		$hidden = __( 'Unknown (hosting hides it)', 'cybergate-security' );
+		$av     = $this->antivirus_status();
+		$rows   = array();
+		$base   = '/usr/local/maldetect';
+		$site   = untrailingslashit( wp_normalize_path( ABSPATH ) );
+
+		// ClamAV daemon (the same check the scanner uses).
+		if ( 'missing' === $av['clamav']['state'] ) {
+			$rows[] = array( __( 'ClamAV scanner service (clamd)', 'cybergate-security' ), 'na', __( 'ClamAV is not installed', 'cybergate-security' ) );
+		} elseif ( ! $av['clamav']['exec'] ) {
+			$rows[] = array( __( 'ClamAV scanner service (clamd)', 'cybergate-security' ), 'unknown', $hidden );
+		} else {
+			$rows[] = array( __( 'ClamAV scanner service (clamd)', 'cybergate-security' ), $av['clamav']['daemon'] ? 'ok' : 'bad', $av['clamav']['daemon'] ? __( 'Reachable', 'cybergate-security' ) : __( 'Not running', 'cybergate-security' ) );
+		}
+
+		// maldet installed, with its signature version.
+		$bin = $base . '/maldet';
+		if ( ! self::path_allowed( $bin ) ) {
+			$installed = null;
+			$rows[]    = array( __( 'Linux Malware Detect', 'cybergate-security' ), 'unknown', $hidden );
+		} else {
+			$installed = @is_executable( $bin ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$text      = $installed ? __( 'Installed', 'cybergate-security' ) : __( 'Not installed', 'cybergate-security' );
+			$ver       = $base . '/sigs/maldet.sigs.ver';
+			if ( $installed && @is_readable( $ver ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				$raw = preg_replace( '/[^0-9A-Za-z._-]/', '', (string) strtok( (string) @file_get_contents( $ver, false, null, 0, 64 ) . "\n", "\n" ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+				if ( '' !== $raw ) {
+					/* translators: %s: signature version */
+					$text .= ', ' . sprintf( __( 'signatures %s', 'cybergate-security' ), $raw );
+				}
+			}
+			$state = $installed ? 'ok' : ( 'Linux' === PHP_OS_FAMILY ? 'bad' : 'na' );
+			$text  = ( ! $installed && 'na' === $state ) ? __( 'Not installed (Linux only)', 'cybergate-security' ) : $text;
+			$rows[] = array( __( 'Linux Malware Detect', 'cybergate-security' ), $state, $text );
+		}
+
+		// Real-time monitor: the pid file and /proc, else pgrep.
+		$label = __( 'maldet real-time monitor', 'cybergate-security' );
+		if ( false === $installed ) {
+			$rows[] = array( $label, 'na', __( 'maldet is not installed', 'cybergate-security' ) );
+		} else {
+			$running = null;
+			$pidfile = $base . '/tmp/inotifywait.pid';
+			if ( self::path_allowed( $pidfile ) && self::path_allowed( '/proc' ) && @is_dir( '/proc/self' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				$pid = @is_readable( $pidfile ) ? (int) trim( (string) @file_get_contents( $pidfile, false, null, 0, 32 ) ) : 0; // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+				if ( $pid > 0 ) {
+					$running = @file_exists( '/proc/' . $pid ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				}
+			}
+			if ( null === $running ) {
+				$code = self::exit_code( 'pgrep -f ' . escapeshellarg( 'inotifywait.*maldetect' ) );
+				if ( 0 === $code ) {
+					$running = true;
+				} elseif ( 1 === $code ) {
+					$running = false;
+				}
+			}
+			if ( null === $running ) {
+				$rows[] = array( $label, 'unknown', $hidden );
+			} else {
+				$rows[] = array( $label, $running ? 'ok' : 'bad', $running ? __( 'Running', 'cybergate-security' ) : __( 'Not running', 'cybergate-security' ) );
+			}
+		}
+
+		// This site in monitor_paths.
+		$label = __( 'This site watched by the monitor', 'cybergate-security' );
+		$list  = $base . '/monitor_paths';
+		if ( false === $installed ) {
+			$rows[] = array( $label, 'na', __( 'maldet is not installed', 'cybergate-security' ) );
+		} elseif ( ! self::path_allowed( $list ) || ( @file_exists( $list ) && ! @is_readable( $list ) ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$rows[] = array( $label, 'unknown', $hidden );
+		} else {
+			$lines = @file( $list, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$found = false;
+			foreach ( is_array( $lines ) ? $lines : array() as $line ) {
+				if ( untrailingslashit( wp_normalize_path( trim( $line ) ) ) === $site ) {
+					$found = true;
+					break;
+				}
+			}
+			/* translators: %s: file path */
+			$rows[] = array( $label, $found ? 'ok' : 'bad', $found ? __( 'Yes, in monitor_paths', 'cybergate-security' ) : sprintf( __( 'No: not listed in %s', 'cybergate-security' ), $list ) );
+		}
+
+		// maldet quarantine off: CyberGate Security decides.
+		$label = __( 'maldet quarantine (quarantine_hits)', 'cybergate-security' );
+		$conf  = $base . '/conf.maldet';
+		if ( false === $installed ) {
+			$rows[] = array( $label, 'na', __( 'maldet is not installed', 'cybergate-security' ) );
+		} elseif ( ! self::path_allowed( $conf ) || ! @is_readable( $conf ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$rows[] = array( $label, 'unknown', $hidden );
+		} else {
+			$value = preg_match( '/^quarantine_hits="?([0-9])/m', (string) @file_get_contents( $conf ), $m ) ? $m[1] : ''; // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+			if ( '0' === $value ) {
+				$rows[] = array( $label, 'ok', __( '0: report-only, CyberGate Security decides', 'cybergate-security' ) );
+			} elseif ( '' === $value ) {
+				$rows[] = array( $label, 'unknown', __( 'Not set in conf.maldet', 'cybergate-security' ) );
+			} else {
+				/* translators: %s: setting value */
+				$rows[] = array( $label, 'bad', sprintf( __( '%s: maldet moves files itself, so both would act on the same file', 'cybergate-security' ), $value ) );
+			}
+		}
+
+		$out = array();
+		foreach ( $rows as $row ) {
+			$out[] = array(
+				'label' => $row[0],
+				'state' => $row[1],
+				'text'  => $row[2],
+			);
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether the inotifywait command (inotify-tools) is installed.
+	 *
+	 * @return bool
+	 */
+	public static function inotifywait_installed() {
+		$dirs = array( '/usr/bin', '/usr/local/bin', '/bin', '/usr/sbin' );
+		$path = (string) getenv( 'PATH' );
+		foreach ( '' !== $path ? explode( PATH_SEPARATOR, $path ) : array() as $dir ) {
+			$dir = rtrim( trim( $dir ), '/' );
+			if ( '' !== $dir && '/' === $dir[0] ) {
+				$dirs[] = $dir;
+			}
+		}
+		foreach ( array_unique( $dirs ) as $dir ) {
+			if ( @is_file( $dir . '/inotifywait' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -2190,7 +2629,13 @@ class Sysadmin_Tools {
 				self::flash( self::test_sent_message( $settings->recipients() ), 'ok' );
 			}
 		}
-		$this->redirect( self::settings_url( $tab, array( 'settings-updated' => 1 ) ) );
+		$args = array( 'settings-updated' => 1 );
+		// Back to the section of Advanced that was open when Save was pressed.
+		$section = isset( $post['section'] ) ? substr( sanitize_key( (string) $post['section'] ), 0, 32 ) : '';
+		if ( 'advanced' === $tab && '' !== $section ) {
+			$args['section'] = $section;
+		}
+		$this->redirect( self::settings_url( $tab, $args ) );
 	}
 
 	/**
@@ -2412,9 +2857,18 @@ class Sysadmin_Tools {
 		}
 		if ( is_wp_error( $result ) ) {
 			self::flash( $result->get_error_message(), 'bad' );
+			if ( 'uninstall' !== $op ) {
+				Developer_Instructions::record_failure( 'guard_' . $op, $result->get_error_message() );
+			}
 		} elseif ( false === $result ) {
 			self::flash( __( 'The action did not complete. Check the file permissions of the WordPress folder and the data folder.', 'cybergate-security' ), 'bad' );
+			if ( 'uninstall' !== $op ) {
+				Developer_Instructions::record_failure( 'guard_' . $op, __( 'The action did not complete. Check the file permissions of the WordPress folder and the data folder.', 'cybergate-security' ) );
+			}
 		} else {
+			if ( 'write_user_ini' === $op ) {
+				Developer_Instructions::clear_failure( 'guard' );
+			}
 			$messages = array(
 				'install'        => __( 'Early guard installed. It starts working once PHP loads it through auto_prepend_file (see the snippets below).', 'cybergate-security' ),
 				'uninstall'      => __( 'Early guard switched off. If you added auto_prepend_file to the server configuration, remove that line too.', 'cybergate-security' ),
@@ -2592,7 +3046,11 @@ class Sysadmin_Tools {
 	private function flash_htaccess_result( $result ) {
 		if ( is_wp_error( $result ) ) {
 			self::flash( $result->get_error_message(), 'bad' );
-		} elseif ( 'unchanged' === $result ) {
+			Developer_Instructions::record_failure( 'uploads_htaccess', $result->get_error_message() );
+			return;
+		}
+		Developer_Instructions::clear_failure( 'uploads_htaccess' );
+		if ( 'unchanged' === $result ) {
 			self::flash( __( 'uploads/.htaccess already contains the current rules.', 'cybergate-security' ), 'info' );
 		} else {
 			$message = __( 'Added the PHP blocking rules to uploads/.htaccess. Other content in the file was kept.', 'cybergate-security' );

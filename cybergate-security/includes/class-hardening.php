@@ -377,9 +377,13 @@ class Hardening {
 				$result = defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON ? true : Config_Editor::set_constant( 'DISABLE_WP_CRON', true );
 				break;
 			default:
-				$result = new \WP_Error( 'wpcybersec_fix', __( 'There is no automatic fix for this item.', 'cybergate-security' ) );
+				return new \WP_Error( 'wpcybersec_fix', __( 'There is no automatic fix for this item.', 'cybergate-security' ) );
 		}
-		if ( ! is_wp_error( $result ) ) {
+		if ( is_wp_error( $result ) ) {
+			// Remembered for Settings > Advanced > Developer instructions.
+			Developer_Instructions::record_failure( $id, $result->get_error_message() );
+		} else {
+			Developer_Instructions::clear_failure( $id );
 			/* translators: %s: fix id */
 			wpcybersec()->logger->log( 'hardening_fixed', sprintf( __( 'Applied the one-click fix "%s".', 'cybergate-security' ), $id ), array( 'fix' => $id ) );
 			delete_transient( Sysadmin_Tools::PROBE_TRANSIENT );

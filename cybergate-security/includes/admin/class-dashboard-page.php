@@ -525,6 +525,9 @@ class Dashboard_Page {
 		// Early guard.
 		$this->guard_row();
 
+		// ClamAV and Linux Malware Detect.
+		$this->antivirus_row();
+
 		// Freeze lock.
 		$this->freeze_row();
 
@@ -568,6 +571,9 @@ class Dashboard_Page {
 			$this->prow( 'privacy', __( 'Tamper checksum', 'cybergate-security' ), __( 'Optional. Define WPCYBERSEC_HMAC_KEY in wp-config.php to detect database edits of the allowlist.', 'cybergate-security' ), __( 'Not set up', 'cybergate-security' ), 'muted' );
 		}
 
+		// Steps that need someone with server access.
+		$this->developer_row();
+
 		echo '</ul>';
 		echo '<p class="wpcs-protection-card__foot"><a class="button" href="' . esc_url( Admin::page_url( Admin::PAGE_SETTINGS ) ) . '"><span class="dashicons dashicons-admin-generic" aria-hidden="true"></span> ' . esc_html__( 'Change settings', 'cybergate-security' ) . '</a></p>';
 		echo '</div>';
@@ -593,7 +599,7 @@ class Dashboard_Page {
 				$action_html,
 				array(
 					'a'      => array( 'href' => true, 'class' => true ),
-					'button' => array( 'type' => true, 'class' => true, 'data-wpcs-freeze' => true, 'data-minutes' => true ),
+					'button' => array( 'type' => true, 'class' => true, 'data-wpcs-freeze' => true, 'data-minutes' => true, 'data-wpcs-clamav-enable' => true ),
 				)
 			);
 		}
@@ -710,7 +716,7 @@ class Dashboard_Page {
 	 */
 	private function guard_row() {
 		$title    = __( 'Early upload guard', 'cybergate-security' );
-		$settings = '<a href="' . esc_url( Admin::page_url( Admin::PAGE_SETTINGS, array( 'tab' => 'advanced' ) ) ) . '">' . esc_html__( 'Set up', 'cybergate-security' ) . '</a>';
+		$settings = '<a href="' . esc_url( Admin::page_url( Admin::PAGE_SETTINGS, array( 'tab' => 'advanced', 'section' => 'guard' ) ) . '#wpcs-guard' ) . '">' . esc_html__( 'Set up', 'cybergate-security' ) . '</a>';
 
 		if ( ! Admin::service( 'guard_manager' ) ) {
 			$this->prow( 'shield', $title, __( 'The guard module is not available.', 'cybergate-security' ), __( 'Unavailable', 'cybergate-security' ), 'muted' );
@@ -733,13 +739,65 @@ class Dashboard_Page {
 	}
 
 	/**
+	 * Antivirus engines row: ClamAV state and whether maldet is installed.
+	 */
+	private function antivirus_row() {
+		$title = __( 'Antivirus engines', 'cybergate-security' );
+		$av    = Admin::call( 'sysadmin', 'antivirus_status', array(), null );
+		if ( ! is_array( $av ) ) {
+			return;
+		}
+		$clam   = $av['clamav'];
+		$maldet = $av['maldet'];
+		$link   = '<a href="' . esc_url( Admin::page_url( Admin::PAGE_SETTINGS, array( 'tab' => 'advanced', 'section' => 'antivirus' ) ) . '#wpcs-antivirus' ) . '">' . esc_html__( 'Set up', 'cybergate-security' ) . '</a>';
+		/* translators: %s: ClamAV state, for example "Ready, not in use" */
+		$parts = array( sprintf( __( 'ClamAV: %s.', 'cybergate-security' ), $clam['label'] ) );
+		if ( '' !== $maldet['binary'] ) {
+			$parts[] = __( 'Linux Malware Detect: installed.', 'cybergate-security' );
+		} elseif ( $maldet['supported'] ) {
+			$parts[] = __( 'Linux Malware Detect: not installed.', 'cybergate-security' );
+		}
+		if ( 'ready_off' === $clam['state'] ) {
+			$button = '<button type="button" class="button button-small" data-wpcs-clamav-enable>' . esc_html__( 'Turn on', 'cybergate-security' ) . '</button>';
+			$this->prow( 'sos', $title, implode( ' ', $parts ) . ' ' . __( 'A second opinion on every upload; it finds more but does not block attacks.', 'cybergate-security' ), __( 'Not in use', 'cybergate-security' ), 'medium', $button );
+			return;
+		}
+		if ( in_array( $clam['state'], array( 'uploads', 'uploads_scans' ), true ) ) {
+			$badge = 'uploads_scans' === $clam['state'] ? __( 'Uploads and scans', 'cybergate-security' ) : __( 'Uploads', 'cybergate-security' );
+			$this->prow( 'sos', $title, implode( ' ', $parts ), $badge, 'ok' );
+			return;
+		}
+		$this->prow( 'sos', $title, implode( ' ', $parts ) . ' ' . __( 'Optional: they know many more existing infections, but do not block attacks.', 'cybergate-security' ), 'blocked' === $clam['state'] ? __( 'Cannot run', 'cybergate-security' ) : __( 'Not installed', 'cybergate-security' ), 'muted', $link );
+	}
+
+	/**
+	 * Developer instructions row, only while something needs server access.
+	 */
+	private function developer_row() {
+		$count = (int) Admin::call( 'developer', 'count', array(), 0 );
+		if ( $count < 1 ) {
+			return;
+		}
+		$link = '<a href="' . esc_url( Admin::page_url( Admin::PAGE_SETTINGS, array( 'tab' => 'advanced', 'section' => 'developer' ) ) . '#wpcs-developer' ) . '">' . esc_html__( 'View', 'cybergate-security' ) . '</a>';
+		$this->prow(
+			'clipboard',
+			__( 'Developer instructions', 'cybergate-security' ),
+			__( 'Steps the plugin could not do from here. Send them to someone with server access (SSH, SFTP or the hosting panel).', 'cybergate-security' ),
+			/* translators: %s: number of steps */
+			sprintf( _n( '%s step', '%s steps', $count, 'cybergate-security' ), number_format_i18n( $count ) ),
+			'info',
+			$link
+		);
+	}
+
+	/**
 	 * Freeze lock row with unlock / lock buttons.
 	 */
 	private function freeze_row() {
 		$title   = __( 'Freeze lock', 'cybergate-security' );
 		$can_ajx = Admin::service( 'install_gate' ) && method_exists( Admin::service( 'install_gate' ), 'unlock' );
 		if ( ! $this->opt( 'freeze_mods', false ) ) {
-			$link = '<a href="' . esc_url( Admin::page_url( Admin::PAGE_SETTINGS, array( 'tab' => 'advanced' ) ) ) . '">' . esc_html__( 'Set up', 'cybergate-security' ) . '</a>';
+			$link = '<a href="' . esc_url( Admin::page_url( Admin::PAGE_SETTINGS, array( 'tab' => 'advanced', 'section' => 'freeze' ) ) . '#wpcs-freeze' ) . '">' . esc_html__( 'Set up', 'cybergate-security' ) . '</a>';
 			$this->prow( 'lock', $title, __( 'Optional. Blocks every plugin, theme and core file change until you unlock it for a few minutes.', 'cybergate-security' ), __( 'Off', 'cybergate-security' ), 'muted', $link );
 			return;
 		}

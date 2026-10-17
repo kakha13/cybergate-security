@@ -80,11 +80,36 @@
 	color: rgba(255, 255, 255, 0.82);
 	font-size: 13px;
 }
+.wpcs-header__text {
+	flex: 1 1 240px;
+	min-width: 0;
+}
 .wpcs-header__actions {
 	margin-left: auto;
 	display: flex;
 	gap: 8px;
-	flex-wrap: wrap;
+	flex-wrap: nowrap;
+	justify-content: flex-end;
+}
+.wpcs-header__actions .button {
+	white-space: nowrap;
+}
+/* Not enough room next to the title: all buttons go on their own row. */
+@media (max-width: 1180px) {
+	.wpcs-header {
+		flex-wrap: wrap;
+	}
+	.wpcs-header__actions {
+		flex: 1 0 100%;
+		flex-wrap: wrap;
+		justify-content: flex-start;
+		margin-left: 58px;
+	}
+}
+@media (max-width: 600px) {
+	.wpcs-header__actions {
+		margin-left: 0;
+	}
 }
 .wpcs-header .button {
 	background: rgba(255, 255, 255, 0.12);
@@ -854,9 +879,12 @@
 	justify-content: center;
 	gap: 6px;
 }
-.wpcs-wrap .button .dashicons,
-.wpcs-wrap .button:hover .dashicons,
-.wpcs-wrap .button:focus .dashicons {
+/* body.wp-core-ui beats WordPress 7's "[class*=branch-7].wp-core-ui .button .dashicons"
+   rule, which would paint every button icon in the admin theme color. */
+body.wp-core-ui .wpcs-wrap .button .dashicons,
+body.wp-core-ui .wpcs-wrap .button:hover .dashicons,
+body.wp-core-ui .wpcs-wrap .button:focus .dashicons,
+.wpcs-wrap .button .dashicons {
 	color: inherit;
 	line-height: 1;
 	margin: 0;
@@ -870,4 +898,9 @@
 .wpcs-wrap .button:hover .dashicons-arrow-right-alt2,
 .wpcs-wrap .button:hover .dashicons-arrow-right-alt {
 	transform: translateX(2px);
+}
+
+/* The hidden attribute always wins over the display rules of buttons, rows and panels. */
+.wpcs-wrap [hidden] {
+	display: none !important;
 }

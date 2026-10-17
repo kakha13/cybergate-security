@@ -1323,7 +1323,8 @@ class Scan_Job {
 	 */
 	private function quarantine_file( $abs, $rel, $sha, array $stat, $change, array $base, array $hits = array() ) {
 		$this->snapshot_current( $abs, $sha );
-		$held = wpcybersec()->quarantine->hold( $abs, true );
+		// A file the site needs to start (wp-config.php, core files) is only ever reported.
+		$held = Decisions::is_critical_path( $abs ) ? new \WP_Error( 'wpcybersec_critical', 'critical' ) : wpcybersec()->quarantine->hold( $abs, true );
 		if ( is_wp_error( $held ) ) {
 			// Could not move it; fall back to reporting it in place.
 			$this->record_file( $abs, $rel, $sha, $stat, $change, $base, $hits );
@@ -1543,7 +1544,7 @@ class Scan_Job {
 		}
 
 		$quarantine_path = '';
-		if ( Store::SEV_CRITICAL === $severity && wpcybersec()->settings->get( 'auto_quarantine', false ) && ! $this->is_own_code( $verify ) ) {
+		if ( Store::SEV_CRITICAL === $severity && wpcybersec()->settings->get( 'auto_quarantine', false ) && ! $this->is_own_code( $verify ) && ! Decisions::is_critical_path( $abs ) ) {
 			$held = wpcybersec()->quarantine->hold( $abs, true );
 			if ( ! is_wp_error( $held ) ) {
 				$quarantine_path = $held['quarantine_path'];

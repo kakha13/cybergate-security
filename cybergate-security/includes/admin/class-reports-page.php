@@ -365,6 +365,8 @@ class Reports_Page {
 			'restore'    => array( __( 'Restore', 'cybergate-security' ), 'undo', '' ),
 			'deny'       => array( __( 'Deny', 'cybergate-security' ), 'no-alt', '' ),
 			'delete'     => array( __( 'Delete', 'cybergate-security' ), 'trash', 'wpcs-btn-danger' ),
+			// Critical core files only (Decisions::official_source()).
+			'restore_official' => array( __( 'Restore official file', 'cybergate-security' ), 'backup', '' ),
 		);
 	}
 
@@ -801,7 +803,7 @@ class Reports_Page {
 				$meta[] = esc_html( size_format( (int) $item['size'], (int) $item['size'] >= KB_IN_BYTES ? 1 : 0 ) );
 			}
 			if ( $meta ) {
-				$html .= '<span class="wpcs-sub wpcs-meta">' . implode( '<span class="wpcs-sep" aria-hidden="true"></span>', $meta ) . '</span>';
+				$html .= '<span class="wpcs-sub wpcs-meta">' . self::meta_html( $meta ) . '</span>';
 			}
 			list( $who, $context ) = $this->source_parts( $item, $details );
 			$html .= '<span class="wpcs-sub wpcs-narrow-when">' . esc_html( Admin::ago( Admin::utc_ts( $item['created_at'] ) ) ) . '</span>';
@@ -836,7 +838,7 @@ class Reports_Page {
 				: '<span class="wpcs-chip">' . esc_html__( 'new', 'cybergate-security' ) . '</span>';
 		}
 		if ( $meta ) {
-			$html .= '<span class="wpcs-sub wpcs-meta">' . implode( '<span class="wpcs-sep" aria-hidden="true"></span>', $meta ) . '</span>';
+			$html .= '<span class="wpcs-sub wpcs-meta">' . self::meta_html( $meta ) . '</span>';
 		}
 
 		// Shown only on narrow screens, where the Source and Detected columns are hidden.
@@ -1093,9 +1095,16 @@ class Reports_Page {
 		} elseif ( in_array( $type, array( Store::TYPE_UPLOAD, Store::TYPE_INSTALL ), true ) ) {
 			$set = array( 'approve', 'deny', 'restore', 'delete' );
 		} elseif ( Store::TYPE_THREAT === $type ) {
-			$set = array( 'approve', 'ignore', 'quarantine', 'restore', 'delete' );
+			$set = array( 'approve', 'ignore', 'restore_official', 'quarantine', 'restore', 'delete' );
 		} else {
-			$set = array( 'approve', 'quarantine', 'restore', 'delete' );
+			$set = array( 'approve', 'restore_official', 'quarantine', 'restore', 'delete' );
+		}
+		$critical = class_exists( '\WPCyberSecurity\Decisions' ) && Decisions::is_critical( $item );
+		if ( $critical ) {
+			// Never offered for these files, so the buttons are not rendered at all.
+			$set = array_values( array_diff( $set, array( 'quarantine', 'delete' ) ) );
+		} else {
+			$set = array_values( array_diff( $set, array( 'restore_official' ) ) );
 		}
 
 		$titles = array(
@@ -1107,6 +1116,7 @@ class Reports_Page {
 			'restore'    => __( 'Put the file back where it was, without trusting it', 'cybergate-security' ),
 			'deny'       => __( 'Reject it and delete the held copy', 'cybergate-security' ),
 			'delete'     => __( 'Delete permanently', 'cybergate-security' ),
+			'restore_official' => __( 'Replace the file with the verified official WordPress copy. The current version is kept as a copy.', 'cybergate-security' ),
 		);
 		if ( Store::TYPE_USER === $type ) {
 			$titles['approve'] = __( 'This administrator is expected: trust the account from now on', 'cybergate-security' );
@@ -1128,6 +1138,8 @@ class Reports_Page {
 				. ' class="' . esc_attr( $classes ) . '" data-wpcs-action="' . esc_attr( $action ) . '" data-id="' . esc_attr( (string) $id ) . '"'
 				. ' title="' . esc_attr( $titles[ $action ] ) . '"'
 				. ( 'delete' === $action ? ' data-confirm="' . esc_attr( $confirm_delete ) . '"' : '' )
+				/* translators: %s: file name */
+				. ( 'restore_official' === $action ? ' data-confirm="' . esc_attr( sprintf( __( 'Replace %s with the official WordPress file? The current version is kept as a copy, so the changes can still be viewed.', 'cybergate-security' ), $name ) ) . '"' : '' )
 				. ( Store::TYPE_USER === $type && 'deny' === $action
 					/* translators: %s: user login */
 					? ' data-confirm="' . esc_attr( sprintf( __( 'Remove the administrator role from %s? The account becomes a subscriber and is signed out everywhere.', 'cybergate-security' ), $name ) ) . '"'
@@ -1135,6 +1147,9 @@ class Reports_Page {
 				. '><span class="dashicons dashicons-' . esc_attr( $label[1] ) . '" aria-hidden="true"></span>' . esc_html( $label[0] ) . '</button>';
 		}
 		$html .= '</div>';
+		if ( $critical && in_array( $item['status'], array( Store::STATUS_PENDING, Store::STATUS_QUARANTINED, Store::STATUS_RESTORED ), true ) ) {
+			$html .= '<p class="wpcs-critical-note"><span class="dashicons dashicons-shield" aria-hidden="true"></span><span>' . esc_html__( 'Critical file: it cannot be quarantined. If you did not make this change, restore it from a backup or the official copy.', 'cybergate-security' ) . '</span></p>';
+		}
 
 		$html  .= '<div class="wpcs-row-links">';
 		$button = $opts['changes'] ? Diff::view_button( $item, $held ) : null;
@@ -1158,6 +1173,21 @@ class Reports_Page {
 			$html .= '<button type="button" class="button-link wpcs-details-toggle" aria-expanded="false" aria-controls="wpcs-details-' . esc_attr( (string) $id ) . '"><span class="dashicons dashicons-arrow-down-alt2" aria-hidden="true"></span><span class="wpcs-details-toggle__text">' . esc_html__( 'Details', 'cybergate-security' ) . '</span></button>';
 		}
 		$html .= '</div>';
+		return $html;
+	}
+
+	/**
+	 * Facts under an item name, each kept together with its separator dot so
+	 * a narrow column never shows a dot alone on a line.
+	 *
+	 * @param string[] $meta Escaped HTML pieces.
+	 * @return string HTML.
+	 */
+	private static function meta_html( array $meta ) {
+		$html = '';
+		foreach ( array_values( $meta ) as $i => $piece ) {
+			$html .= '<span class="wpcs-meta__item">' . ( $i ? '<span class="wpcs-sep" aria-hidden="true"></span>' : '' ) . $piece . '</span>';
+		}
 		return $html;
 	}
 
@@ -1911,6 +1941,8 @@ class Reports_Page {
 			'checksum' => array( 'yes-alt', 'ok' ),
 			'allowed'  => array( 'yes-alt', 'ok' ),
 			'reported' => array( 'clock', 'pending' ),
+			'plugin'   => array( 'shield', 'info' ),
+			'inert'    => array( 'minus', 'muted' ),
 			'none'     => array( 'warning', 'high' ),
 		);
 		$icon  = isset( $icons[ $why['kind'] ] ) ? $icons[ $why['kind'] ] : $icons['none'];

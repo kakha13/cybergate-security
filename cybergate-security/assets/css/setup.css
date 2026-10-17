@@ -939,19 +939,406 @@
 }
 
 .wpcs-toc a {
-	padding: 4px 11px;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 12px;
 	border: 1px solid var(--wpcs-line);
 	border-radius: 999px;
 	background: var(--wpcs-surface);
 	color: var(--wpcs-ink-2);
 	font-size: 12px;
+	line-height: 1.4;
 	text-decoration: none;
+	white-space: nowrap;
 }
 
 .wpcs-toc a:hover,
 .wpcs-toc a:focus {
 	border-color: var(--wpcs-brand-2);
 	color: var(--wpcs-brand-2);
+}
+
+.wpcs-toc a:focus-visible {
+	outline: 2px solid var(--wpcs-brand-2);
+	outline-offset: 1px;
+	box-shadow: none;
+}
+
+.wpcs-toc a.is-active,
+.wpcs-toc a[aria-selected="true"] {
+	border-color: var(--wpcs-brand-2);
+	background: var(--wpcs-brand-2);
+	color: #fff;
+}
+
+.wpcs-toc__count {
+	min-width: 18px;
+	padding: 0 5px;
+	border-radius: 999px;
+	background: var(--wpcs-warn-soft);
+	color: var(--wpcs-warn);
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 18px;
+	text-align: center;
+}
+
+.wpcs-toc a.is-active .wpcs-toc__count {
+	background: rgba(255, 255, 255, 0.22);
+	color: #fff;
+}
+
+/* Tabs: only the open section shows (body.js is set by WordPress before the page paints). */
+body.js .wpcs-tabpanel:not(.is-active),
+.wpcs-tabpanel[hidden] {
+	display: none;
+}
+
+.wpcs-tabpanel:focus {
+	outline: 0;
+}
+
+body.js .wpcs-savebar.is-idle {
+	display: none;
+}
+
+/* Long command snippets folded under "Show commands". */
+.wpcs-cmds {
+	margin: 10px 0 0;
+	border: 1px solid var(--wpcs-line);
+	border-radius: var(--wpcs-radius-sm);
+	background: var(--wpcs-bg);
+}
+
+.wpcs-cmds > summary {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px 8px;
+	padding: 9px 12px;
+	cursor: pointer;
+	color: var(--wpcs-brand-2);
+	font-weight: 600;
+	list-style: none;
+}
+
+.wpcs-cmds > summary::-webkit-details-marker {
+	display: none;
+}
+
+.wpcs-cmds > summary .dashicons {
+	font-size: 16px;
+	width: 16px;
+	height: 16px;
+}
+
+.wpcs-cmds[open] > summary .wpcs-cmds__show {
+	color: var(--wpcs-ink-2);
+}
+
+.wpcs-cmds__label {
+	min-width: 0;
+	color: var(--wpcs-muted);
+	font-family: var(--wpcs-mono);
+	font-size: 12px;
+	font-weight: 400;
+	overflow-wrap: anywhere;
+}
+
+.wpcs-cmds__body {
+	padding: 0 12px 4px;
+}
+
+.wpcs-cmds__body .wpcs-howto {
+	margin-top: 0;
+}
+
+.wpcs-cmds > .wpcs-code {
+	margin: 0;
+	padding: 0 12px 12px;
+}
+
+.wpcs-settings-card > .wpcs-disclosure + .wpcs-subhead {
+	margin-top: 22px;
+}
+
+.wpcs-cmd-block {
+	margin: 0 0 14px;
+}
+
+.wpcs-cmd-block__title {
+	display: block;
+	margin: 0 0 2px;
+	color: var(--wpcs-ink);
+}
+
+.wpcs-card__foot-note {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 14px 0 0;
+	color: var(--wpcs-muted);
+}
+
+/* Antivirus engines. */
+.wpcs-callout {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 12px 16px;
+	margin: 0 0 16px;
+	padding: 14px 16px;
+	border: 1px solid #99f6e4;
+	border-radius: var(--wpcs-radius);
+	background: #f0fdfa;
+}
+
+.wpcs-callout__icon {
+	display: grid;
+	place-items: center;
+	flex: 0 0 auto;
+	width: 36px;
+	height: 36px;
+	border-radius: 8px;
+	background: var(--wpcs-accent-soft);
+	color: var(--wpcs-brand-2);
+}
+
+.wpcs-callout__text {
+	flex: 1 1 260px;
+	min-width: 0;
+}
+
+.wpcs-callout__text strong {
+	display: block;
+	color: var(--wpcs-ink);
+}
+
+.wpcs-engines {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 12px;
+	margin: 0 0 8px;
+}
+
+.wpcs-engine {
+	min-width: 0;
+	padding: 12px 14px;
+	border: 1px solid var(--wpcs-line);
+	border-radius: var(--wpcs-radius-sm);
+	background: var(--wpcs-bg);
+}
+
+.wpcs-engine__head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px 10px;
+	margin: 0 0 8px;
+}
+
+.wpcs-engine__rows {
+	margin: 0;
+}
+
+.wpcs-engine__rows > div {
+	display: grid;
+	grid-template-columns: minmax(120px, 42%) minmax(0, 1fr);
+	gap: 10px;
+	padding: 6px 0;
+	border-top: 1px solid var(--wpcs-line);
+}
+
+.wpcs-engine__rows dt {
+	color: var(--wpcs-muted);
+}
+
+.wpcs-engine__rows dd {
+	min-width: 0;
+	margin: 0;
+	overflow-wrap: anywhere;
+}
+
+/* Live server status rows. */
+.wpcs-live {
+	margin: 0 0 8px;
+	padding: 0;
+	list-style: none;
+}
+
+.wpcs-live__row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 10px;
+	margin: 0;
+	padding: 7px 0;
+	border-bottom: 1px solid var(--wpcs-line);
+}
+
+.wpcs-live__row:last-child {
+	border-bottom: 0;
+}
+
+.wpcs-live__row > .dashicons {
+	flex: 0 0 auto;
+	font-size: 18px;
+	width: 18px;
+	height: 18px;
+}
+
+.wpcs-live__row.is-ok > .dashicons {
+	color: var(--wpcs-ok);
+}
+
+.wpcs-live__row.is-bad > .dashicons {
+	color: var(--wpcs-bad);
+}
+
+.wpcs-live__row.is-unknown > .dashicons,
+.wpcs-live__row.is-na > .dashicons {
+	color: var(--wpcs-muted);
+}
+
+.wpcs-live__label {
+	flex: 1 1 220px;
+	min-width: 0;
+}
+
+/* cgav section commands. */
+.wpcs-cgav {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 0;
+	margin: 12px 0 0;
+}
+
+.wpcs-cgav > div {
+	display: grid;
+	grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+	gap: 12px;
+	padding: 6px 0;
+	border-top: 1px solid var(--wpcs-line);
+}
+
+.wpcs-cgav dt code {
+	white-space: nowrap;
+	font-size: 12px;
+}
+
+.wpcs-cgav dd {
+	margin: 0;
+	color: var(--wpcs-ink-2);
+}
+
+.wpcs-cmds__body > .wpcs-code pre {
+	max-height: 420px;
+	overflow: auto;
+}
+
+/* Developer instructions. */
+.wpcs-devbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	margin: 0 0 14px;
+	padding: 10px 12px;
+	border: 1px solid var(--wpcs-line);
+	border-radius: var(--wpcs-radius-sm);
+	background: var(--wpcs-bg);
+}
+
+.wpcs-devbar__count {
+	margin-right: auto;
+	font-weight: 600;
+}
+
+.wpcs-devlist {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+	counter-reset: wpcs-dev;
+}
+
+.wpcs-devlist__item {
+	position: relative;
+	margin: 0;
+	padding: 14px 0 14px 36px;
+	border-top: 1px solid var(--wpcs-line);
+	counter-increment: wpcs-dev;
+}
+
+.wpcs-devlist__item:first-child {
+	border-top: 0;
+	padding-top: 4px;
+}
+
+.wpcs-devlist__item::before {
+	content: counter(wpcs-dev);
+	position: absolute;
+	left: 0;
+	top: 14px;
+	display: grid;
+	place-items: center;
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	background: var(--wpcs-accent-soft);
+	color: var(--wpcs-brand);
+	font-size: 12px;
+	font-weight: 700;
+}
+
+.wpcs-devlist__item:first-child::before {
+	top: 4px;
+}
+
+.wpcs-devlist__head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 8px;
+}
+
+.wpcs-devlist__item > .wpcs-sub {
+	margin: 4px 0 0;
+}
+
+.wpcs-devlist__error {
+	display: flex;
+	gap: 6px;
+	margin: 8px 0 0;
+	padding: 8px 10px;
+	border-radius: var(--wpcs-radius-sm);
+	background: var(--wpcs-bad-soft);
+	color: var(--wpcs-bad);
+}
+
+.wpcs-devlist__error .dashicons {
+	flex: 0 0 auto;
+	font-size: 16px;
+	width: 16px;
+	height: 16px;
+	margin-top: 2px;
+}
+
+.wpcs-devlist .wpcs-howto {
+	margin-top: 8px;
+}
+
+.wpcs-offscreen {
+	position: absolute !important;
+	left: -9999px;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+}
+
+.wpcs-devnote {
+	margin-top: 18px;
 }
 
 .wpcs-status-table {
@@ -999,6 +1386,11 @@
 	padding-bottom: 4px;
 }
 
+/* Fields reached with the keyboard scroll into view above the sticky save bar, not behind it. */
+html:has(body.wpcs-settings-screen) {
+	scroll-padding-bottom: 90px;
+}
+
 .wpcs-savebar {
 	position: sticky;
 	bottom: 0;
@@ -1033,6 +1425,32 @@
 	width: 100%;
 	min-height: 84px;
 	font-size: 12px;
+}
+
+/* ---------- Narrow screens ---------- */
+@media (max-width: 1100px) {
+	/* One scrolling row of section chips instead of many wrapped rows. */
+	.wpcs-toc {
+		flex-wrap: nowrap;
+		overflow-x: auto;
+		margin-right: -12px;
+		padding: 2px 12px 8px 2px;
+		scrollbar-width: thin;
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.wpcs-toc a {
+		flex: 0 0 auto;
+	}
+
+	.wpcs-engines {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.wpcs-cgav > div {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 2px;
+	}
 }
 
 /* ---------- Small screens ---------- */
