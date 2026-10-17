@@ -1567,6 +1567,15 @@ html:has(body.wpcs-settings-screen) {
 .wpcs-wrap .wpcs-howto .wpcs-code {
 	margin: 6px 0 4px;
 }
+/* Steps inside a check row are a plain numbered list, not check rows. */
+.wpcs-wrap .wpcs-checks .wpcs-howto li {
+	display: list-item;
+	grid-template-columns: none;
+	gap: 0;
+	padding: 0 0 0 2px;
+	border-bottom: 0;
+	margin: 0 0 8px;
+}
 @media (max-width: 782px) {
 	.wpcs-wrap .wpcs-fixall {
 		flex-direction: column;

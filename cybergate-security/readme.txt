@@ -12,43 +12,80 @@ Scans your site for malware and holds every new upload, install and unknown file
 
 == Description ==
 
-CyberGate Security works like a door that only opens for files you know.
+CyberGate Security works like a door that only opens for files you know. Every new upload, plugin, theme and unknown PHP file waits in a private quarantine until an administrator approves it, and the whole site is scanned for malware, web shells and backdoors.
 
-* **Scans everything.** WordPress core, plugins, themes, uploads and the web root are checked for malware, web shells and backdoors. Core and WordPress.org plugin files are compared with their official checksums, so original files are never reported.
-* **Holds every new upload until you allow it.** Media uploads, files WordPress downloads, plugin and theme ZIPs and new installs wait in a private quarantine. You decide on the Reports page.
-* **Allow once, allowed always.** Approving a file remembers its SHA-256 fingerprint. The same file is never held again, wherever it shows up. A file approved as an image is never accepted as a PHP file.
-* **Shows exactly what changed.** For a modified file you get a line-by-line diff against the last approved version or the official original, with every malware match linked to its line. Passwords, keys and salts are masked.
-* **Detects new and changed files.** A fingerprint of every file is recorded once; later scans report only what is new or different.
-* **Recent changes for incidents.** If a site was already infected when the fingerprints were recorded, the infected files look normal. Reports > Recent changes lists every PHP, script and configuration file modified in the last 7, 14 or 30 days and says what explains each change: a WordPress, plugin or theme update, an official checksum, or nothing. Unexplained files can be read on screen and reported for review with one click.
-* **A report for your developer.** "Download report" creates one HTML file with the scan results, everything waiting for a decision with the code that triggered it, settings, server checks and recent activity. Passwords, keys and email addresses are hidden, so it is safe to send.
-* **Clean-room scan.** `php wp-content/plugins/cybergate-security/bin/cron.php --isolated --full` scans with every other plugin and the theme switched off for that run only, so a compromised plugin cannot hide files from the scanner.
-* **Setup wizard.** Checks your server and fixes most findings with one click: wp-config.php permissions, the code editor, PHP in uploads, a data folder outside the web root.
-* **For system administrators.** An optional early upload guard (auto_prepend_file) holds uploads sent to any PHP script, not only WordPress. Real cron, fapolicyd, inotify, nginx and Apache rules, ClamAV and a tamper check for the allowlist.
-* **WP-CLI.** `wp wpcybersec status`, `scan`, `pending`, `approve`, `deny`, `allowlist`, `guard`, `unlock`, `lock`, `report`.
+= Approve once, allowed always =
+
+* **Holds new files until you allow them.** Media uploads, files WordPress downloads, plugin and theme ZIPs and new installs wait on the Reports page. Approving a file remembers its SHA-256 fingerprint, so the same file is never held again. A file approved as an image is never accepted as a PHP file.
+* **Image previews and bulk approval.** Held images show a thumbnail that is only served after the plugin verified the file really is that image. "Allow all clean images" approves every verified image without findings in one go. Risky files such as a GIF with PHP code inside get Deny as the main button.
+* **Setup wizard.** Checks your server, fixes most findings with one click and picks a protection level. On busy sites it shows how many uploads a day you would have to approve and suggests holding only risky uploads instead.
+
+= Find what is already there =
+
+* **Full site malware scan.** WordPress core, plugins, themes, uploads and the web root. Core files and plugins from WordPress.org are compared with their official checksums, so original files are never reported.
+* **What changed.** A line by line diff of a modified file against the last approved version or the official original, with every malware match linked to its line. Passwords, keys and salts are masked.
+* **Database scan.** Options, posts and the storage of header and footer script plugins (WPCode, Header Footer Code Manager, Code Snippets) are checked for injected scripts.
+* **Administrator watch.** Every new administrator account, including one inserted straight into the database, is reported at once and waits for your review. Deny removes the role and signs the account out.
+* **Recent changes.** A site that was already infected when the baseline was recorded looks normal to a scan. Reports > Recent changes lists every PHP, script and configuration file modified in the last 7, 14 or 30 days and says what explains each change: an update, an official checksum, or nothing.
+* **Clean core reinstall.** When WordPress core looks damaged, one button downloads the official package of your version from WordPress.org, checks every file against the official checksums, swaps wp-admin, wp-includes and the root core files in a few seconds with maintenance mode on, and puts the old core back by itself if the site stops answering. Step by step instructions are offered for doing it by hand.
+
+= For administrators and hosts =
+
+* **Hosting panel detection.** The plugin recognises cPanel, Plesk, DirectAdmin, CyberPanel, aaPanel, HestiaCP, CloudPanel, CWP, ISPConfig, RunCloud, GridPane, Cloudways, Hostinger and many managed hosts and local tools, and shows the steps for your panel first.
+* **Early upload guard (optional).** Holds files uploaded to any PHP script on the site, not only to WordPress, through auto_prepend_file. One click installs it, makes a live test request and undoes everything automatically if the site stops answering.
+* **ClamAV and Linux Malware Detect (optional).** When ClamAV is installed on the server the plugin runs a real self-test with the EICAR test file and, once you turn it on, also scans uploads with it. maldet signatures are used through ClamAV. They know many more existing infections; they do not block attacks.
+* **Security report.** "Download report" creates one HTML file with the scan results, everything waiting for a decision, settings, server checks and recent activity. Passwords, keys and email addresses are hidden, so it is safe to send to a developer.
+* **Multisite network mode.** Network activated, it protects the whole network once: one Reports page in Network Admin, uploads of every site are held, scans run once for the network.
+* **Light on your site.** Normal front end pages cost zero database queries, and admin pages zero on a single site. Scans run in the background in small steps.
+* **WP-CLI.** `wp wpcybersec status`, `scan`, `pending`, `approve`, `deny`, `allowlist`, `guard`, `core-reinstall`, `unlock`, `lock`, `report`.
 
 == Installation ==
 
-1. Upload the plugin through Plugins > Add New Plugin > Upload Plugin, or install it from the directory.
-2. Activate it. The setup wizard opens.
+1. Install the plugin through Plugins > Add New Plugin, or upload the ZIP there.
+2. Activate it. On multisite, network activate it. The setup wizard opens.
 3. Follow the steps: environment check, protection level, baseline scan, alerts and optional server hardening.
 
 == Frequently Asked Questions ==
 
+= Does it slow my site down? =
+
+No. Visitors' pages cost the plugin zero database queries. Uploads take a moment longer because each file is scanned. Whole site scans run in the background in short steps, through WP-Cron or a real cron job if you set one up.
+
+= Does it work with Wordfence? =
+
+Yes. Wordfence's firewall loader (wordfence-waf.php) is recognised and not reported. If Wordfence already uses auto_prepend_file, the early upload guard loads Wordfence's file as well instead of replacing it.
+
+= I am on shared hosting without SSH. Can I use it? =
+
+Yes. Everything except the optional server tools works from the WordPress admin. Settings that need the server (a data folder outside the web root, a real cron job, ClamAV) come with steps for your hosting panel, and Settings > Advanced > Developer instructions collects them in one file you can send to your host.
+
 = Will it block my own uploads? =
 
-With the Balanced or Strict level every upload waits for approval, including yours. Choose Relaxed, or turn off "Hold administrators' own uploads too", to let clean uploads by administrators through.
+With the Balanced or Strict level every upload waits for approval, including yours. Choose Relaxed, "Hold only risky uploads", or turn off "Hold administrators' own uploads too" to let clean uploads through.
 
 = What happens when I update a plugin or WordPress? =
 
-Updates of installed plugins, themes and core are re-checked right away against their official checksums and trusted. New installs wait for approval.
+Updates of installed plugins, themes and core are checked again right away against their official checksums and trusted. New installs wait for approval.
+
+= What if WordPress core itself is infected? =
+
+Modified or extra files in wp-admin and wp-includes are reported as threats. When several core files are damaged, or an extra PHP file sits in wp-admin or wp-includes, the plugin offers to reinstall a clean copy of your WordPress version, verified against the official checksums, with an automatic rollback. wp-config.php, wp-content and your own files are not touched.
+
+= What about false positives? =
+
+Original WordPress and WordPress.org plugin files are never reported because they match the official checksums. For anything else, "Mark safe" (or Allow) remembers the file's fingerprint, so that exact file is not reported again. If the file changes later, it is checked again.
+
+= Does it work on multisite? =
+
+Yes. Network activate it. It works once for the whole network from Network Admin, holds uploads on every site and reports administrator accounts of every site.
+
+= What happens when I deactivate or delete the plugin? =
+
+Deactivating stops the scans and switches the early guard off. Deleting the plugin keeps your data unless "Delete all plugin data when the plugin is deleted" is on in Settings; with it on, the plugin's tables, options and data folder are removed, and so are the lines it added to wp-config.php, .htaccess and .user.ini. Backups of wp-config.php are always removed.
 
 = Does it change wp-config.php or .htaccess? =
 
-Only when you press a fix button. Every change to wp-config.php is checked for errors first, and the plugin's own lines are marked so you can find them.
-
-= What does the isolated scan not cover? =
-
-Must-use plugins (wp-content/mu-plugins) and drop-ins (db.php, object-cache.php, advanced-cache.php) always load with WordPress and cannot be switched off for a scan. The isolated scan lists them so you can check them yourself.
+Only when you press a fix or install button. Every change to wp-config.php is checked for errors first, and the plugin's own lines are marked so you can find them.
 
 = Where are held files kept? =
 
@@ -56,22 +93,41 @@ In a private folder with random file names that cannot run as code. The wizard c
 
 == External services ==
 
-The plugin contacts these services. No personal data and no site content is sent; only the version and file paths needed for the lookup.
+The plugin connects to the services below. It sends no personal data, no site content and no tracking data. Nothing is sent to the plugin author.
 
-* **WordPress.org checksum API** (api.wordpress.org): official checksums of WordPress core files for your version, used to recognise original files. Sent: WordPress version and locale. [Terms](https://wordpress.org/about/privacy/)
-* **WordPress.org plugin checksums** (downloads.wordpress.org): official checksums of installed plugins hosted on WordPress.org. Sent: plugin slug and version.
-* **WordPress.org Subversion** (core.svn.wordpress.org, plugins.svn.wordpress.org): when you open the "What changed" view of a core or WordPress.org plugin file, the original file is downloaded once to compare against. Sent: the file path, plugin slug and version.
-* **Your webhook URL** (optional): when you set one, alerts about held files and threats are posted there. Nothing is sent unless you enter a URL.
+* **WordPress.org core checksums** (api.wordpress.org): during scans and before a core reinstall, to get the official checksums of the WordPress core files of your version. Sent: WordPress version and locale. [Privacy policy](https://wordpress.org/about/privacy/)
+* **WordPress.org plugin checksums** (downloads.wordpress.org): during scans, the official checksums of installed plugins that are hosted on WordPress.org. Sent: plugin slug and version. [Privacy policy](https://wordpress.org/about/privacy/)
+* **WordPress.org core package** (downloads.wordpress.org): only when an administrator starts "Reinstall clean core", the official package of the installed version without wp-content (wordpress-VERSION-no-content.zip) and its .sha1 checksum file. Sent: the WordPress version in the address. [Privacy policy](https://wordpress.org/about/privacy/)
+* **WordPress.org Subversion** (core.svn.wordpress.org, plugins.svn.wordpress.org): when you open the "What changed" view of a core file or a WordPress.org plugin file, or press "Restore official file", the original file is downloaded and checked against the official checksum. Sent: the file path, the plugin slug and the version. [Privacy policy](https://wordpress.org/about/privacy/)
+* **Your webhook URL** (optional, Slack, Discord, Microsoft Teams or any service you choose): when you enter one, alerts are posted there. Sent: the site name, the number of held files and threats, the names and paths of the files concerned and a link to the Reports page. Nothing is sent unless you enter a URL; the terms and privacy policy of the service you choose apply.
+* **Your own site** (loopback requests): the early guard live test, the uploads folder test, the data folder test and the check after a core reinstall request pages and test files of this same site. They do not leave your server's own address.
+
+The server script offered in Settings > Advanced (Antivirus engines and Developer instructions), cgav, is text for an administrator to read and run on the server. When it is run, it installs ClamAV from the operating system's package repositories and Linux Malware Detect from rfxn.com, and its test command fetches the harmless EICAR test file from secure.eicar.org. The same commands appear in the step by step instructions. The plugin never runs them and never installs software. The only code it ever writes into your site comes from WordPress.org: the official core package for a reinstall you start, or an official original file when you press "Restore official file".
+
+Data kept on your site: for every held file the plugin records the uploading user, their IP address and the time, so you can decide whether to allow it. This stays in your database and is removed with the plugin's data.
 
 == Screenshots ==
 
-1. Setup wizard: environment check with one-click fixes.
-2. Choose a protection level.
-3. An upload held for approval in the Media Library.
-4. The Reports page where you allow or deny.
-5. The "What changed" view of a modified file.
+1. Setup wizard: choose a protection level, with a hint for sites that receive many uploads.
+2. Dashboard: protection level, what waits for you, the last scan and the protection overview.
+3. Reports: held uploads with image previews. A GIF with hidden PHP code gets Deny as the main action.
+4. What changed: an injected line in a WordPress core file, with the malware match on its line.
+5. Settings > Advanced > Server health, with the detected hosting panel and one-click fixes.
+6. The early upload guard after the one-click setup and its live test.
+7. Damaged WordPress core: reinstall a clean copy, verified against the official checksums.
+8. Recent changes: every recently modified code file and what explains the change.
 
 == Changelog ==
 
 = 1.0.0 =
 * First release.
+* Full site malware scan with official checksums for WordPress core and WordPress.org plugins.
+* Holds new uploads, installs and unknown PHP files until an administrator approves them; approvals are remembered by SHA-256.
+* Image previews of held uploads and "Allow all clean images".
+* Setup wizard with environment fixes, protection levels and an upload volume hint.
+* Hosting panel detection with panel specific steps.
+* "What changed" line by line diff, Recent changes and the downloadable security report.
+* Database scan for injected scripts and administrator account watch.
+* Clean WordPress core reinstall with checksum verification and automatic rollback.
+* Optional early upload guard, ClamAV with a self-test, freeze lock, real cron and tamper check.
+* Multisite network mode and WP-CLI commands.

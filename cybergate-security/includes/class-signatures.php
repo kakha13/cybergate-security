@@ -865,7 +865,7 @@ class Signatures {
 
 		// "Silence is golden" index.php files in uploads are harmless.
 		if ( $hits && 'index.php' === strtolower( basename( $name ) ) && $size < 400 ) {
-			$tiny = (string) @file_get_contents( $abs ); // phpcs:ignore
+			$tiny = (string) @file_get_contents( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			if ( false === strpos( $tiny, '<?' ) || preg_match( '~^\s*<\?php\s*(?://[^\n]*\n?|#[^\n]*\n?|/\*.*?\*/|\s+)*(?:\?>\s*)?$~s', $tiny ) ) {
 				$hits = array();
 			}
@@ -910,7 +910,7 @@ class Signatures {
 	 * @return string
 	 */
 	private static function read_slice( $abs, $offset, $length ) {
-		$data = @file_get_contents( $abs, false, null, max( 0, (int) $offset ), max( 1, (int) $length ) ); // phpcs:ignore
+		$data = @file_get_contents( $abs, false, null, max( 0, (int) $offset ), max( 1, (int) $length ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		return false === $data ? '' : $data;
 	}
 

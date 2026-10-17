@@ -57,7 +57,7 @@ function wpcybersec_checksums_version( $dir ) {
 	if ( defined( 'WPCYBERSEC_VERSION' ) ) {
 		return (string) WPCYBERSEC_VERSION;
 	}
-	$head = @file_get_contents( $dir . '/cybergate-security.php', false, null, 0, 8192 ); // phpcs:ignore
+	$head = @file_get_contents( $dir . '/cybergate-security.php', false, null, 0, 8192 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 	if ( is_string( $head ) && preg_match( '~^[ \t/*#@]*Version:[ \t]*([^\s]+)~mi', $head, $m ) ) {
 		return $m[1];
 	}
@@ -77,7 +77,7 @@ function wpcybersec_checksums_files( $dir ) {
 	while ( $stack ) {
 		$rel_dir = array_pop( $stack );
 		$abs_dir = '' === $rel_dir ? $dir : $dir . '/' . $rel_dir;
-		$entries = @scandir( $abs_dir ); // phpcs:ignore
+		$entries = @scandir( $abs_dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
 		if ( false === $entries ) {
 			fwrite( STDERR, "Cannot read folder: $abs_dir\n" );
 			exit( 1 );
@@ -128,8 +128,8 @@ if ( ! is_string( $wpcybersec_json ) ) {
 
 // Write through a temp file so the scanner never reads half a list.
 $wpcybersec_tmp = $wpcybersec_output . '.' . getmypid() . '.tmp';
-if ( false === file_put_contents( $wpcybersec_tmp, $wpcybersec_json . "\n" ) || ! rename( $wpcybersec_tmp, $wpcybersec_output ) ) { // phpcs:ignore
-	@unlink( $wpcybersec_tmp ); // phpcs:ignore
+if ( false === file_put_contents( $wpcybersec_tmp, $wpcybersec_json . "\n" ) || ! rename( $wpcybersec_tmp, $wpcybersec_output ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, WordPress.WP.AlternativeFunctions.rename_rename -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
+	@unlink( $wpcybersec_tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.unlink_unlink -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 	fwrite( STDERR, "Could not write $wpcybersec_output\n" );
 	exit( 1 );
 }

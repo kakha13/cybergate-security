@@ -543,7 +543,7 @@ class Storage {
 		if ( ! @is_file( $file ) || @is_link( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			return false;
 		}
-		$text = (string) @file_get_contents( $file, false, null, 0, 1024 ); // phpcs:ignore
+		$text = (string) @file_get_contents( $file, false, null, 0, 1024 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		return (bool) preg_match( '/^site:\s*' . preg_quote( self::site_id(), '/' ) . '\s*$/m', $text );
 	}
 
@@ -915,7 +915,7 @@ class Storage {
 		if ( ! @is_file( $bootstrap ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			return false;
 		}
-		$code = (string) @file_get_contents( $bootstrap, false, null, 0, 65536 ); // phpcs:ignore
+		$code = (string) @file_get_contents( $bootstrap, false, null, 0, 65536 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		return false !== strpos( $code, var_export( $dir . '/guard/config.php', true ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions
 	}
 
@@ -1157,13 +1157,13 @@ class Storage {
 		$work  = $dir . '/guard-uploads.work.jsonl';
 		if ( is_file( $work ) ) {
 			$offset = 0;
-			$pos    = json_decode( (string) @file_get_contents( $dir . '/guard-uploads.work.pos' ), true ); // phpcs:ignore
+			$pos    = json_decode( (string) @file_get_contents( $dir . '/guard-uploads.work.pos' ), true ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			if ( is_array( $pos ) && isset( $pos['offset'] ) ) {
 				$offset = max( 0, (int) $pos['offset'] );
 			}
 			$size = (int) @filesize( $work ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			if ( $offset < $size ) {
-				$rest  = @file_get_contents( $work, false, null, $offset ); // phpcs:ignore
+				$rest  = @file_get_contents( $work, false, null, $offset ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 				$lines = array_merge( $lines, preg_split( '/\r\n|\n|\r/', (string) $rest ) );
 			}
 		}
@@ -1173,10 +1173,10 @@ class Storage {
 		$spool  = $dir . '/guard-uploads.jsonl';
 		$handle = null;
 		if ( is_file( $spool ) ) {
-			$handle = @fopen( $spool, 'c+' ); // phpcs:ignore
-			if ( ! $handle || ! @flock( $handle, LOCK_EX ) ) { // phpcs:ignore
+			$handle = @fopen( $spool, 'c+' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- native handle needed for flock() and streaming; WP_Filesystem has neither.
+			if ( ! $handle || ! @flock( $handle, LOCK_EX ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
 				if ( $handle ) {
-					@fclose( $handle ); // phpcs:ignore
+					@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 				}
 				return new \WP_Error( 'wpcybersec_storage_spool', __( 'Could not lock the early guard spool in the old folder.', 'cybergate-security' ) );
 			}
@@ -1195,14 +1195,14 @@ class Storage {
 		if ( '' !== $out ) {
 			$ok = false;
 			if ( is_dir( $target . '/spool' ) || wp_mkdir_p( $target . '/spool' ) ) {
-				$out_handle = @fopen( $target . '/spool/guard-uploads.jsonl', 'ab' ); // phpcs:ignore
+				$out_handle = @fopen( $target . '/spool/guard-uploads.jsonl', 'ab' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 				if ( $out_handle ) {
-					if ( @flock( $out_handle, LOCK_EX ) ) { // phpcs:ignore
-						$ok = strlen( $out ) === @fwrite( $out_handle, $out ); // phpcs:ignore
-						@fflush( $out_handle ); // phpcs:ignore
-						@flock( $out_handle, LOCK_UN ); // phpcs:ignore
+					if ( @flock( $out_handle, LOCK_EX ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
+						$ok = strlen( $out ) === @fwrite( $out_handle, $out ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- native handle needed for flock() and streaming; WP_Filesystem has neither.
+						@fflush( $out_handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
+						@flock( $out_handle, LOCK_UN ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
 					}
-					@fclose( $out_handle ); // phpcs:ignore
+					@fclose( $out_handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 				}
 			}
 		}
@@ -1215,8 +1215,8 @@ class Storage {
 			Fs::delete( $dir . '/guard-uploads.work.pos' );
 		}
 		if ( $handle ) {
-			@flock( $handle, LOCK_UN ); // phpcs:ignore
-			@fclose( $handle ); // phpcs:ignore
+			@flock( $handle, LOCK_UN ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
+			@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 		}
 		return $ok ? true : new \WP_Error( 'wpcybersec_storage_spool', __( 'Could not move the early guard\'s waiting uploads to the new folder.', 'cybergate-security' ) );
 	}
@@ -1391,14 +1391,14 @@ class Storage {
 		if ( ! is_dir( dirname( $file ) ) ) {
 			return null;
 		}
-		$handle = @fopen( $file, 'c' ); // phpcs:ignore
+		$handle = @fopen( $file, 'c' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 		if ( ! $handle ) {
 			return false;
 		}
 		$until = microtime( true ) + $wait;
-		while ( ! @flock( $handle, LOCK_EX | LOCK_NB ) ) { // phpcs:ignore
+		while ( ! @flock( $handle, LOCK_EX | LOCK_NB ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
 			if ( microtime( true ) >= $until ) {
-				@fclose( $handle ); // phpcs:ignore
+				@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 				return false;
 			}
 			usleep( 200000 );
@@ -1411,8 +1411,8 @@ class Storage {
 	 */
 	private static function unlock_file( $handle ) {
 		if ( is_resource( $handle ) ) {
-			@flock( $handle, LOCK_UN ); // phpcs:ignore
-			@fclose( $handle ); // phpcs:ignore
+			@flock( $handle, LOCK_UN ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
+			@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 		}
 	}
 

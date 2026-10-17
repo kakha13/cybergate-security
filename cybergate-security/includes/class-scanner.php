@@ -197,7 +197,7 @@ class Scanner {
 		$clean = basename( str_replace( array( '\\', "\0" ), array( '/', '' ), $name ) );
 		$hits  = array_merge( $hits, Signatures::inspect_file( $tmp_path, '', $min, $max, '' !== $clean ? $clean : 'upload.bin' ) );
 
-		$head = $size > 0 ? (string) @file_get_contents( $tmp_path, false, null, 0, 4096 ) : ''; // phpcs:ignore
+		$head = $size > 0 ? (string) @file_get_contents( $tmp_path, false, null, 0, 4096 ) : ''; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 
 		// PHP disguised as something else (a ".pdf" or ".zip" that is really a script).
 		if ( Signatures::KIND_PHP !== $kind && Signatures::looks_like_php( $head ) && ! $this->has_sig( $hits, 'image_php_code' ) ) {
@@ -209,7 +209,7 @@ class Scanner {
 				'snippet'  => Signatures::clean_snippet( substr( $head, 0, 120 ) ),
 			);
 			if ( $size <= $max ) {
-				$hits = array_merge( $hits, Signatures::match( (string) @file_get_contents( $tmp_path, false, null, 0, $max ), Signatures::KIND_PHP, $min ) ); // phpcs:ignore
+				$hits = array_merge( $hits, Signatures::match( (string) @file_get_contents( $tmp_path, false, null, 0, $max ), Signatures::KIND_PHP, $min ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			}
 		}
 
@@ -237,7 +237,7 @@ class Scanner {
 
 		// SVG can carry scripts that run in the admin's browser.
 		if ( 'svg' === Paths::ext( $clean ) && $size <= $max ) {
-			$svg = (string) @file_get_contents( $tmp_path, false, null, 0, $max ); // phpcs:ignore
+			$svg = (string) @file_get_contents( $tmp_path, false, null, 0, $max ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			if ( preg_match( '~<script\b|\bon[a-z]{3,20}\s*=|javascript\s*:|<foreignObject\b|<iframe\b|<embed\b~i', $svg, $m, PREG_OFFSET_CAPTURE ) ) {
 				$hits[] = array(
 					'sig'      => 'upload_svg_script',
@@ -573,7 +573,7 @@ class Scanner {
 		if ( false === $size || $size < 2 || $size > 4 * MB_IN_BYTES ) {
 			return false;
 		}
-		$data = json_decode( (string) @file_get_contents( $file ), true ); // phpcs:ignore
+		$data = json_decode( (string) @file_get_contents( $file ), true ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		if ( ! is_array( $data ) || empty( $data['files'] ) || ! is_array( $data['files'] ) ) {
 			return false;
 		}
@@ -735,7 +735,7 @@ class Scanner {
 	 * @return bool
 	 */
 	private function content_is_php( $abs ) {
-		$head = (string) @file_get_contents( $abs, false, null, 0, 8192 ); // phpcs:ignore
+		$head = (string) @file_get_contents( $abs, false, null, 0, 8192 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		return '' !== $head && ( Signatures::looks_like_php( $head ) || false !== stripos( $head, '<?php' ) );
 	}
 
@@ -759,7 +759,7 @@ class Scanner {
 			return false;
 		}
 		try {
-			$tokens = @token_get_all( (string) @file_get_contents( $abs ) ); // phpcs:ignore
+			$tokens = @token_get_all( (string) @file_get_contents( $abs ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		} catch ( \Throwable $e ) {
 			return false;
 		}
@@ -876,7 +876,7 @@ class Scanner {
 			return false;
 		}
 		try {
-			$code = (string) @file_get_contents( $abs ); // phpcs:ignore
+			$code = (string) @file_get_contents( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			if ( $code === (string) $guard->bootstrap_code() ) {
 				return true;
 			}
@@ -1295,7 +1295,7 @@ class Scanner {
 	 */
 	private function wp_version() {
 		$file = ABSPATH . ( defined( 'WPINC' ) ? WPINC : 'wp-includes' ) . '/version.php';
-		$code = @file_get_contents( $file, false, null, 0, 4096 ); // phpcs:ignore
+		$code = @file_get_contents( $file, false, null, 0, 4096 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		if ( $code && preg_match( '~\$wp_version\s*=\s*[\x27"]([^\x27"]+)[\x27"]~', $code, $m ) ) {
 			return $m[1];
 		}
@@ -1313,7 +1313,7 @@ class Scanner {
 	 */
 	public function package_locale() {
 		$file = ABSPATH . ( defined( 'WPINC' ) ? WPINC : 'wp-includes' ) . '/version.php';
-		$code = @file_get_contents( $file, false, null, 0, 16384 ); // phpcs:ignore
+		$code = @file_get_contents( $file, false, null, 0, 16384 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		if ( $code && preg_match( '~^\s*\$wp_local_package\s*=\s*[\x27"]([A-Za-z]{2,3}(?:_[A-Za-z0-9]{2,8}){0,2})[\x27"]\s*;~m', $code, $m ) ) {
 			return $m[1];
 		}
@@ -1679,10 +1679,11 @@ class Scanner {
 
 	/**
 	 * Background refresh (scheduled scans, daily maintenance): only when ClamAV
-	 * is installed and the last result is older than SELFTEST_TTL.
+	 * is installed and turned on, and the last result is older than SELFTEST_TTL.
+	 * Without "Also scan uploads with ClamAV" no program runs in the background.
 	 */
 	public function refresh_selftest_if_stale() {
-		if ( ! $this->clamav_binaries() ) {
+		if ( ! $this->settings()->get( 'clamav_enabled', false ) || ! $this->clamav_binaries() ) {
 			return;
 		}
 		$cached = $this->clamav_selftest_cached();
@@ -1972,7 +1973,7 @@ class Scanner {
 	private function run_command( $cmd, $timeout ) {
 		if ( $this->function_enabled( 'proc_open' ) ) {
 			$pipes = array();
-			$proc  = @proc_open( $cmd, array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes ); // phpcs:ignore
+			$proc  = @proc_open( $cmd, array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes ); // phpcs:ignore Generic.PHP.ForbiddenFunctions.Found, WordPress.PHP.DiscouragedPHPFunctions.system_calls_proc_open, WordPress.PHP.NoSilencedErrors.Discouraged -- the server's clamscan/clamdscan with escapeshellarg() arguments: the EICAR self-test when an admin opens the antivirus status, and file scans once the admin turned ClamAV on.
 			if ( ! is_resource( $proc ) ) {
 				return null;
 			}
@@ -2006,7 +2007,7 @@ class Scanner {
 		if ( $this->function_enabled( 'exec' ) ) {
 			$lines = array();
 			$code  = 0;
-			@exec( $cmd, $lines, $code ); // phpcs:ignore
+			@exec( $cmd, $lines, $code ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.system_calls_exec, WordPress.PHP.NoSilencedErrors.Discouraged -- the server's clamscan/clamdscan with escapeshellarg() arguments: the EICAR self-test when an admin opens the antivirus status, and file scans once the admin turned ClamAV on.
 			return array( (int) $code, implode( "\n", array_slice( $lines, 0, 500 ) ) );
 		}
 		return null;
@@ -2151,7 +2152,7 @@ class Scanner {
 		if ( false === $size || $size > 400 ) {
 			return false;
 		}
-		$tiny = (string) @file_get_contents( $abs ); // phpcs:ignore
+		$tiny = (string) @file_get_contents( $abs ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		return false === strpos( $tiny, '<?' ) || (bool) preg_match( '~^\s*<\?php\s*(?://[^\n]*\n?|#[^\n]*\n?|/\*.*?\*/|\s+)*(?:\?>\s*)?$~s', $tiny );
 	}
 
@@ -2164,14 +2165,14 @@ class Scanner {
 	 * @return bool
 	 */
 	private function file_matches( $path, $pattern ) {
-		$handle = @fopen( $path, 'rb' ); // phpcs:ignore
+		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		if ( ! $handle ) {
 			return false;
 		}
 		$carry = '';
 		$found = false;
 		while ( ! feof( $handle ) ) {
-			$chunk = fread( $handle, 1048576 ); // phpcs:ignore
+			$chunk = fread( $handle, 1048576 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			if ( false === $chunk || '' === $chunk ) {
 				break;
 			}
@@ -2182,7 +2183,7 @@ class Scanner {
 			}
 			$carry = substr( $data, -128 );
 		}
-		fclose( $handle ); // phpcs:ignore
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		return $found;
 	}
 
@@ -2194,7 +2195,7 @@ class Scanner {
 	 * @return bool
 	 */
 	private function file_contains( $path, $needle ) {
-		$handle = @fopen( $path, 'rb' ); // phpcs:ignore
+		$handle = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		if ( ! $handle ) {
 			return false;
 		}
@@ -2202,7 +2203,7 @@ class Scanner {
 		$carry  = '';
 		$found  = false;
 		while ( ! feof( $handle ) ) {
-			$chunk = fread( $handle, 1048576 ); // phpcs:ignore
+			$chunk = fread( $handle, 1048576 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			if ( false === $chunk || '' === $chunk ) {
 				break;
 			}
@@ -2212,7 +2213,7 @@ class Scanner {
 			}
 			$carry = substr( $chunk, - ( strlen( $needle ) - 1 ) );
 		}
-		fclose( $handle ); // phpcs:ignore
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		return $found;
 	}
 }

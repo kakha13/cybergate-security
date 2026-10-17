@@ -794,7 +794,7 @@ class Guard_Manager {
 	private function write_bootstrap() {
 		$path = $this->bootstrap_path();
 		$code = $this->bootstrap_code();
-		if ( is_file( $path ) && (string) @file_get_contents( $path ) === $code ) { // phpcs:ignore
+		if ( is_file( $path ) && (string) @file_get_contents( $path ) === $code ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			return true;
 		}
 		if ( ! Guard_Config::atomic_write( $path, $code ) ) {
@@ -820,7 +820,7 @@ class Guard_Manager {
 		if ( ! is_file( $path ) ) {
 			return; // Not created yet or removed on purpose; install() recreates it.
 		}
-		if ( (string) @file_get_contents( $path ) !== $this->bootstrap_code() ) { // phpcs:ignore
+		if ( (string) @file_get_contents( $path ) !== $this->bootstrap_code() ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			$this->write_bootstrap();
 		}
 	}
@@ -927,7 +927,7 @@ class Guard_Manager {
 				'filename'  => $ini_name,
 				'path'      => $ini_path,
 				'exists'    => '' !== $ini_path && is_file( $ini_path ),
-				'has_line'  => '' !== $ini_path && is_file( $ini_path ) && false !== strpos( (string) @file_get_contents( $ini_path ), self::BOOTSTRAP_FILE ), // phpcs:ignore
+				'has_line'  => '' !== $ini_path && is_file( $ini_path ) && false !== strpos( (string) @file_get_contents( $ini_path ), self::BOOTSTRAP_FILE ), // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 				'cache_ttl' => (int) ini_get( 'user_ini.cache_ttl' ),
 			),
 		);
@@ -1085,7 +1085,7 @@ class Guard_Manager {
 	 */
 	private function write_user_ini_file( $file ) {
 		$bootstrap = $this->bootstrap_path();
-		$content   = is_file( $file ) ? (string) @file_get_contents( $file ) : ''; // phpcs:ignore
+		$content   = is_file( $file ) ? (string) @file_get_contents( $file ) : ''; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		$lines     = '' === $content ? array() : preg_split( '/\r\n|\n|\r/', $content );
 		$ours      = 'auto_prepend_file = "' . $bootstrap . '"';
 		$found     = false;
@@ -1127,7 +1127,7 @@ class Guard_Manager {
 			return true;
 		}
 		// Plain write keeps the file's owner and permissions.
-		if ( false === @file_put_contents( $file, $new, LOCK_EX ) ) { // phpcs:ignore
+		if ( false === @file_put_contents( $file, $new, LOCK_EX ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			return new \WP_Error(
 				'wpcybersec_user_ini_write',
 				/* translators: %s: file path */
@@ -1171,7 +1171,7 @@ class Guard_Manager {
 		if ( ! is_file( $file ) ) {
 			return true;
 		}
-		$content = (string) @file_get_contents( $file ); // phpcs:ignore
+		$content = (string) @file_get_contents( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		$kept    = array();
 		foreach ( preg_split( '/\r\n|\n|\r/', $content ) as $line ) {
 			$trimmed = trim( $line );
@@ -1187,7 +1187,7 @@ class Guard_Manager {
 		if ( "\n" === $new ) {
 			$new = '';
 		}
-		if ( $new !== $content && false === @file_put_contents( $file, $new, LOCK_EX ) ) { // phpcs:ignore
+		if ( $new !== $content && false === @file_put_contents( $file, $new, LOCK_EX ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			/* translators: %s: file path */
 			return new \WP_Error( 'wpcybersec_user_ini_write', sprintf( __( 'Could not write %s. Remove the auto_prepend_file line yourself.', 'cybergate-security' ), $file ) );
 		}
@@ -1226,7 +1226,7 @@ class Guard_Manager {
 	 */
 	private function write_htaccess_file( $file ) {
 		if ( is_file( $file ) ) {
-			$content = (string) @file_get_contents( $file ); // phpcs:ignore
+			$content = (string) @file_get_contents( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			$outside = preg_replace( '/# BEGIN ' . preg_quote( self::MARKER, '/' ) . '.*?# END ' . preg_quote( self::MARKER, '/' ) . '/s', '', $content );
 			if ( preg_match( '/^\s*php_value\s+auto_prepend_file\s+["\']?([^"\'\r\n]+)/im', (string) $outside, $match ) && false === strpos( $match[1], self::BOOTSTRAP_FILE ) ) {
 				return new \WP_Error(
@@ -1332,7 +1332,7 @@ class Guard_Manager {
 		}
 		// Already loads the guard itself?
 		if ( @is_readable( $prepend ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-			$head = (string) @file_get_contents( $prepend, false, null, 0, 65536 ); // phpcs:ignore
+			$head = (string) @file_get_contents( $prepend, false, null, 0, 65536 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			if ( false !== strpos( $head, self::BOOTSTRAP_FILE ) ) {
 				return '';
 			}
@@ -1424,7 +1424,7 @@ class Guard_Manager {
 			if ( ! @is_readable( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 				continue;
 			}
-			foreach ( preg_split( '/\r\n|\n|\r/', (string) @file_get_contents( $file ) ) as $line ) { // phpcs:ignore
+			foreach ( preg_split( '/\r\n|\n|\r/', (string) @file_get_contents( $file ) ) as $line ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 				$line = ltrim( $line );
 				if ( '' === $line || ';' === $line[0] || '#' === $line[0] ) {
 					continue;
@@ -1741,12 +1741,12 @@ class Guard_Manager {
 		if ( ! is_dir( $dir ) ) {
 			return null;
 		}
-		$handle = @fopen( $this->lock_file(), 'c' ); // phpcs:ignore
+		$handle = @fopen( $this->lock_file(), 'c' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 		if ( ! $handle ) {
 			return null;
 		}
-		if ( ! @flock( $handle, LOCK_EX | LOCK_NB ) ) { // phpcs:ignore
-			@fclose( $handle ); // phpcs:ignore
+		if ( ! @flock( $handle, LOCK_EX | LOCK_NB ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
+			@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 			return null;
 		}
 		return $handle;
@@ -1756,8 +1756,8 @@ class Guard_Manager {
 	 * @param resource $handle Lock handle.
 	 */
 	private function release_import_lock( $handle ) {
-		@flock( $handle, LOCK_UN ); // phpcs:ignore
-		@fclose( $handle ); // phpcs:ignore
+		@flock( $handle, LOCK_UN ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
+		@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 	}
 
 	/**
@@ -1774,12 +1774,12 @@ class Guard_Manager {
 		if ( ! is_file( $spool ) || 0 === (int) @filesize( $spool ) || @is_file( $work ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			return false;
 		}
-		$handle = @fopen( $spool, 'c+' ); // phpcs:ignore
+		$handle = @fopen( $spool, 'c+' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 		if ( ! $handle ) {
 			return false;
 		}
-		if ( ! @flock( $handle, LOCK_EX ) ) { // phpcs:ignore
-			@fclose( $handle ); // phpcs:ignore
+		if ( ! @flock( $handle, LOCK_EX ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
+			@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 			return false;
 		}
 		$ok   = false;
@@ -1787,12 +1787,12 @@ class Guard_Manager {
 		$stat = fstat( $handle );
 		$size = is_array( $stat ) ? (int) $stat['size'] : 0;
 		if ( $size > 0 ) {
-			$out = @fopen( $tmp, 'xb' ); // phpcs:ignore
+			$out = @fopen( $tmp, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 			if ( $out ) {
 				rewind( $handle );
 				$copied = stream_copy_to_stream( $handle, $out );
-				$ok     = false !== $copied && (int) $copied === $size && @fflush( $out ); // phpcs:ignore
-				@fclose( $out ); // phpcs:ignore
+				$ok     = false !== $copied && (int) $copied === $size && @fflush( $out ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
+				@fclose( $out ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 				// The position file belongs to the work file; start the new one at 0.
 				if ( $ok && is_file( $this->pos_file() ) ) {
 					$ok = Fs::delete( $this->pos_file() );
@@ -1807,8 +1807,8 @@ class Guard_Manager {
 				}
 			}
 		}
-		@flock( $handle, LOCK_UN ); // phpcs:ignore
-		@fclose( $handle ); // phpcs:ignore
+		@flock( $handle, LOCK_UN ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
+		@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 		return $ok;
 	}
 
@@ -1828,7 +1828,7 @@ class Guard_Manager {
 			return null;
 		}
 		$pos    = $this->read_pos();
-		$handle = @fopen( $work, 'rb' ); // phpcs:ignore
+		$handle = @fopen( $work, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 		if ( ! $handle ) {
 			return false;
 		}
@@ -1856,7 +1856,7 @@ class Guard_Manager {
 			$offset = (int) $end;
 			$tries  = 0;
 		}
-		@fclose( $handle ); // phpcs:ignore
+		@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 
 		if ( null === $result ) {
 			// Everything in the work file is imported.
@@ -1880,7 +1880,7 @@ class Guard_Manager {
 		if ( ! is_file( $file ) ) {
 			return $pos;
 		}
-		$data = json_decode( (string) @file_get_contents( $file ), true ); // phpcs:ignore
+		$data = json_decode( (string) @file_get_contents( $file ), true ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		if ( is_array( $data ) ) {
 			$pos['offset'] = isset( $data['offset'] ) ? max( 0, (int) $data['offset'] ) : 0;
 			$pos['tries']  = isset( $data['tries'] ) ? max( 0, (int) $data['tries'] ) : 0;
@@ -2102,16 +2102,16 @@ class Guard_Manager {
 	 * @param string[] $lines JSON lines to put back.
 	 */
 	private function append_spool( array $lines ) {
-		$handle = @fopen( $this->spool_file(), 'ab' ); // phpcs:ignore
+		$handle = @fopen( $this->spool_file(), 'ab' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 		if ( ! $handle ) {
 			return;
 		}
-		if ( @flock( $handle, LOCK_EX ) ) { // phpcs:ignore
-			@fwrite( $handle, implode( "\n", $lines ) . "\n" ); // phpcs:ignore
-			@fflush( $handle ); // phpcs:ignore
-			@flock( $handle, LOCK_UN ); // phpcs:ignore
+		if ( @flock( $handle, LOCK_EX ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
+			@fwrite( $handle, implode( "\n", $lines ) . "\n" ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- native handle needed for flock() and streaming; WP_Filesystem has neither.
+			@fflush( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
+			@flock( $handle, LOCK_UN ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
 		}
-		@fclose( $handle ); // phpcs:ignore
+		@fclose( $handle ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 	}
 
 	/**
@@ -2136,7 +2136,7 @@ class Guard_Manager {
 			return 0;
 		}
 		$count  = 0;
-		$handle = @fopen( $file, 'rb' ); // phpcs:ignore
+		$handle = @fopen( $file, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 		if ( ! $handle ) {
 			return 0;
 		}
@@ -2144,13 +2144,13 @@ class Guard_Manager {
 			fseek( $handle, $offset );
 		}
 		while ( ! feof( $handle ) ) {
-			$chunk = fread( $handle, 65536 ); // phpcs:ignore
+			$chunk = fread( $handle, 65536 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 			if ( false === $chunk ) {
 				break;
 			}
 			$count += substr_count( $chunk, "\n" );
 		}
-		fclose( $handle ); // phpcs:ignore
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 		return $count;
 	}
 

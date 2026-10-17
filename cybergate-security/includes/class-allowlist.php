@@ -65,7 +65,7 @@ class Allowlist {
 		if ( null === $this->hash_cache ) {
 			global $wpdb;
 			$this->hash_cache = array();
-			$rows             = $wpdb->get_results( $wpdb->prepare( 'SELECT kind, value FROM ' . Store::table( 'allowlist' ) . ' WHERE kind IN (%s, %s)', self::KIND_HASH, self::KIND_HASH_EXEC ), ARRAY_A ); // phpcs:ignore
+			$rows             = $wpdb->get_results( $wpdb->prepare( 'SELECT kind, value FROM ' . Store::table( 'allowlist' ) . ' WHERE kind IN (%s, %s)', self::KIND_HASH, self::KIND_HASH_EXEC ), ARRAY_A ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 			foreach ( (array) $rows as $row ) {
 				$level = self::KIND_HASH_EXEC === $row['kind'] ? 2 : 1;
 				if ( ! isset( $this->hash_cache[ $row['value'] ] ) || $level > $this->hash_cache[ $row['value'] ] ) {
@@ -104,7 +104,7 @@ class Allowlist {
 		if ( ! preg_match( '/^[a-f0-9]{64}$/', $fingerprint ) ) {
 			return false;
 		}
-		return (bool) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . Store::table( 'allowlist' ) . ' WHERE kind = %s AND value = %s', self::KIND_DB, $fingerprint ) ); // phpcs:ignore
+		return (bool) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . Store::table( 'allowlist' ) . ' WHERE kind = %s AND value = %s', self::KIND_DB, $fingerprint ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/**
@@ -131,7 +131,7 @@ class Allowlist {
 	public function is_allowed_install( $type, $slug ) {
 		global $wpdb;
 		$value = self::install_key( $type, $slug );
-		return (bool) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . Store::table( 'allowlist' ) . ' WHERE kind = %s AND value = %s', self::KIND_INSTALL, $value ) ); // phpcs:ignore
+		return (bool) $wpdb->get_var( $wpdb->prepare( 'SELECT id FROM ' . Store::table( 'allowlist' ) . ' WHERE kind = %s AND value = %s', self::KIND_INSTALL, $value ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/**
@@ -165,7 +165,7 @@ class Allowlist {
 		if ( ! $row ) {
 			return false;
 		}
-		$wpdb->delete( Store::table( 'allowlist' ), array( 'id' => (int) $id ) ); // phpcs:ignore
+		$wpdb->delete( Store::table( 'allowlist' ), array( 'id' => (int) $id ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin's own table; no WordPress API covers it.
 		$this->hash_cache = null;
 		$this->after_change();
 		wpcybersec()->logger->log( 'allowlist_removed', sprintf( /* translators: %s: label */ __( 'Removed from allowlist: %s', 'cybergate-security' ), $row['label'] ? $row['label'] : $row['value'] ), array( 'entry' => $row ) );
@@ -178,7 +178,7 @@ class Allowlist {
 	 */
 	public function get( $id ) {
 		global $wpdb;
-		$row = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . Store::table( 'allowlist' ) . ' WHERE id = %d', $id ), ARRAY_A ); // phpcs:ignore
+		$row = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . Store::table( 'allowlist' ) . ' WHERE id = %d', $id ), ARRAY_A ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		return $row ? $row : null;
 	}
 
@@ -220,7 +220,7 @@ class Allowlist {
 	 */
 	public function count() {
 		global $wpdb;
-		return (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . Store::table( 'allowlist' ) ); // phpcs:ignore
+		return (int) $wpdb->get_var( 'SELECT COUNT(*) FROM ' . Store::table( 'allowlist' ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/**
@@ -282,7 +282,7 @@ class Allowlist {
 	 */
 	private function checksum( $key ) {
 		global $wpdb;
-		$rows = $wpdb->get_col( 'SELECT CONCAT(kind, ":", value) FROM ' . Store::table( 'allowlist' ) . ' ORDER BY kind, value' ); // phpcs:ignore
+		$rows = $wpdb->get_col( 'SELECT CONCAT(kind, ":", value) FROM ' . Store::table( 'allowlist' ) . ' ORDER BY kind, value' ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		return hash_hmac( 'sha256', implode( "\n", (array) $rows ), $key );
 	}
 
@@ -296,11 +296,11 @@ class Allowlist {
 	private function insert( $kind, $value, $label, $note ) {
 		global $wpdb;
 		$table    = Store::table( 'allowlist' );
-		$existing = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$table} WHERE kind = %s AND value = %s", $kind, $value ) ); // phpcs:ignore
+		$existing = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$table} WHERE kind = %s AND value = %s", $kind, $value ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		if ( $existing ) {
 			return (int) $existing;
 		}
-		$wpdb->insert( // phpcs:ignore
+		$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- plugin's own table; no WordPress API covers it.
 			$table,
 			array(
 				'kind'       => $kind,

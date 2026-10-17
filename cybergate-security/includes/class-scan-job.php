@@ -368,8 +368,8 @@ class Scan_Job {
 		wpcybersec()->logger->log(
 			'scan_started',
 			sprintf(
-				/* translators: 1: scan mode, 2: trigger */
-				__( 'Started a %1$s scan (%2$s).', 'cybergate-security' ),
+				/* translators: 1: scan mode (incremental, full or baseline), 2: what started it (manual, cron, cli) */
+				__( 'Scan started: %1$s (%2$s).', 'cybergate-security' ),
 				$mode,
 				$this->state['trigger']
 			),
@@ -1114,7 +1114,7 @@ class Scan_Job {
 			}
 			$this->state['cursor'] = null;
 
-			$dh = @opendir( $abs_dir ); // phpcs:ignore
+			$dh = @opendir( $abs_dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
 			if ( ! $dh ) {
 				++$this->state['skipped'];
 				continue;
@@ -1245,7 +1245,7 @@ class Scan_Job {
 	 * @param string   $dir    Absolute folder without a trailing slash.
 	 */
 	private function list_top( $handle, &$buffer, $dir ) {
-		$dh = @opendir( $dir ); // phpcs:ignore
+		$dh = @opendir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
 		if ( ! $dh ) {
 			++$this->state['skipped'];
 			return;
@@ -1314,7 +1314,7 @@ class Scan_Job {
 	 */
 	private function flush_enum( $handle, &$buffer ) {
 		if ( '' !== $buffer ) {
-			@fwrite( $handle, $buffer ); // phpcs:ignore
+			@fwrite( $handle, $buffer ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- native handle needed for flock() and streaming; WP_Filesystem has neither.
 			$buffer = '';
 		}
 	}
@@ -3087,8 +3087,8 @@ class Scan_Job {
 			return is_string( $sha ) ? $sha : '';
 		}
 		$chunk = 1048576;
-		$head  = @file_get_contents( $abs, false, null, 0, $chunk ); // phpcs:ignore
-		$tail  = @file_get_contents( $abs, false, null, max( 0, $size - $chunk ), $chunk ); // phpcs:ignore
+		$head  = @file_get_contents( $abs, false, null, 0, $chunk ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
+		$tail  = @file_get_contents( $abs, false, null, max( 0, $size - $chunk ), $chunk ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		if ( false === $head || false === $tail ) {
 			return '';
 		}

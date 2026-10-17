@@ -186,7 +186,7 @@ class Store {
 	 */
 	public function item_get( $id ) {
 		global $wpdb;
-		$row = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::table( 'items' ) . ' WHERE id = %d', $id ), ARRAY_A ); // phpcs:ignore
+		$row = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . self::table( 'items' ) . ' WHERE id = %d', $id ), ARRAY_A ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		return $row ? self::decode_item( $row ) : null;
 	}
 
@@ -202,7 +202,7 @@ class Store {
 			$data['details'] = wp_json_encode( array_merge( $current ? $current['details'] : array(), $data['details'] ) );
 		}
 		$data['updated_at'] = self::now();
-		$ok                 = false !== $wpdb->update( self::table( 'items' ), $data, array( 'id' => (int) $id ) ); // phpcs:ignore
+		$ok                 = false !== $wpdb->update( self::table( 'items' ), $data, array( 'id' => (int) $id ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin's own table; no WordPress API covers it.
 		if ( $ok && array_intersect_key( $data, array( 'status' => 1, 'type' => 1, 'quarantine_path' => 1 ) ) ) {
 			self::flush_counts();
 		}
@@ -282,7 +282,7 @@ class Store {
 			)
 		);
 		$sql = 'SELECT COUNT(*) FROM ' . self::table( 'items' ) . " WHERE {$where}";
-		return (int) ( $params ? $wpdb->get_var( $wpdb->prepare( $sql, $params ) ) : $wpdb->get_var( $sql ) ); // phpcs:ignore
+		return (int) ( $params ? $wpdb->get_var( $wpdb->prepare( $sql, $params ) ) : $wpdb->get_var( $sql ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/**
@@ -408,11 +408,11 @@ class Store {
 		$table = self::table( 'items' );
 		$path  = self::db_text( $path ); // Same form item_insert() stored.
 		if ( $sha256 ) {
-			$sql = $wpdb->prepare( "SELECT * FROM {$table} WHERE type = %s AND status = %s AND path = %s AND sha256 = %s ORDER BY id DESC LIMIT 1", $type, self::STATUS_PENDING, $path, $sha256 ); // phpcs:ignore
+			$sql = $wpdb->prepare( "SELECT * FROM {$table} WHERE type = %s AND status = %s AND path = %s AND sha256 = %s ORDER BY id DESC LIMIT 1", $type, self::STATUS_PENDING, $path, $sha256 ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		} else {
-			$sql = $wpdb->prepare( "SELECT * FROM {$table} WHERE type = %s AND status = %s AND path = %s ORDER BY id DESC LIMIT 1", $type, self::STATUS_PENDING, $path ); // phpcs:ignore
+			$sql = $wpdb->prepare( "SELECT * FROM {$table} WHERE type = %s AND status = %s AND path = %s ORDER BY id DESC LIMIT 1", $type, self::STATUS_PENDING, $path ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		}
-		$row = $wpdb->get_row( $sql, ARRAY_A ); // phpcs:ignore
+		$row = $wpdb->get_row( $sql, ARRAY_A ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		return $row ? self::decode_item( $row ) : null;
 	}
 
@@ -429,7 +429,7 @@ class Store {
 	public function items_resolve_open( $rel, $reason ) {
 		global $wpdb;
 		$table = self::table( 'items' );
-		$ids   = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$table} WHERE type IN (%s, %s) AND status = %s AND path = %s AND quarantine_path = '' AND source <> %s", self::TYPE_FILE, self::TYPE_THREAT, self::STATUS_PENDING, self::db_text( $rel ), self::SOURCE_DATABASE ) ); // phpcs:ignore
+		$ids   = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$table} WHERE type IN (%s, %s) AND status = %s AND path = %s AND quarantine_path = '' AND source <> %s", self::TYPE_FILE, self::TYPE_THREAT, self::STATUS_PENDING, self::db_text( $rel ), self::SOURCE_DATABASE ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		foreach ( (array) $ids as $id ) {
 			$this->item_update(
 				(int) $id,
@@ -461,7 +461,7 @@ class Store {
 		if ( ! $ids ) {
 			return 0;
 		}
-		$deleted = (int) $wpdb->query( 'DELETE FROM ' . self::table( 'items' ) . ' WHERE id IN (' . implode( ',', $ids ) . ')' ); // phpcs:ignore
+		$deleted = (int) $wpdb->query( 'DELETE FROM ' . self::table( 'items' ) . ' WHERE id IN (' . implode( ',', $ids ) . ')' ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		if ( $deleted ) {
 			self::flush_counts();
 		}
@@ -527,7 +527,7 @@ class Store {
 		$out         = array();
 		foreach ( array_chunk( $path_hashes, 500 ) as $chunk ) {
 			$sql  = 'SELECT * FROM ' . self::table( 'manifest' ) . ' WHERE path_hash IN (' . implode( ',', array_fill( 0, count( $chunk ), '%s' ) ) . ')';
-			$rows = $wpdb->get_results( $wpdb->prepare( $sql, $chunk ), ARRAY_A ); // phpcs:ignore
+			$rows = $wpdb->get_results( $wpdb->prepare( $sql, $chunk ), ARRAY_A ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 			foreach ( (array) $rows as $row ) {
 				$out[ $row['path_hash'] ] = $row;
 			}
@@ -595,7 +595,7 @@ class Store {
 		}
 		$sql = 'INSERT INTO ' . self::table( 'manifest' ) . ' (path_hash, path, sha256, size, mtime, state, run_id, updated_at) VALUES ' . implode( ',', $values )
 			. ' ON DUPLICATE KEY UPDATE path = VALUES(path), sha256 = VALUES(sha256), size = VALUES(size), mtime = VALUES(mtime), state = VALUES(state), run_id = VALUES(run_id), updated_at = VALUES(updated_at)';
-		return $wpdb->query( $wpdb->prepare( $sql, $params ) ); // phpcs:ignore
+		return $wpdb->query( $wpdb->prepare( $sql, $params ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/**
@@ -608,7 +608,7 @@ class Store {
 		global $wpdb;
 		foreach ( array_chunk( array_values( array_unique( $path_hashes ) ), 500 ) as $chunk ) {
 			$sql = 'UPDATE ' . self::table( 'manifest' ) . ' SET run_id = %s WHERE path_hash IN (' . implode( ',', array_fill( 0, count( $chunk ), '%s' ) ) . ')';
-			$wpdb->query( $wpdb->prepare( $sql, array_merge( array( $run_id ), $chunk ) ) ); // phpcs:ignore
+			$wpdb->query( $wpdb->prepare( $sql, array_merge( array( $run_id ), $chunk ) ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		}
 	}
 
@@ -639,8 +639,8 @@ class Store {
 			$params[] = (string) $before;
 		}
 		$params[] = (int) $limit;
-		$sql      = $wpdb->prepare( "SELECT * FROM {$table} WHERE {$where} LIMIT %d", $params ); // phpcs:ignore
-		return (array) $wpdb->get_results( $sql, ARRAY_A ); // phpcs:ignore
+		$sql      = $wpdb->prepare( "SELECT * FROM {$table} WHERE {$where} LIMIT %d", $params ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
+		return (array) $wpdb->get_results( $sql, ARRAY_A ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/**
@@ -650,7 +650,7 @@ class Store {
 		global $wpdb;
 		foreach ( array_chunk( array_values( array_unique( array_filter( $path_hashes ) ) ), 500 ) as $chunk ) {
 			$sql = 'DELETE FROM ' . self::table( 'manifest' ) . ' WHERE path_hash IN (' . implode( ',', array_fill( 0, count( $chunk ), '%s' ) ) . ')';
-			$wpdb->query( $wpdb->prepare( $sql, $chunk ) ); // phpcs:ignore
+			$wpdb->query( $wpdb->prepare( $sql, $chunk ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		}
 	}
 
@@ -659,7 +659,7 @@ class Store {
 	 */
 	public function manifest_delete_prefix( $prefix ) {
 		global $wpdb;
-		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . self::table( 'manifest' ) . ' WHERE path LIKE %s', $wpdb->esc_like( self::db_text( $prefix ) ) . '%' ) ); // phpcs:ignore
+		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . self::table( 'manifest' ) . ' WHERE path LIKE %s', $wpdb->esc_like( self::db_text( $prefix ) ) . '%' ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/**
@@ -670,9 +670,9 @@ class Store {
 		global $wpdb;
 		$table = self::table( 'manifest' );
 		if ( $state ) {
-			return (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$table} WHERE state = %s", $state ) ); // phpcs:ignore
+			return (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$table} WHERE state = %s", $state ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 		}
-		return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" ); // phpcs:ignore
+		return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/**
@@ -681,7 +681,7 @@ class Store {
 	 */
 	public function manifest_set_state( $rel, $state ) {
 		global $wpdb;
-		$wpdb->update( self::table( 'manifest' ), array( 'state' => $state, 'updated_at' => self::now() ), array( 'path_hash' => Paths::hash( $rel ) ) ); // phpcs:ignore
+		$wpdb->update( self::table( 'manifest' ), array( 'state' => $state, 'updated_at' => self::now() ), array( 'path_hash' => Paths::hash( $rel ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- plugin's own table; no WordPress API covers it.
 	}
 
 	/**
@@ -689,7 +689,7 @@ class Store {
 	 */
 	public function manifest_truncate() {
 		global $wpdb;
-		$wpdb->query( 'TRUNCATE TABLE ' . self::table( 'manifest' ) ); // phpcs:ignore
+		$wpdb->query( 'TRUNCATE TABLE ' . self::table( 'manifest' ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/**
@@ -701,7 +701,7 @@ class Store {
 	 */
 	public function manifest_page( $limit, $offset ) {
 		global $wpdb;
-		return (array) $wpdb->get_results( $wpdb->prepare( 'SELECT path, sha256, size FROM ' . self::table( 'manifest' ) . ' WHERE state = %s ORDER BY path LIMIT %d OFFSET %d', self::STATE_TRUSTED, $limit, $offset ), ARRAY_A ); // phpcs:ignore
+		return (array) $wpdb->get_results( $wpdb->prepare( 'SELECT path, sha256, size FROM ' . self::table( 'manifest' ) . ' WHERE state = %s ORDER BY path LIMIT %d OFFSET %d', self::STATE_TRUSTED, $limit, $offset ), ARRAY_A ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -716,7 +716,7 @@ class Store {
 	 */
 	public function log_insert( $event, $message, array $context = array() ) {
 		global $wpdb;
-		$wpdb->insert( // phpcs:ignore
+		$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- plugin's own table; no WordPress API covers it.
 			self::table( 'log' ),
 			array(
 				'event'      => substr( (string) $event, 0, 50 ),
@@ -772,7 +772,7 @@ class Store {
 	 */
 	public function log_events() {
 		global $wpdb;
-		return (array) $wpdb->get_col( 'SELECT DISTINCT event FROM ' . self::table( 'log' ) . ' ORDER BY event LIMIT 200' ); // phpcs:ignore
+		return (array) $wpdb->get_col( 'SELECT DISTINCT event FROM ' . self::table( 'log' ) . ' ORDER BY event LIMIT 200' ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/**
@@ -781,7 +781,7 @@ class Store {
 	public function log_prune( $days ) {
 		global $wpdb;
 		$cutoff = gmdate( 'Y-m-d H:i:s', time() - DAY_IN_SECONDS * (int) $days );
-		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . self::table( 'log' ) . ' WHERE created_at < %s', $cutoff ) ); // phpcs:ignore
+		$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . self::table( 'log' ) . ' WHERE created_at < %s', $cutoff ) ); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- plugin's own table, name from Store::table(); every value is a placeholder or cast to int.
 	}
 
 	/* ------------------------------------------------------------------ */

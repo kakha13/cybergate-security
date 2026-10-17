@@ -661,8 +661,8 @@ class Core_Repair {
 		$steps  = array();
 
 		$steps[] = array( 'text' => __( 'Take a full backup first: the database and every file (your host\'s backup tool or a backup plugin). Keep it until the site has been checked.', 'cybergate-security' ) );
-		/* translators: %s: WordPress version */
 		$steps[] = array(
+			/* translators: %s: WordPress version */
 			'text' => sprintf( __( 'Download the clean WordPress %s package without wp-content (the "no-content" zip, about 25 MB):', 'cybergate-security' ), $version ),
 			'code' => $url,
 		);
@@ -686,8 +686,8 @@ class Core_Repair {
 			'text' => __( 'Delete these two folders completely:', 'cybergate-security' ),
 			'code' => "wp-admin\nwp-includes",
 		);
-		/* translators: %s: WordPress version */
 		$steps[] = array(
+			/* translators: %s: WordPress version */
 			'text' => sprintf( __( 'In the WordPress folder delete exactly these files (the core files of WordPress %s, nothing else):', 'cybergate-security' ), $version ),
 			'code' => implode( "\n", $roots ),
 		);
@@ -816,7 +816,7 @@ class Core_Repair {
 		}
 		$code = '<?php $upgrading = ' . time() . '; // ' . self::MAINT_TAG . ": WordPress core is being replaced. Delete this file if it is still here after 10 minutes.\n";
 		$tmp  = ABSPATH . '.wpcs-maint-' . strtolower( wp_generate_password( 8, false, false ) ) . '.tmp';
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, WordPress.PHP.NoSilencedErrors -- temporary file next to the target for an atomic replace.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, WordPress.PHP.NoSilencedErrors, PluginCheck.CodeAnalysis.WriteFile.ABSPATHDetected -- WordPress only reads .maintenance from ABSPATH; temporary file next to it for an atomic replace, on the admin's request.
 		if ( strlen( $code ) !== (int) @file_put_contents( $tmp, $code ) || ! Fs::replace( $tmp, $file ) ) {
 			Fs::delete( $tmp );
 			return 'failed';
@@ -974,7 +974,7 @@ class Core_Repair {
 			require_once ABSPATH . 'wp-admin/includes/file.php';
 		}
 		if ( function_exists( 'set_time_limit' ) ) {
-			@set_time_limit( 300 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			@set_time_limit( 300 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, Squiz.PHP.DiscouragedFunctions.Discouraged -- the core package is about 25 MB; a slow host must not stop the download half way.
 		}
 		$tmp = download_url( $state['url'], 300 );
 		if ( is_wp_error( $tmp ) ) {

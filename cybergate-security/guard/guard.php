@@ -49,6 +49,20 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /*
+ * Why this file does not use WordPress functions: it is not loaded by
+ * WordPress. PHP runs it through auto_prepend_file before the requested script
+ * starts, so WordPress (ABSPATH, wp_unslash(), sanitize_*(), nonces, the
+ * current user, $wpdb, WP_Filesystem) is not loaded yet, and for uploads sent
+ * to a script outside WordPress it never will be. That is why it reads
+ * $_FILES and $_SERVER directly, uses plain PHP file functions, and validates
+ * input with its own helpers. It is only active after an administrator turns
+ * on Settings > Advanced > Early guard (or adds the auto_prepend_file line
+ * shown there). Turning it off there, or deactivating the plugin, switches it
+ * off; uninstalling with "Delete all data" also removes the lines the plugin
+ * wrote. A leftover bootstrap does nothing once this file or its config is gone.
+ * It makes no network requests, and the only file it includes is its own
+ * config, written by the plugin.
+ *
  * This file runs before WordPress: there are no nonces, no logged-in user and
  * no sanitize or unslash functions yet (and WordPress has not added slashes to
  * the request). The guard reads the request only to decide whether an upload
@@ -162,7 +176,7 @@ if ( ! defined( 'WPCYBERSEC_GUARD_ACTIVE' ) ) {
 			 */
 			public static function fail( $error ) {
 				$message = is_object( $error ) && method_exists( $error, 'getMessage' ) ? $error->getMessage() : 'unknown error';
-				@error_log( 'CyberGate Security guard: ' . $message ); // phpcs:ignore
+				@error_log( 'CyberGate Security guard: ' . $message ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log, WordPress.PHP.NoSilencedErrors.Discouraged -- runs before WordPress (auto_prepend_file); the PHP error log is the only log there.
 			}
 
 			/**

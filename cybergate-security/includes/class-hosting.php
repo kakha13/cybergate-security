@@ -1434,14 +1434,14 @@ class Hosting {
 					self::s( __( 'DDEV loads extra PHP settings from .ddev/php/*.ini in the project. Create .ddev/php/cybergate.ini with this line, then run ddev restart:', 'cybergate-security' ), 'auto_prepend_file = "' . $c['boot'] . '"' ),
 				);
 			case 'hostinger':
-				/* translators: %s: file path */
 				return array(
+					/* translators: %s: file path */
 					self::s( sprintf( __( 'hPanel\'s PHP Configuration has no field for this setting; Hostinger sets other PHP values with php_value lines in .htaccess (its servers run LiteSpeed). Add this to %s, above the WordPress block:', 'cybergate-security' ), $c['dirs'][0] . '/.htaccess' ), "<IfModule LiteSpeed>\n    php_value auto_prepend_file \"" . $c['boot'] . "\"\n</IfModule>" ),
 					self::s( __( 'If Settings > Advanced > Early guard still says "Active in this request: No" after a few minutes, ask Hostinger support to set auto_prepend_file for the site.', 'cybergate-security' ) ),
 				);
 			case 'gridpane':
-				/* translators: %s: file path */
 				return array(
+					/* translators: %s: file path */
 					self::s( sprintf( __( 'The PHP tab of GridPane\'s site customizer offers a fixed set of settings without this one. PHP-FPM reads .user.ini files: create %s and put this line in it:', 'cybergate-security' ), $c['dirs'][0] . '/.user.ini' ) . $both, $ini ),
 					self::s( __( 'If Settings > Advanced > Early guard still says "Active in this request: No" after 5 minutes, ask GridPane support.', 'cybergate-security' ) ),
 				);
@@ -1669,8 +1669,8 @@ class Hosting {
 			case 'hestia':
 			case 'vesta':
 				$conf = 'hestia' === $id ? '/home/' . $c['acct'] . '/conf/web/' . $c['site'] . '/nginx.conf_cybergate' : '/home/' . $c['acct'] . '/conf/web/nginx.' . $c['site'] . '.conf_cybergate';
-				/* translators: 1: panel name, 2: file path */
 				return array(
+					/* translators: 1: panel name, 2: file path */
 					self::s( sprintf( __( '%1$s includes extra nginx files of the domain in its server block. As root, write the rule to %2$s, then test and reload nginx:', 'cybergate-security' ), self::name( $id ), $conf ), 'cat > ' . Sysadmin_Tools::shell_arg( $conf ) . " <<'EOF'\n" . $nginx . "\nEOF\nnginx -t && systemctl reload nginx" ),
 					self::s( __( 'The rule is a prefix location with the PHP block nested inside, so it works even though the include comes after the PHP location of the template. With Apache behind nginx the uploads .htaccess rule also works.', 'cybergate-security' ) ),
 				);
@@ -1742,8 +1742,8 @@ class Hosting {
 				);
 			case 'hestia':
 				$private = '/home/' . $c['acct'] . '/web/' . $c['site'] . '/private';
-				/* translators: %s: folder */
-				return array( self::s( sprintf( __( 'Hestia\'s PHP-FPM pool lets PHP use the domain\'s private folder, which the web server does not serve: use a folder inside %s, for example %s/cybergate-data, in the steps below.', 'cybergate-security' ), $private, $private ) ) );
+				/* translators: %1$s: folder */
+				return array( self::s( sprintf( __( 'Hestia\'s PHP-FPM pool lets PHP use the domain\'s private folder, which the web server does not serve: use a folder inside %1$s, for example %1$s/cybergate-data, in the steps below.', 'cybergate-security' ), $private ) ) );
 			case 'vesta':
 				return array( self::s( __( 'VestaCP\'s PHP-FPM pools set no open_basedir (its mod_php template does), so a folder in /home/<user>/ outside the web folder works with PHP-FPM.', 'cybergate-security' ) ) );
 			case 'ispconfig':

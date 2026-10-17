@@ -457,7 +457,7 @@ class File_Monitor {
 		}
 		while ( $stack && count( $files ) < $limit ) {
 			$current = array_pop( $stack );
-			$dh      = @opendir( $current ); // phpcs:ignore
+			$dh      = @opendir( $current ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- errors are handled through the return value.
 			if ( ! $dh ) {
 				continue;
 			}

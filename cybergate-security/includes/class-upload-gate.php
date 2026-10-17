@@ -195,7 +195,7 @@ class Upload_Gate {
 		$name = (string) $data['name'];
 		$bits = (string) $data['bits'];
 		$tmp  = $this->temp_file( $name );
-		if ( '' === $tmp || strlen( $bits ) !== @file_put_contents( $tmp, $bits ) ) { // phpcs:ignore
+		if ( '' === $tmp || strlen( $bits ) !== @file_put_contents( $tmp, $bits ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 			if ( '' !== $tmp ) {
 				Fs::delete( $tmp );
 			}

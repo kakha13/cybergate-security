@@ -1804,7 +1804,7 @@ class Sysadmin_Tools {
 		if ( '' === $dir || ! is_readable( $dir . '/.htaccess' ) ) {
 			return 'none';
 		}
-		$content = (string) @file_get_contents( $dir . '/.htaccess' ); // phpcs:ignore
+		$content = (string) @file_get_contents( $dir . '/.htaccess' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		if ( false !== strpos( $content, '# BEGIN ' . self::MARKER ) ) {
 			return 'ours';
 		}
@@ -1902,7 +1902,7 @@ class Sysadmin_Tools {
 		if ( $exists && ( is_link( $file ) || ! is_file( $file ) ) ) {
 			return new \WP_Error( 'wpcybersec_htaccess', __( 'uploads/.htaccess is not a regular file. Add the rules by hand.', 'cybergate-security' ) );
 		}
-		$old = $exists ? @file_get_contents( $file ) : ''; // phpcs:ignore
+		$old = $exists ? @file_get_contents( $file ) : ''; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 		if ( false === $old ) {
 			return new \WP_Error( 'wpcybersec_htaccess', __( 'uploads/.htaccess exists but cannot be read. Add the rules by hand.', 'cybergate-security' ) );
 		}
@@ -1937,7 +1937,7 @@ class Sysadmin_Tools {
 		if ( in_array( self::server_type(), array( 'apache', 'litespeed', 'unknown' ), true ) ) {
 			$rollback = static function () use ( $exists, $file, $old, $old_trusted ) {
 				if ( $exists ) {
-					@file_put_contents( $file, $old, LOCK_EX ); // phpcs:ignore
+					@file_put_contents( $file, $old, LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 					// Same bytes as before, new mtime: refresh the fingerprint so the next scan skips it.
 					if ( $old_trusted ) {
 						self::call( 'file_monitor', 'trust_file', array( $file ) );
@@ -1981,7 +1981,7 @@ class Sysadmin_Tools {
 		$verified = $this->verify_uploads_block(
 			static function () use ( $exists, $file, $old, $old_trusted ) {
 				if ( $exists ) {
-					@file_put_contents( $file, $old, LOCK_EX ); // phpcs:ignore
+					@file_put_contents( $file, $old, LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- local file; WP_Filesystem may ask for FTP credentials, which a scan or cron run cannot answer.
 					if ( $old_trusted ) {
 						self::call( 'file_monitor', 'trust_file', array( $file ) );
 					}

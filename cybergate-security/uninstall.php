@@ -86,7 +86,7 @@ if ( $wpcybersec_delete ) {
 	if ( is_array( $wpcybersec_core_backups ) && class_exists( '\WPCyberSecurity\Fs' ) ) {
 		foreach ( $wpcybersec_core_backups as $wpcybersec_entry ) {
 			$wpcybersec_dir = is_array( $wpcybersec_entry ) && isset( $wpcybersec_entry['dir'], $wpcybersec_entry['id'] ) ? (string) $wpcybersec_entry['dir'] : '';
-			$wpcybersec_mk  = '' !== $wpcybersec_dir ? json_decode( (string) @file_get_contents( $wpcybersec_dir . '/.wpcybersec-core-backup' ), true ) : null; // phpcs:ignore
+			$wpcybersec_mk  = '' !== $wpcybersec_dir ? json_decode( (string) @file_get_contents( $wpcybersec_dir . '/.wpcybersec-core-backup' ), true ) : null; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- direct file call: uninstall cannot ask for FTP credentials.
 			if ( is_array( $wpcybersec_mk ) && isset( $wpcybersec_mk['id'] ) && (string) $wpcybersec_mk['id'] === (string) $wpcybersec_entry['id'] ) {
 				\WPCyberSecurity\Fs::delete_tree( $wpcybersec_dir );
 			}
@@ -104,7 +104,7 @@ if ( $wpcybersec_delete ) {
 			if ( ! is_file( $wpcybersec_file ) || is_link( $wpcybersec_file ) || ! is_writable( $wpcybersec_file ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
 				continue;
 			}
-			$wpcybersec_old  = (string) @file_get_contents( $wpcybersec_file ); // phpcs:ignore
+			$wpcybersec_old  = (string) @file_get_contents( $wpcybersec_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- direct file call: uninstall cannot ask for FTP credentials.
 			$wpcybersec_kept = array();
 			foreach ( preg_split( '/\r\n|\n|\r/', $wpcybersec_old ) as $wpcybersec_line ) {
 				$wpcybersec_trim = trim( $wpcybersec_line );
@@ -120,9 +120,9 @@ if ( $wpcybersec_delete ) {
 			$wpcybersec_new = '' === trim( $wpcybersec_new ) ? '' : $wpcybersec_new . "\n";
 			if ( $wpcybersec_new !== $wpcybersec_old ) {
 				if ( '' === $wpcybersec_new ) {
-					@unlink( $wpcybersec_file ); // phpcs:ignore -- held nothing but the guard lines (and blank lines).
+					@unlink( $wpcybersec_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.unlink_unlink -- held nothing but the guard lines (and blank lines); direct file call: uninstall cannot ask for FTP credentials.
 				} else {
-					@file_put_contents( $wpcybersec_file, $wpcybersec_new, LOCK_EX ); // phpcs:ignore
+					@file_put_contents( $wpcybersec_file, $wpcybersec_new, LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- direct file call: uninstall cannot ask for FTP credentials.
 				}
 			}
 		}
@@ -145,16 +145,16 @@ if ( $wpcybersec_delete ) {
 		if ( ! is_file( $wpcybersec_file ) || is_link( $wpcybersec_file ) || ! is_writable( $wpcybersec_file ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_is_writable
 			continue;
 		}
-		$wpcybersec_old = (string) @file_get_contents( $wpcybersec_file ); // phpcs:ignore
+		$wpcybersec_old = (string) @file_get_contents( $wpcybersec_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- direct file call: uninstall cannot ask for FTP credentials.
 		// Exactly the marked block ("# BEGIN <marker>" ... "# END <marker>"), every copy of it.
 		$wpcybersec_new = preg_replace( '/^[ \t]*# BEGIN ' . preg_quote( $wpcybersec_marker, '/' ) . '[ \t]*\R.*?^[ \t]*# END ' . preg_quote( $wpcybersec_marker, '/' ) . '[ \t]*(\R|\z)/ms', '', $wpcybersec_old );
 		if ( is_string( $wpcybersec_new ) && $wpcybersec_new !== $wpcybersec_old ) {
 			$wpcybersec_new = rtrim( $wpcybersec_new );
 			$wpcybersec_new = '' === trim( $wpcybersec_new ) ? '' : $wpcybersec_new . "\n";
 			if ( '' === $wpcybersec_new ) {
-				@unlink( $wpcybersec_file ); // phpcs:ignore -- the file held nothing but our block (and blank lines).
+				@unlink( $wpcybersec_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.unlink_unlink -- the file held nothing but our block (and blank lines); direct file call: uninstall cannot ask for FTP credentials.
 			} else {
-				@file_put_contents( $wpcybersec_file, $wpcybersec_new, LOCK_EX ); // phpcs:ignore
+				@file_put_contents( $wpcybersec_file, $wpcybersec_new, LOCK_EX ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- direct file call: uninstall cannot ask for FTP credentials.
 			}
 		}
 	}
@@ -173,10 +173,10 @@ foreach ( array_unique( array_filter( array( $wpcybersec_data, $wpcybersec_defau
 	foreach ( (array) scandir( $wpcybersec_backups ) as $wpcybersec_name ) {
 		$wpcybersec_file = $wpcybersec_backups . '/' . $wpcybersec_name;
 		if ( ( is_file( $wpcybersec_file ) || is_link( $wpcybersec_file ) ) && ( preg_match( '/^wp-config-[0-9-]+(-[a-z0-9]+)?(\.php)?\.bak$/', $wpcybersec_name ) || in_array( $wpcybersec_name, array( '.htaccess', 'index.php', 'web.config' ), true ) ) ) {
-			@unlink( $wpcybersec_file ); // phpcs:ignore
+			@unlink( $wpcybersec_file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.unlink_unlink -- direct file call: uninstall cannot ask for FTP credentials.
 		}
 	}
-	@rmdir( $wpcybersec_backups ); // phpcs:ignore
+	@rmdir( $wpcybersec_backups ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- direct file call: uninstall cannot ask for FTP credentials.
 }
 
 if ( ! $wpcybersec_delete ) {
@@ -247,7 +247,7 @@ $wpcybersec_marker_ok = static function ( $dir ) use ( $wpdb ) {
 	if ( ! is_file( $file ) || is_link( $file ) ) {
 		return false;
 	}
-	$text = (string) @file_get_contents( $file, false, null, 0, 1024 ); // phpcs:ignore
+	$text = (string) @file_get_contents( $file, false, null, 0, 1024 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- direct file call: uninstall cannot ask for FTP credentials.
 	// Same id as WPCyberSecurity\Storage::site_id().
 	$id = substr( md5( ABSPATH . $wpdb->base_prefix ), 0, 8 );
 	return (bool) preg_match( '/^site:\s*' . $id . '\s*$/m', $text );
@@ -272,12 +272,12 @@ foreach ( $wpcybersec_dirs as $wpcybersec_dir ) {
 	);
 	foreach ( $wpcybersec_it as $wpcybersec_file ) {
 		if ( $wpcybersec_file->isLink() || $wpcybersec_file->isFile() ) {
-			@unlink( $wpcybersec_file->getPathname() ); // phpcs:ignore
+			@unlink( $wpcybersec_file->getPathname() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.unlink_unlink -- direct file call: uninstall cannot ask for FTP credentials.
 		} else {
-			@rmdir( $wpcybersec_file->getPathname() ); // phpcs:ignore
+			@rmdir( $wpcybersec_file->getPathname() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- direct file call: uninstall cannot ask for FTP credentials.
 		}
 	}
-	@rmdir( $wpcybersec_dir ); // phpcs:ignore
+	@rmdir( $wpcybersec_dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- direct file call: uninstall cannot ask for FTP credentials.
 }
 
 /*
@@ -321,7 +321,7 @@ if ( is_file( $wpcybersec_bootstrap ) && ! is_link( $wpcybersec_bootstrap ) && '
 		if ( ! @is_readable( $wpcybersec_config ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			continue;
 		}
-		foreach ( preg_split( '/\r\n|\n|\r/', (string) @file_get_contents( $wpcybersec_config ) ) as $wpcybersec_line ) { // phpcs:ignore
+		foreach ( preg_split( '/\r\n|\n|\r/', (string) @file_get_contents( $wpcybersec_config ) ) as $wpcybersec_line ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- direct file call: uninstall cannot ask for FTP credentials.
 			$wpcybersec_line = ltrim( $wpcybersec_line );
 			if ( '' === $wpcybersec_line || ';' === $wpcybersec_line[0] || '#' === $wpcybersec_line[0] ) {
 				continue;
@@ -334,8 +334,8 @@ if ( is_file( $wpcybersec_bootstrap ) && ! is_link( $wpcybersec_bootstrap ) && '
 	}
 
 	// Only delete the file this plugin generated.
-	$wpcybersec_head = (string) @file_get_contents( $wpcybersec_bootstrap, false, null, 0, 4096 ); // phpcs:ignore
+	$wpcybersec_head = (string) @file_get_contents( $wpcybersec_bootstrap, false, null, 0, 4096 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- direct file call: uninstall cannot ask for FTP credentials.
 	if ( ! $wpcybersec_referenced && false !== strpos( $wpcybersec_head, 'WPCYBERSEC_GUARD_BOOTSTRAPPED' ) ) {
-		@unlink( $wpcybersec_bootstrap ); // phpcs:ignore
+		@unlink( $wpcybersec_bootstrap ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.unlink_unlink -- direct file call: uninstall cannot ask for FTP credentials.
 	}
 }
