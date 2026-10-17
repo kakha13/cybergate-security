@@ -1,5 +1,5 @@
 {
-    "version": "1.0.1",
+    "version": "1.0.2",
     "files": {
         "assets/css/admin.css": "3720dbf974f8a66aaee69bc2a5bc2141eaa89b88cd0af459393192d0bcae977f",
         "assets/css/base.css": "9974004cb69b3eb6116ec2d1a791882588f148233f6645ca305422b42135f029",
@@ -15,7 +15,7 @@
         "bin/build-checksums.php": "86b94b74b07a7d97342d7233d532461bb4e9135361a5df0aef461b5b8637cb28",
         "bin/cron.php": "bb54cfc4e146adee988bc5cee80923268d79fb12879e58fd34f91fca65aae1ff",
         "bin/index.php": "bd48c24ce4500e60d2524571756787283f0d3fbfa50b116331309c09773f0cd1",
-        "cybergate-security.php": "2f6c8993855fb1c6fa48747298a231e829240c2b8bf28c722ed013fbfcdb6be1",
+        "cybergate-security.php": "0db57123e758719492469df1b40edee3f8995198f75103746acd3ebe20951a12",
         "guard/guard.php": "798016665b94a2d79d2c3f33de661291a35eace3a631d106eeaa683e11585aa5",
         "guard/index.php": "bd48c24ce4500e60d2524571756787283f0d3fbfa50b116331309c09773f0cd1",
         "includes/admin/cgav-script.txt": "99290478dd8da8e9c69919bd6ec0a14b9c455db3c409ce5a983a9e0e1cd64c50",
@@ -62,13 +62,13 @@
         "includes/class-stats.php": "6d793542fedd733937f8237981a30edf76fcfbb9b2fc294233e653316032d1b6",
         "includes/class-storage.php": "a72dc85750574785f770d06eed77e0475d56b82375fd477967cdf93b05218a2c",
         "includes/class-store.php": "715175368bf5bd236ef4894acfb17d998714f8c1526943308d409acbf615087d",
-        "includes/class-sysadmin-tools.php": "c9a84a8d43ea2effd65bd1fe9d852898b587a74d27daa5bd7cde42414ae7b80a",
+        "includes/class-sysadmin-tools.php": "d91bf9bc44af5e24bd06b05166b4b5aeee4636a2dfa05aa3a51ca354f1870586",
         "includes/class-upload-gate.php": "91721e301a588eae6f082d8a72d673b0a9f0f5d71612cd57fa49654fb0e0c438",
         "includes/class-user-watch.php": "72c99d283965d29b45d6a1acf57e0b38e845350b65cd3dff2138830e188fa306",
         "includes/index.php": "bd48c24ce4500e60d2524571756787283f0d3fbfa50b116331309c09773f0cd1",
         "index.php": "bd48c24ce4500e60d2524571756787283f0d3fbfa50b116331309c09773f0cd1",
         "languages/index.php": "bd48c24ce4500e60d2524571756787283f0d3fbfa50b116331309c09773f0cd1",
-        "readme.txt": "ccb04e5cd76c4bab7989a8259c37a7972d0a07159dc9136bd25f8cdde7408eab",
+        "readme.txt": "742c18a0f158bd0609e6d2145cf9fdb1659a4cdab7e21efd43e47b7c612df64b",
         "uninstall.php": "884869ea046b8634b9a6ed9aeb6730054de1a0e4bc7dd7493b325147b98b5df4"
     }
 }

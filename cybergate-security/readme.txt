@@ -4,7 +4,7 @@ Tags: security, malware scanner, file integrity, upload, quarantine
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.0.1
+Stable tag: 1.0.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -123,6 +123,9 @@ Data kept on your site: for every held file the plugin records the uploading use
 8. Recent changes: every recently modified code file and what explains the change.
 
 == Changelog ==
+
+= 1.0.2 =
+* "Code folders other users can write to" now also looks one level inside the WordPress folder and wp-content: a second WordPress install in a subfolder, translation files (PHP since WordPress 6.5), upgrade, uploads and backup folders. The one-click fix covers them too.
 
 = 1.0.1 =
 * The maldet real-time monitor no longer shows "Not running" on servers that hide other users' processes from PHP (/proc mounted with hidepid). It is detected from maldet's own log, or shown as unknown with the reason and the command that checks it as root.

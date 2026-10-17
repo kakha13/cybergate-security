@@ -1437,8 +1437,9 @@ class Sysadmin_Tools {
 	}
 
 	/**
-	 * The code folders world_writable_scan() looks at: { path, children }.
-	 * children = also the entries one level below (plugin and theme folders).
+	 * The folders world_writable_scan() looks at: { path, children }.
+	 * children = also the entries one level below (the WordPress folder, wp-content,
+	 * plugin and theme folders).
 	 *
 	 * @return array[]
 	 */
@@ -1447,11 +1448,15 @@ class Sysadmin_Tools {
 		$themes = function_exists( 'get_theme_root' ) ? (string) get_theme_root() : WP_CONTENT_DIR . '/themes';
 		$roots  = array(
 			array( WPCYBERSEC_DIR, false ),
-			array( WP_CONTENT_DIR, false ),
+			// wp-content and the WordPress folder with one level of entries: languages
+			// (PHP translation files since 6.5), upgrade, uploads and backup folders, and
+			// another WordPress install in a subfolder. Removing the write bit for other
+			// users is safe for all of them: the owner (PHP on per-site hosting) keeps it.
+			array( WP_CONTENT_DIR, true ),
 			array( WP_PLUGIN_DIR, true ),
 			array( $themes, true ),
 			array( defined( 'WPMU_PLUGIN_DIR' ) ? WPMU_PLUGIN_DIR : WP_CONTENT_DIR . '/mu-plugins', false ),
-			array( $abs, false ),
+			array( $abs, true ),
 			array( $abs . '/wp-admin', false ),
 			array( $abs . '/' . WPINC, false ),
 		);
