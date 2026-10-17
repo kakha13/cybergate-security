@@ -7,7 +7,9 @@ CyberGate Security scans the whole site for malware and backdoors, holds every n
 - Website and documentation: https://qartvelo.com/cybergate-security
 - Download: [latest release](https://github.com/kakha13/cybergate-security/releases/latest) (WordPress.org listing pending review)
 
-![CyberGate Security](wporg-assets/banner-1544x500.png)
+[![Watch CyberGate Security in 22 seconds](media/cybergate-security-promo.jpg)](media/cybergate-security-promo.mp4)
+
+**Watch the 22-second video:** [landscape](media/cybergate-security-promo.mp4) or [vertical for Reels, Shorts and TikTok](media/cybergate-security-promo-vertical.mp4).
 
 ## Features
 
@@ -44,6 +46,7 @@ Every release lists its SHA-256 checksum. Older versions stay available on the [
 | `scripts/build.sh` | Lint, package and verify the release ZIP (`--wporg` adds WordPress.org checks) |
 | `server-tools/cgav.sh` | Server helper for ClamAV and Linux Malware Detect (run by an administrator, never by the plugin) |
 | `wporg-assets/` | WordPress.org icon, banner and screenshots |
+| `media/` | The launch video (landscape and vertical) and its poster |
 
 ## Development
 
