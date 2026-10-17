@@ -1207,6 +1207,18 @@ body.js .wpcs-savebar.is-idle {
 	min-width: 0;
 }
 
+/* Why a row is unknown or not set up, with the root command (full width under the row). */
+.wpcs-live__hint {
+	flex: 1 1 100%;
+	min-width: 0;
+	padding-left: 28px;
+}
+
+.wpcs-live__hint .wpcs-sub {
+	display: block;
+	margin-bottom: 4px;
+}
+
 /* cgav section commands. */
 .wpcs-cgav {
 	display: grid;

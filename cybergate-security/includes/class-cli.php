@@ -37,6 +37,24 @@ class Cli {
 			__CLASS__,
 			array( 'shortdesc' => 'Scan the site, review held files and manage CyberGate Security.' )
 		);
+		// The WP-CLI variant of the real cron jobs runs "wp cron event run" every
+		// 5 minutes: that proves real cron as well as bin/cron.php does.
+		\WP_CLI::add_hook( 'after_invoke:cron event run', array( __CLASS__, 'record_cron_run' ) );
+	}
+
+	/**
+	 * Records that real cron runs (network option wpcybersec_cli_cron_at, also
+	 * written by bin/cron.php), so Settings > Advanced > Real cron shows "Real cron
+	 * last ran" and offers to switch off visitor-triggered cron. Only for runs
+	 * without a terminal or with --quiet (how crontab lines run): a command typed
+	 * once by hand proves nothing about a cron job.
+	 */
+	public static function record_cron_run() {
+		$quiet = class_exists( '\WP_CLI' ) && \WP_CLI::get_config( 'quiet' );
+		$tty   = function_exists( 'posix_isatty' ) && defined( 'STDOUT' ) && @posix_isatty( STDOUT ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( $quiet || ! $tty ) {
+			Network::update_option( 'wpcybersec_cli_cron_at', time(), false );
+		}
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -242,7 +260,7 @@ class Cli {
 				sprintf(
 					/* translators: %s: command */
 					__( 'WP-CLI has already loaded the active plugins and the theme, so this scan cannot isolate them. Run the isolated scan with the standalone runner: %s', 'cybergate-security' ),
-					'php ' . WPCYBERSEC_DIR . 'bin/cron.php --isolated --full --wp=' . untrailingslashit( ABSPATH ) . ( is_multisite() ? ' --url=' . network_home_url( '/' ) : '' )
+					Sysadmin_Tools::php_command() . ' ' . Sysadmin_Tools::shell_arg( WPCYBERSEC_DIR . 'bin/cron.php' ) . ' --isolated --full --wp=' . Sysadmin_Tools::shell_arg( untrailingslashit( ABSPATH ) ) . ( is_multisite() ? ' --url=' . Sysadmin_Tools::shell_arg( network_home_url( '/' ) ) : '' )
 				)
 			);
 		}
@@ -317,6 +335,9 @@ class Cli {
 		}
 
 		$state = isset( $final['state'] ) ? $final['state'] : 'unknown';
+		if ( 'unknown' !== $state ) {
+			self::record_cron_run(); // The WP-CLI cron lines run "wp wpcybersec scan --quiet", like bin/cron.php any run counts.
+		}
 		if ( 'failed' === $state ) {
 			/* translators: %s: error message */
 			\WP_CLI::error( sprintf( __( 'Scan failed: %s', 'cybergate-security' ), isset( $final['message'] ) ? $final['message'] : '' ) );

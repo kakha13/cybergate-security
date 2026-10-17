@@ -467,6 +467,69 @@ class Guard_Manager {
 	}
 
 	/**
+	 * OpenLiteSpeed (CyberPanel): the next step when .user.ini holds the guard
+	 * line but the live test says PHP has not loaded it. lsphp reads .user.ini
+	 * only when user ini files are switched on for it, and only after it
+	 * restarts (it keeps running in detached mode), so "within a few minutes"
+	 * never comes true there. Restart this account's PHP (touching
+	 * ~/.lsphp_restart.txt restarts it on the next request; killall lsphp
+	 * restarts every site's), test again, and if it still is not loaded use the
+	 * vHost php.ini override, which does not depend on .user.ini.
+	 *
+	 * @return array|null { inline (one sentence with the command), text, code, next } null when the server is not OpenLiteSpeed.
+	 */
+	public static function ols_activation_step() {
+		$edition = self::litespeed_edition();
+		$ols     = 'openlitespeed' === $edition || ( 'litespeed' === PHP_SAPI && 'unknown' === $edition );
+		if ( ! $ols && function_exists( 'wpcybersec' ) ) {
+			$hosting = wpcybersec()->hosting;
+			if ( is_object( $hosting ) && method_exists( $hosting, 'current' ) ) {
+				$info = $hosting->current();
+				$ols  = isset( $info['id'] ) && 'cyberpanel' === $info['id'];
+			}
+		}
+		if ( ! $ols ) {
+			return null;
+		}
+		$home = self::php_user_home();
+		$code = '' !== $home
+			? 'touch ' . Sysadmin_Tools::shell_arg( $home . '/.lsphp_restart.txt' ) . "\n# or restart the PHP of every site at once:\nkillall lsphp"
+			: 'killall lsphp';
+		$touch = '' !== $home ? 'touch ' . Sysadmin_Tools::shell_arg( $home . '/.lsphp_restart.txt' ) : '';
+		return array(
+			'inline' => sprintf(
+				/* translators: %s: shell command */
+				__( 'OpenLiteSpeed reads .user.ini only when lsphp has user ini files switched on, and only after lsphp restarts. As root run %s, then press "Test again" in Settings > Advanced > Early guard. If it is still not loaded, put the line into the vHost Conf phpIniOverride block (CyberPanel) or WebAdmin php.ini Override instead.', 'cybergate-security' ),
+				'' !== $touch ? $touch . ' ' . __( '(or killall lsphp)', 'cybergate-security' ) : 'killall lsphp'
+			),
+			'text' => __( 'OpenLiteSpeed reads .user.ini only when lsphp has user ini files switched on, and only after lsphp restarts (it keeps running when the web server restarts). As root, restart this site\'s PHP, then press "Test again":', 'cybergate-security' ),
+			'code' => $code,
+			'next' => __( 'If the test still says PHP did not load the guard, lsphp does not read .user.ini on this server: put the line into the vHost Conf phpIniOverride block instead (the OpenLiteSpeed or CyberPanel steps under "Recommended for this server" below), which works without .user.ini.', 'cybergate-security' ),
+		);
+	}
+
+	/**
+	 * Home folder of the user PHP runs as (where LiteSpeed looks for
+	 * .lsphp_restart.txt), '' when unknown.
+	 *
+	 * @return string
+	 */
+	private static function php_user_home() {
+		if ( function_exists( 'posix_getpwuid' ) && function_exists( 'posix_geteuid' ) ) {
+			$info = @posix_getpwuid( posix_geteuid() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$dir  = is_array( $info ) && ! empty( $info['dir'] ) ? untrailingslashit( wp_normalize_path( (string) $info['dir'] ) ) : '';
+			if ( '' !== $dir && '/' !== $dir && false === strpos( $dir, '/nonexistent' ) ) {
+				return $dir;
+			}
+		}
+		// CyberPanel: the site user's home holds public_html.
+		if ( preg_match( '#^(/home/[^/]+)/public_html/#', wp_normalize_path( ABSPATH ), $m ) ) {
+			return $m[1];
+		}
+		return '';
+	}
+
+	/**
 	 * @param mixed $list List setting.
 	 * @return string[] Lowercase, unique, non-empty.
 	 */
@@ -1382,6 +1445,62 @@ class Guard_Manager {
 			return $theirs[1];
 		}
 		return '';
+	}
+
+	/**
+	 * Where a prepend file of another site may be set, and the root command
+	 * that finds the line: the server-wide php.ini of this PHP (often the
+	 * cause: every site of that PHP version then runs it), the hosting panel's
+	 * per-site PHP settings and this site's .user.ini and .htaccess.
+	 *
+	 * @return array { text, code, note }
+	 */
+	public function foreign_prepend_hint() {
+		$places = array();
+		$loaded = php_ini_loaded_file();
+		if ( $loaded ) {
+			$places[] = dirname( wp_normalize_path( $loaded ) );
+		} elseif ( defined( 'PHP_CONFIG_FILE_PATH' ) && '' !== PHP_CONFIG_FILE_PATH ) {
+			$places[] = untrailingslashit( wp_normalize_path( PHP_CONFIG_FILE_PATH ) ); // No php.ini loaded: where PHP looks for one.
+		}
+		$scanned = php_ini_scanned_files();
+		if ( $scanned ) {
+			// The conf.d folder of the extra .ini files (pool files and panel snippets live there too).
+			$first    = trim( (string) strtok( (string) $scanned, ",\n" ) );
+			$places[] = '' !== $first ? dirname( wp_normalize_path( $first ) ) : '';
+		}
+		$id = '';
+		if ( function_exists( 'wpcybersec' ) && is_object( wpcybersec()->hosting ) && method_exists( wpcybersec()->hosting, 'current' ) ) {
+			$info = wpcybersec()->hosting->current();
+			$id   = isset( $info['id'] ) ? (string) $info['id'] : '';
+		}
+		if ( 'cyberpanel' === $id || '' !== self::litespeed_edition() ) {
+			// lsphp's own php.ini, and the vHost php.ini override of every site (CyberPanel vhost.conf).
+			$places[] = '/usr/local/lsws/lsphp*/etc/php/*/litespeed/php.ini';
+			$places[] = '/usr/local/lsws/conf/vhosts/*/vhost.conf';
+		}
+		if ( 'cpanel' === $id ) {
+			$places[] = '/opt/cpanel/ea-php*/root/etc';
+		}
+		if ( 'plesk' === $id ) {
+			$places[] = '/opt/plesk/php/*/etc';
+			$places[] = '/var/www/vhosts/system/*/etc/php.ini';
+		}
+		$places[] = '/etc/php*';
+		foreach ( $this->wiring_dirs() as $dir ) {
+			$places[] = wp_normalize_path( $dir . '.user.ini' );
+			$places[] = wp_normalize_path( $dir . '.htaccess' );
+		}
+		$args = array();
+		foreach ( array_unique( array_filter( $places ) ) as $place ) {
+			// Wildcards stay unquoted so the shell expands them; other paths are quoted.
+			$args[] = preg_match( '#^[A-Za-z0-9_./*-]+$#', $place ) ? $place : Sysadmin_Tools::shell_arg( $place );
+		}
+		return array(
+			'text' => __( 'The line may come from the server-wide php.ini (then every site of this PHP version runs that file) rather than from this site\'s settings. As root, find where it is set:', 'cybergate-security' ),
+			'code' => 'grep -rn auto_prepend_file ' . implode( ' ', $args ) . ' 2>/dev/null',
+			'note' => __( 'Removing it from a shared php.ini removes it for the original site too: that site then needs the line in its own vHost or site settings (its .user.ini, the vHost php.ini override or its PHP-FPM pool).', 'cybergate-security' ),
+		);
 	}
 
 	/**

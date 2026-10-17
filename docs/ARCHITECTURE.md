@@ -150,7 +150,7 @@ Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` 
   $name`: one set of tables for a whole multisite network), `now`, `severity_label`, `client_ip`.
 - `Allowlist`: `is_allowed_hash`, `allow_hash($sha256, $label, $note)`, `is_allowed_install($type, $slug)`,
   `allow_install($type, $slug, $label, $note)`, static `install_key`, `remove($id)`, `get($id)`,
-  `query($args)`, `count()`, `hashes()`, `export_guard_file()`, `verify_integrity()` (true/false/null).
+  `query($args)` (kind `hash` matches `hash` and `hash_exec`: the "File fingerprints" filter), `count()`, `hashes()`, `export_guard_file()`, `verify_integrity()` (true/false/null).
 - `Quarantine`: `hold($src, $move = true)` -> `{quarantine_path, sha256, size}`|WP_Error,
   `restore($item)`, `to_temp($item)`, `purge($item)`, `exists($item)`, `stream($item)`.
 - `Logger`: `log($event, $message, $context = array())`.
@@ -491,7 +491,10 @@ multisite host comes from `DOMAIN_CURRENT_SITE` / `PATH_CURRENT_SITE` in wp-conf
 WordPress exits while loading (no site for the address) a shutdown function says so, with the
 multisite hint (pass the network address; with a wrong `--url` it names the value that matched no
 site), and exits 1.
-Records network option `wpcybersec_cli_cron_at` (proof that real cron runs).
+Records network option `wpcybersec_cli_cron_at` (proof that real cron runs). WP-CLI records it too
+(`Cli::record_cron_run()`): after `wp wpcybersec scan` and after `wp cron event run` (hook
+`after_invoke:cron event run`), only when run with `--quiet` or without a terminal, so a command typed
+once by hand does not count.
 `Sysadmin_Tools::cron_snippets()` builds the crontab lines (`cron_url_arg()` adds `--url` on
 multisite). The plain `php wp-cron.php` line has no host either, so on multisite it becomes
 `curl` of the main site's `wp-cron.php?doing_wp_cron` (where every plugin event lives), and the
@@ -588,6 +591,14 @@ Files: `includes/class-upload-gate.php`, `includes/class-install-gate.php`,
 - `status()`: `{ installed, active (constant WPCYBERSEC_GUARD_ACTIVE defined in this request),
   bootstrap_path, bootstrap_exists, prepend (ini value), conflict (other prepend file or null),
   sapi, pending_spool }`.
+- static `ols_activation_step()`: on OpenLiteSpeed / CyberPanel `{ inline, text, code, next }` for a
+  .user.ini line lsphp has not read yet (`touch <PHP user's home>/.lsphp_restart.txt` or `killall lsphp`,
+  then Test again; else the vHost phpIniOverride); used by Hardening's guard fix, "Only write .user.ini",
+  Test again and the Early guard card, null elsewhere. `foreign_prepend_hint()`: `{ text, code, note }`
+  for a prepend file of another site (`other_site_root()`): the `grep -rn auto_prepend_file` command over
+  the loaded php.ini folder, lsphp's php.ini and vhost.conf files, panel folders, /etc/php* and this site's
+  .user.ini/.htaccess, and the note that a shared php.ini serves the other site too (read only on the
+  Early guard card and the Environment check, never from `status()`).
 - `snippets()`: list of `{ id, label, file, code, help, recommended }` for .user.ini, .htaccess
   (mod_php, LiteSpeed Enterprise, mod_lsapi; every line in IfModule), OpenLiteSpeed (WebAdmin
   php.ini Override or CyberPanel vhost.conf; it ignores php_value in .htaccess), php-fpm pool,
@@ -666,7 +677,10 @@ Files: `includes/admin/class-wizard.php`, `includes/admin/class-settings-page.ph
   tabs; hidden sections stay in the form. The open section travels as `?section=<key>` (also the
   hidden `section` field, kept through the save redirect); `Sysadmin_Tools::settings_url('advanced',
   [], 'wpcs-<key>')` adds it from the fragment.
-- `Hardening`: one-click fixes (`run($id)`), `move_data_dir($target, $outside_only)` moves the
+- `Hardening`: one-click fixes (`run($id)`; fix `world_writable`, part of "Fix all", removes only the
+  o+w bit (`chmod o-w`) from the paths of `world_writable_scan()` that PHP owns (lstat uid equals
+  `posix_geteuid()`, never a symlink), then scans again; paths of another owner get `manual_steps()` with
+  Hosting task `permissions` first), `move_data_dir($target, $outside_only)` moves the
   data folder through `Storage::relocate()` (refused while a scan runs, on multisite, or when the
   guard bootstrap cannot be rewritten; a target outside open_basedir is refused with that reason
   before anything else; the guard spool is imported first, the allowlist mirror and
@@ -686,7 +700,28 @@ Files: `includes/admin/class-wizard.php`, `includes/admin/class-settings-page.ph
   `antivirus_status()` (ClamAV shows "Unknown (hosting hides it)" instead of "Not installed" when
   `clamav_hidden()` says the host may hide the binary; maldet likewise with `maldet_hidden()`, key
   `maldet.hidden`), static `maldet_detect()`, `inotifywait_installed()`,
-  `write_uploads_htaccess()`, `hmac_snippet()`. `server-tools/cgav.sh` (also offered as a
+  `write_uploads_htaccess()`, `hmac_snippet()`. `antivirus_live()` (cached per request): rows `{ id
+  clamd|maldet|maldet_monitor|maldet_watch|maldet_quarantine, label, state ok|bad|unknown|na, text, hint,
+  code }`; hint/code say why a row is unknown or not set up and give the root command (Antivirus card and
+  Developer instructions entries `maldet_monitor`, `maldet_watch`). static `processes_hidden()`: /proc
+  mounted with hidepid (`/proc/self` visible, `/proc/1` not), so process checks (pgrep, pid files) are
+  unknown, never "not running"; socket checks (clamd) are unaffected; `processes_hidden_text()`,
+  `monitor_check_hint()` (`pgrep -af inotifywait` / `cgav monitor status`), `cgav_installed()`,
+  `monitor_watches($lines, $site)` (exact line or a watched parent folder: maldet watches recursively),
+  `monitor_add_site_step()` (`cgav add-site <site>`, else the monitor_paths line plus `systemctl restart
+  maldet`: maldet's reload_monitor re-reads only its settings, not the folder list). ClamAV and maldet are
+  per server and shared by every site; `cgav_install_block()` ends with `cgav add-site <site>`.
+  World-writable code: `world_writable_roots()` (plugin folder, wp-content, plugins and themes with one
+  level of entries, mu-plugins, ABSPATH, wp-admin, wp-includes; wp-config.php has its own check),
+  `world_writable_scan($cap = 500)` (lstat, never follows symlinks, open_basedir respected, null on
+  Windows; `{ paths, roots, checked, truncated }`), `world_writable_command($roots)` (`find <root> -perm
+  -o+w -not -type l -exec chmod o-w {} +`), check id `world_writable`, `display_path()`. WP-CLI:
+  `wp_cli($bin)` is `wp`, or this site's PHP plus the wp program (`/usr/local/lsws/lsphp83/bin/php
+  /usr/local/bin/wp`, `"$(command -v wp)"` when wp is not found) when `is_default_php()` says the default
+  php of a shell is another binary; used by the WP-CLI cron variant, managed-host cron steps and the core
+  reinstall lines. `php_binary()` returns lsphpXX/bin/php for lsphp even when open_basedir hides it.
+  `site_slug()` names per-site server files (fapolicyd `35-wordpress-<slug>.rules` and
+  `wordpress-<slug>.trust`, `inotify_script_path()` `/usr/local/bin/wpcybersec-watch-<slug>.sh`). `server-tools/cgav.sh` (also offered as a
   download, `includes/admin/cgav-script.txt`) installs and checks ClamAV and Linux Malware Detect
   on the server (status, install-clamav, install-maldet, monitor, test, update, scan, logs; safe to
   re-run, never deletes site files).
@@ -712,7 +747,7 @@ Files: `includes/class-hosting.php`; used by `Sysadmin_Tools` (check `hosting`),
   `RULES_VERSION`) with setting `hosting_panel` applied (`''` detect, a panel id, or `other` for the generic
   steps); adds `detected_*`, `overridden`. Read it only on pages that show instructions (Advanced sections,
   wizard Environment and Server steps, developer instructions, the report): normal admin pages stay at 0 queries.
-- `steps( $task )` for `cron`, `prepend`, `php_restart`, `clamav`, `maldet`, `web_rules`, `data_dir`: the usual
+- `steps( $task )` for `cron`, `prepend`, `php_restart`, `clamav`, `maldet`, `web_rules`, `data_dir`, `permissions`: the usual
   `{ text, code }` steps, empty when the panel has none (generic steps apply). Cron steps come from
   `Sysadmin_Tools::cron_jobs()` (which also gives `script`, `args`, `url` for panels that ask for them apart),
   nginx rules from `Sysadmin_Tools::nginx_uploads_block()` (the `UPLOADS_EXEC_PATTERN` rule as a prefix location

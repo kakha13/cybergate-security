@@ -844,7 +844,7 @@ class Hosting {
 	/* ------------------------------------------------------------------ */
 
 	/** Tasks steps() knows. */
-	const TASKS = array( 'cron', 'prepend', 'php_restart', 'clamav', 'maldet', 'web_rules', 'data_dir' );
+	const TASKS = array( 'cron', 'prepend', 'php_restart', 'clamav', 'maldet', 'web_rules', 'data_dir', 'permissions' );
 
 	/**
 	 * Steps of one task for the hosting this site runs on, in the step shape
@@ -1079,16 +1079,40 @@ class Hosting {
 	}
 
 	/**
+	 * CyberPanel and OpenLiteSpeed: the server's default php (and so wp) can be
+	 * another PHP version than the site's lsphp. Other plugins' composer
+	 * platform_check then stops WP-CLI with a fatal error, so WP-CLI runs with
+	 * the site's own PHP binary (Sysadmin_Tools::wp_cli()).
+	 *
+	 * @return array { text, code }
+	 */
+	private static function wp_cli_note() {
+		$bin = Sysadmin_Tools::php_binary();
+		$wp  = Sysadmin_Tools::wp_cli_path();
+		$cmd = 'php' === $bin ? 'wp' : Sysadmin_Tools::shell_arg( $bin ) . ' ' . ( '' !== $wp ? Sysadmin_Tools::shell_arg( $wp ) : '"$(command -v wp)"' );
+		return self::s(
+			__( 'WP-CLI: the server\'s default php (and with it wp) can be another PHP version than this site\'s lsphp, and plugins that need this PHP version then stop WP-CLI with a fatal error (composer platform_check). Start WP-CLI with the site\'s own PHP, as the commands of this plugin do:', 'cybergate-security' ),
+			$cmd . ' --path=' . Sysadmin_Tools::shell_arg( untrailingslashit( wp_normalize_path( ABSPATH ) ) ) . ' core version'
+		);
+	}
+
+	/**
 	 * The three real cron jobs (Sysadmin_Tools::cron_jobs(), the one source),
 	 * one step each, plus switching WP-Cron off.
 	 *
-	 * @param array[] $intro Steps before the jobs.
-	 * @param bool    $split Show script and arguments apart (Plesk "Run a PHP script").
+	 * @param array[] $intro      Steps before the jobs.
+	 * @param bool    $split      Show script and arguments apart (Plesk "Run a PHP script").
+	 * @param bool    $scans_only Only the two scan jobs: the host already runs WordPress
+	 *                            cron itself (GridPane GP-Cron, SpinupWP), so neither the
+	 *                            WordPress cron job nor switching WP-Cron off is shown.
 	 * @return array[]
 	 */
-	private static function cron_steps( array $intro, $split = false ) {
+	private static function cron_steps( array $intro, $split = false, $scans_only = false ) {
 		$steps = $intro;
 		foreach ( Sysadmin_Tools::cron_jobs() as $job ) {
+			if ( $scans_only && 'wp_cron' === $job['id'] ) {
+				continue;
+			}
 			if ( $split ) {
 				if ( '' !== $job['url'] ) {
 					/* translators: 1: what the job does and when, 2: cron schedule */
@@ -1107,7 +1131,9 @@ class Hosting {
 			/* translators: 1: what the job does and when, 2: cron schedule */
 			$steps[] = self::s( sprintf( __( '%1$s. Schedule: %2$s. Command:', 'cybergate-security' ), $job['when'], $job['schedule'] ), $job['command'] );
 		}
-		$steps[] = Sysadmin_Tools::cron_disable_step();
+		if ( ! $scans_only ) {
+			$steps[] = Sysadmin_Tools::cron_disable_step();
+		}
 		return $steps;
 	}
 
@@ -1126,7 +1152,8 @@ class Hosting {
 		if ( $c['in_root'] ) {
 			$nginx .= "\n" . $tools->nginx_data_rule();
 		}
-		$wpcli = "wp wpcybersec scan --quiet\nwp wpcybersec scan --full --quiet";
+		$cli   = Sysadmin_Tools::wp_cli();
+		$wpcli = $cli . " wpcybersec scan --quiet\n" . $cli . ' wpcybersec scan --full --quiet';
 		$ping  = Network::home_url( 'wp-cron.php?doing_wp_cron' );
 		/* translators: %s: host name */
 		$support = sprintf( __( '%s manages the server, so this cannot be set from the site. Ask its support whether they can do it for you, or skip it: the plugin keeps protecting the site without it.', 'cybergate-security' ), $name );
@@ -1216,6 +1243,7 @@ class Hosting {
 					array(
 						/* translators: %s: domain */
 						self::s( sprintf( __( 'In CyberPanel open Websites > List Websites, click Manage next to %s and open Cron Jobs. The jobs run as the site\'s own user, the owner of the site files.', 'cybergate-security' ), $c['domain'] ) ),
+						self::wp_cli_note(),
 					)
 				);
 			case 'aapanel':
@@ -1282,13 +1310,17 @@ class Hosting {
 				return self::cron_steps(
 					array(
 						self::s( __( 'GridPane runs WordPress cron itself (GP-Cron, on by default on newer servers), so only the two scan jobs are needed. GridPane has no panel field for custom jobs: as the site\'s system user run "crontab -e" over SSH and add the scan lines below.', 'cybergate-security' ) ),
-					)
+					),
+					false,
+					true
 				);
 			case 'spinupwp':
 				return self::cron_steps(
 					array(
 						self::s( __( 'SpinupWP already runs WordPress cron for the site (site dashboard > Cron), so only the two scan jobs are needed. Add them with "crontab -e" as the site user over SSH, below the lines SpinupWP manages (do not change those).', 'cybergate-security' ) ),
-					)
+					),
+					false,
+					true
 				);
 			case 'ploi':
 				return self::cron_steps(
@@ -1375,10 +1407,13 @@ class Hosting {
 					self::s( __( 'Switching "Anti-XSS attack" (Website > this site > Site directory) off and on again writes the file anew with only the open_basedir line: add the guard line again afterwards.', 'cybergate-security' ) . $both ),
 				);
 			case 'hestia':
+				// One template per site: the guard line names this site's bootstrap, so
+				// two sites of one server must not share (and overwrite) one template.
+				$tpl = 'cybergate-' . preg_replace( '/[^A-Za-z0-9_-]+/', '-', $c['site'] );
 				return array(
-					self::s( __( 'As root, copy the PHP-FPM backend template the domain uses (shown in Web > edit domain > Backend Template; set TPL to it) under a new name and add the guard line to the copy. Hestia overwrites its own templates on updates, never a copy:', 'cybergate-security' ), "cd /usr/local/hestia/data/templates/web/php-fpm\nTPL=default\ncp \"\$TPL.tpl\" cybergate.tpl\necho " . Sysadmin_Tools::shell_arg( $fpm ) . ' >> cybergate.tpl' ),
-					/* translators: %s: domain */
-					self::s( sprintf( __( 'Pick "cybergate" as the Backend Template of %s in Web > edit domain, or run (Hestia restarts PHP-FPM itself):', 'cybergate-security' ), $c['site'] ), 'v-change-web-domain-backend-tpl ' . Sysadmin_Tools::shell_arg( $c['acct'] ) . ' ' . Sysadmin_Tools::shell_arg( $c['site'] ) . ' cybergate' ),
+					self::s( __( 'As root, copy the PHP-FPM backend template the domain uses (shown in Web > edit domain > Backend Template; set TPL to it) under a new name and add the guard line to the copy. Hestia overwrites its own templates on updates, never a copy:', 'cybergate-security' ), "cd /usr/local/hestia/data/templates/web/php-fpm\nTPL=default\ncp \"\$TPL.tpl\" " . $tpl . ".tpl\necho " . Sysadmin_Tools::shell_arg( $fpm ) . ' >> ' . $tpl . '.tpl' ),
+					/* translators: 1: template name, 2: domain */
+					self::s( sprintf( __( 'Pick "%1$s" as the Backend Template of %2$s in Web > edit domain, or run (Hestia restarts PHP-FPM itself):', 'cybergate-security' ), $tpl, $c['site'] ), 'v-change-web-domain-backend-tpl ' . Sysadmin_Tools::shell_arg( $c['acct'] ) . ' ' . Sysadmin_Tools::shell_arg( $c['site'] ) . ' ' . $tpl ),
 					/* translators: %s: file path */
 					self::s( sprintf( __( 'Without root: put this line in %s instead:', 'cybergate-security' ), $c['dirs'][0] . '/.user.ini' ), $ini ),
 				);
@@ -1754,6 +1789,33 @@ class Hosting {
 				return array( self::s( __( 'Cloudways applications have a private_html folder next to public_html: create the data folder inside it.', 'cybergate-security' ) ) );
 			case 'virtualmin':
 				return array( self::s( __( 'Virtualmin sets no open_basedir, so a folder in the domain owner\'s home folder outside public_html works.', 'cybergate-security' ) ) );
+		}
+		return array();
+	}
+
+	/* ---------- permissions ---------- */
+
+	/**
+	 * Removing write access for other users (mode o+w) from code folders when
+	 * PHP does not own them: the panel's file manager first.
+	 *
+	 * @param string $id   Panel id.
+	 * @param array  $info current().
+	 * @return array[]
+	 */
+	private function steps_permissions( $id, array $info ) {
+		$fm = $this->file_manager( $info );
+		if ( $fm ) {
+			return array(
+				self::s( $fm['open'] ),
+				/* translators: %s: file manager name */
+				self::s( sprintf( __( 'In %s select each folder listed above, open Permissions (Change Permissions) and untick Write for World (Public, Others), for example 777 becomes 775 and 757 becomes 755. Files the panel shows as owned by another user (often root) can only be changed with SSH as root.', 'cybergate-security' ), $fm['name'] ) ),
+			);
+		}
+		$panels = self::panels();
+		if ( isset( $panels[ $id ] ) && 'managed' === $panels[ $id ]['kind'] ) {
+			/* translators: %s: host name */
+			return array( self::s( sprintf( __( '%s manages the file permissions of the site. Send its support the folders listed above and ask them to remove write access for other users.', 'cybergate-security' ), self::name( $id ) ) ) );
 		}
 		return array();
 	}

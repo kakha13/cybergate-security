@@ -182,7 +182,7 @@ class Developer_Instructions {
 		}
 
 		// 3. Things PHP can never do: cron, the early guard's server line, antivirus engines.
-		foreach ( array( 'wp_cron', 'guard', 'clamav', 'clamav_exec', 'maldet_inotify', 'maldet', 'maldet_link' ) as $id ) {
+		foreach ( array( 'wp_cron', 'guard', 'clamav', 'clamav_exec', 'maldet_inotify', 'maldet', 'maldet_watch', 'maldet_monitor', 'maldet_link' ) as $id ) {
 			if ( isset( $items[ $id ] ) || ! $this->is_needed( $id ) ) {
 				continue;
 			}
@@ -287,8 +287,13 @@ class Developer_Instructions {
 	private function is_needed( $id ) {
 		$av = Sysadmin_Tools::call( 'sysadmin', 'antivirus_status', array(), array() );
 		switch ( $id ) {
+			case 'maldet_watch':
+			case 'maldet_monitor':
+				// The "On the server now" rows: this site not in monitor_paths, or the monitor state unknown.
+				$row = $this->live_row( $id );
+				return $row && ( 'maldet_watch' === $id ? 'bad' === $row['state'] : 'unknown' === $row['state'] ) && '' !== $row['code'];
 			case 'wp_cron':
-				// bin/cron.php records every run; none in the last two hours means no real cron job.
+				// bin/cron.php and the WP-CLI cron lines record every run; none in the last two hours means no real cron job.
 				return (int) Network::get_option( 'wpcybersec_cli_cron_at', 0 ) < time() - 2 * HOUR_IN_SECONDS;
 			case 'guard':
 				$status = Sysadmin_Tools::call( 'guard_manager', 'status', array(), array() );
@@ -307,6 +312,29 @@ class Developer_Instructions {
 				return ! empty( $av['maldet']['binary'] ) && false === $av['maldet']['linked'] && isset( $av['clamav']['state'] ) && 'missing' !== $av['clamav']['state'];
 		}
 		return false;
+	}
+
+	/**
+	 * One row of Sysadmin_Tools::antivirus_live() by id.
+	 *
+	 * @param string $id Row id.
+	 * @return array|null
+	 */
+	private function live_row( $id ) {
+		$tools = Sysadmin_Tools::service( 'sysadmin' );
+		if ( ! $tools instanceof Sysadmin_Tools ) {
+			return null;
+		}
+		try {
+			foreach ( $tools->antivirus_live() as $row ) {
+				if ( isset( $row['id'] ) && $row['id'] === $id ) {
+					return $row;
+				}
+			}
+		} catch ( \Throwable $e ) {
+			return null;
+		}
+		return null;
 	}
 
 	/**
@@ -364,6 +392,10 @@ class Developer_Instructions {
 						array( 'text' => __( 'Use 600 instead when PHP runs as the owner of the file.', 'cybergate-security' ) ),
 					);
 				}
+				break;
+
+			case 'world_writable':
+				$entry['title'] = __( 'Remove write access for other users from the code folders', 'cybergate-security' );
 				break;
 
 			case 'file_edit':
@@ -464,7 +496,7 @@ class Developer_Instructions {
 
 			case 'clamav':
 				$entry['title']    = __( 'Install ClamAV (optional)', 'cybergate-security' );
-				$entry['why']      = __( 'ClamAV knows millions of existing infections and gives every upload a second opinion. It finds more, but it does not block attacks.', 'cybergate-security' );
+				$entry['why']      = __( 'ClamAV knows millions of existing infections and gives every upload a second opinion. It finds more, but it does not block attacks. It is installed once per server and shared by every site on it; when another site of this server already has it, nothing needs to be installed here.', 'cybergate-security' );
 				$entry['steps']    = self::panel( 'clamav', Admin\Clamav_Guide::install_steps() );
 				$entry['optional'] = true;
 				break;
@@ -482,7 +514,7 @@ class Developer_Instructions {
 
 			case 'maldet':
 				$entry['title']    = __( 'Install Linux Malware Detect (optional)', 'cybergate-security' );
-				$entry['why']      = __( 'maldet adds signatures made for website malware such as PHP web shells. With ClamAV installed, its signatures are used by ClamAV too.', 'cybergate-security' );
+				$entry['why']      = __( 'maldet adds signatures made for website malware such as PHP web shells. With ClamAV installed, its signatures are used by ClamAV too. It is installed once per server and shared by every site on it; each site only needs its folder added to the monitor.', 'cybergate-security' );
 				$entry['steps']    = self::panel( 'maldet', array_merge( Admin\Clamav_Guide::maldet_install_steps(), $tools ? array_slice( $tools->maldet_steps(), 0, 5 ) : array() ) );
 				$entry['optional'] = true;
 				break;
@@ -491,6 +523,22 @@ class Developer_Instructions {
 				$entry['title'] = __( 'Install inotify-tools for the maldet real-time monitor', 'cybergate-security' );
 				$entry['why']   = __( 'maldet is installed, but its real-time monitor is unavailable: maldet --monitor stops with "could not find inotifywait command" until inotify-tools is installed.', 'cybergate-security' );
 				$entry['steps'] = $tools ? array_slice( $tools->maldet_steps(), 0, 5 ) : array();
+				break;
+
+			case 'maldet_watch':
+				$row               = $this->live_row( $id );
+				$entry['title']    = __( 'Add this site to the maldet real-time monitor', 'cybergate-security' );
+				$entry['why']      = __( 'maldet is installed on this server, but its monitor does not watch this site\'s folder. ClamAV and maldet are installed once per server and shared by every site on it: this site needs no install of its own, only its folder in the monitor.', 'cybergate-security' );
+				$entry['steps']    = $row ? array( array_filter( array( 'text' => $row['hint'], 'code' => $row['code'] ) ) ) : array();
+				$entry['optional'] = true;
+				break;
+
+			case 'maldet_monitor':
+				$row               = $this->live_row( $id );
+				$entry['title']    = __( 'Check that the maldet real-time monitor runs', 'cybergate-security' );
+				$entry['why']      = __( 'PHP cannot tell whether the monitor runs on this server, so the Antivirus card shows it as unknown.', 'cybergate-security' );
+				$entry['steps']    = $row ? array( array_filter( array( 'text' => $row['hint'], 'code' => $row['code'] ) ) ) : array();
+				$entry['optional'] = true;
 				break;
 
 			case 'maldet_link':
@@ -659,7 +707,7 @@ class Developer_Instructions {
 		$block = Sysadmin_Tools::cgav_install_block();
 		if ( '' !== $block ) {
 			$lines[] = __( 'Antivirus server script (cgav): installs and checks ClamAV and Linux Malware Detect for this site.', 'cybergate-security' );
-			$lines[] = __( 'Paste the whole block into an SSH session as root. Each section prints the status before and after.', 'cybergate-security' );
+			$lines[] = __( 'Paste the whole block into an SSH session as root. Each section prints the status before and after. ClamAV and maldet are installed once per server and shared by every site on it; another site of the server only needs "cgav add-site" with its folder.', 'cybergate-security' );
 			$lines[] = '';
 			$lines[] = $block;
 			$lines[] = '';

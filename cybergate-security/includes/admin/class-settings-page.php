@@ -1435,9 +1435,22 @@ class Settings_Page {
 		echo '<ul class="wpcs-live">';
 		foreach ( $tools->antivirus_live() as $row ) {
 			$state = isset( $states[ $row['state'] ] ) ? $states[ $row['state'] ] : $states['unknown'];
-			echo '<li class="wpcs-live__row is-' . esc_attr( $row['state'] ) . '"><span class="dashicons dashicons-' . esc_attr( $state[0] ) . '" aria-hidden="true"></span><span class="wpcs-live__label">' . esc_html( $row['label'] ) . '</span>' . $this->badge( $row['text'], $state[1] ) . '</li>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- badge is escaped.
+			echo '<li class="wpcs-live__row is-' . esc_attr( $row['state'] ) . '"><span class="dashicons dashicons-' . esc_attr( $state[0] ) . '" aria-hidden="true"></span><span class="wpcs-live__label">' . esc_html( $row['label'] ) . '</span>' . $this->badge( $row['text'], $state[1] ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- badge is escaped.
+			if ( ! empty( $row['hint'] ) || ! empty( $row['code'] ) ) {
+				// Why it is unknown or not set up, and the root command for it.
+				echo '<div class="wpcs-live__hint">';
+				if ( ! empty( $row['hint'] ) ) {
+					echo '<span class="wpcs-sub">' . esc_html( $row['hint'] ) . '</span>';
+				}
+				if ( ! empty( $row['code'] ) ) {
+					echo self::code( (string) $row['code'] ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+				}
+				echo '</div>';
+			}
+			echo '</li>';
 		}
 		echo '</ul>';
+		echo '<p class="wpcs-muted">' . esc_html__( 'ClamAV and maldet are installed once per server and shared by every site on it. Another site of this server does not need its own install: it only needs to be added to the maldet monitor (cgav add-site with its folder).', 'cybergate-security' ) . '</p>';
 
 		$this->field(
 			__( 'ClamAV scanning', 'cybergate-security' ),
@@ -1486,10 +1499,10 @@ class Settings_Page {
 		$block = Sysadmin_Tools::cgav_install_block();
 		if ( '' !== $block ) {
 			echo '<h3 class="wpcs-subhead">' . esc_html__( 'Server script (cgav)', 'cybergate-security' ) . '</h3>';
-			echo '<p class="wpcs-muted">' . esc_html__( 'One script for root that installs and checks ClamAV and Linux Malware Detect for this site. Every section prints the status before and after, and is safe to run again; nothing deletes or moves site files.', 'cybergate-security' ) . '</p>';
+			echo '<p class="wpcs-muted">' . esc_html__( 'One script for root that installs and checks ClamAV and Linux Malware Detect. Every section prints the status before and after, and is safe to run again; nothing deletes or moves site files.', 'cybergate-security' ) . '</p>';
 			echo '<p class="wpcs-row"><a class="button" href="' . esc_url( $this->action_url( 'cgav' ) ) . '"><span class="dashicons dashicons-download" aria-hidden="true"></span>' . esc_html__( 'Download server script (cgav)', 'cybergate-security' ) . '</a></p>';
 			echo '<details class="wpcs-cmds"><summary><span class="dashicons dashicons-editor-code" aria-hidden="true"></span><span class="wpcs-cmds__show">' . esc_html__( 'Show commands', 'cybergate-security' ) . '</span><span class="wpcs-cmds__label">' . esc_html__( 'Install everything in one paste (as root)', 'cybergate-security' ) . '</span></summary><div class="wpcs-cmds__body">';
-			echo '<p class="wpcs-sub">' . esc_html__( 'Paste the whole block into an SSH session as root. It saves the script, installs the cgav command for this site and shows the status.', 'cybergate-security' ) . '</p>';
+			echo '<p class="wpcs-sub">' . esc_html__( 'Paste the whole block into an SSH session as root. It saves the script, installs the cgav command and adds this site to the maldet monitor. On a server with more sites, paste the block of each site, or run cgav add-site for each: the engines are installed only once.', 'cybergate-security' ) . '</p>';
 			echo self::code( $block ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
 			echo '</div></details>';
 			echo '<dl class="wpcs-cgav">';
@@ -1785,14 +1798,28 @@ class Settings_Page {
 		echo '</tbody></table>';
 
 		$state = (string) $manager_live['state'];
+		// OpenLiteSpeed with the line in .user.ini that lsphp has not read yet: the exact next step.
+		$ols = 'installed' === $state && ! empty( $status['user_ini']['has_line'] ) ? \WPCyberSecurity\Guard_Manager::ols_activation_step() : null;
 		if ( ! empty( $status['conflict'] ) ) {
 			$help = ! empty( $status['conflict_help'] ) ? (string) $status['conflict_help'] : __( 'Another file already uses auto_prepend_file. The guard bootstrap includes it so both keep working, but check the snippets below before you change the PHP configuration.', 'cybergate-security' );
 			self::notice( $help, empty( $status['conflict_foreign'] ) ? 'warn' : 'bad' );
+			if ( ! empty( $status['conflict_foreign'] ) && method_exists( $manager, 'foreign_prepend_hint' ) ) {
+				// Where the other site's line may be set (often the shared php.ini), and the command that finds it.
+				$where = $manager->foreign_prepend_hint();
+				echo '<p class="wpcs-sub">' . esc_html( $where['text'] ) . '</p>';
+				echo self::code( (string) $where['code'] ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+				echo '<p class="wpcs-sub">' . esc_html( $where['note'] ) . '</p>';
+			}
 			if ( ! empty( $status['conflict_snippet'] ) && empty( $status['conflict_foreign'] ) ) {
 				echo self::code( (string) $status['conflict_snippet'], __( 'Add at the top of the other prepend file', 'cybergate-security' ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
 			}
 		} elseif ( 'confirmed' === $state ) {
 			self::notice( __( 'The guard runs: the last live test request to the site was answered with the guard loaded. This request cannot tell by itself (PHP on the command line and the development server do not read .user.ini or .htaccess).', 'cybergate-security' ), 'ok' );
+		} elseif ( $ols ) {
+			// OpenLiteSpeed: .user.ini has the line, lsphp has not read it. The exact next step, not "within 5 minutes".
+			self::notice( __( 'Installed and written to .user.ini, but PHP does not load it yet.', 'cybergate-security' ) . ' ' . $ols['text'], 'warn' );
+			echo self::code( (string) $ols['code'] ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in code().
+			echo '<p class="wpcs-sub">' . esc_html( $ols['next'] ) . '</p>';
 		} elseif ( 'installed' === $state ) {
 			self::notice( __( 'Installed, but PHP does not load it yet. Use "Install and switch on the early guard" below, or set auto_prepend_file with the recommended snippet, then reload this page.', 'cybergate-security' ), 'warn' );
 		}
@@ -1840,7 +1867,7 @@ class Settings_Page {
 		$this->field(
 			__( 'Not checked by the guard', 'cybergate-security' ),
 			$this->textarea( 'guard_exempt', (array) $s['guard_exempt'], 5 ),
-			__( 'Requests whose path or query contains one of these lines are skipped. WordPress media uploads are already checked by the plugin itself, so they are listed here by default.', 'cybergate-security' ),
+			__( 'One per line. A line ending in .php skips uploads to that script (the path of the running PHP file ends with it). A line with = (key=value) skips requests to WordPress\'s index.php whose GET or POST value of key is exactly value or starts with value/. Any other line is a route: it skips requests to WordPress\'s index.php whose URL path is the site path plus that route, with or without /index.php in between (or a route below it), unless a rest_route parameter is sent too. Lines for WordPress\'s own endpoints (scripts in /wp-admin/ and routes of the wp/v2 namespace) only skip requests that carry a login cookie or an Authorization header. WordPress media uploads are already checked by the plugin itself, so they are listed here by default.', 'cybergate-security' ),
 			'wpcs-guard-exempt'
 		);
 
@@ -2055,7 +2082,7 @@ class Settings_Page {
 
 		echo '<h3 class="wpcs-subhead">' . esc_html__( 'inotify watcher', 'cybergate-security' ) . '</h3>';
 		echo '<p>' . esc_html__( 'Starts a scan seconds after files change on disk, instead of waiting for the next scheduled scan.', 'cybergate-security' ) . '</p>';
-		echo self::commands( $tools->inotify_script(), '/usr/local/bin/wpcybersec-watch.sh' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
+		echo self::commands( $tools->inotify_script(), Sysadmin_Tools::inotify_script_path() ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped in commands().
 
 		echo '<h3 class="wpcs-subhead">' . esc_html__( 'Linux Malware Detect (maldet)', 'cybergate-security' ) . '</h3>';
 		echo '<p class="wpcs-muted">';

@@ -457,6 +457,12 @@ class Sysadmin_Tools {
 					return self::stable_binary( $candidate );
 				}
 			}
+			// LiteSpeed always ships the CLI next to lsphp (lsphpXX/bin/php). When
+			// open_basedir hides that folder (CyberPanel's open_basedir protection),
+			// it cannot be checked, but it is still the right binary.
+			if ( 0 === strpos( $base, 'lsphp' ) && ! self::path_allowed( dirname( $bin ) . '/php' ) ) {
+				return dirname( $bin ) . '/php';
+			}
 			// php-cgi works too (bin/cron.php accepts it from a shell): better than a "php" that may not exist.
 			if ( 0 === strpos( $base, 'php-cgi' ) || 0 === strpos( $base, 'phpcgi' ) ) {
 				return self::stable_binary( $bin );
@@ -478,6 +484,79 @@ class Sysadmin_Tools {
 			$cmd .= ' -q';
 		}
 		return $cmd;
+	}
+
+	/**
+	 * How snippets start WP-CLI. "wp" runs with the server's default "php",
+	 * which can be another PHP version than the site's: on CyberPanel and
+	 * OpenLiteSpeed /usr/bin/php may be 8.1 while the site runs lsphp83, and
+	 * the composer platform_check of other plugins then stops WP-CLI with a
+	 * fatal error. So when this site's PHP (php_binary()) is not the default
+	 * php, the command names it: "/usr/local/lsws/lsphp83/bin/php /usr/local/bin/wp".
+	 *
+	 * @param string|null $bin PHP binary of the site (default: php_binary()).
+	 * @return string Shell text, already quoted.
+	 */
+	public static function wp_cli( $bin = null ) {
+		$bin = null !== $bin ? wp_normalize_path( (string) $bin ) : self::php_binary();
+		// php-cgi cannot run the wp program; "php" means nothing better is known.
+		if ( '' === $bin || 'php' === $bin || preg_match( '/^php-?cgi/i', basename( $bin ) ) || self::is_default_php( $bin ) ) {
+			return 'wp';
+		}
+		$wp = self::wp_cli_path();
+		return self::shell_arg( $bin ) . ' ' . ( '' !== $wp ? self::shell_arg( $wp ) : '"$(command -v wp)"' );
+	}
+
+	/**
+	 * Whether $bin is the PHP that a plain "php" starts in a shell or cron
+	 * (the first php in /usr/local/bin, /usr/bin, /bin, links resolved).
+	 *
+	 * @param string $bin PHP binary.
+	 * @return bool False when it cannot be told (then naming the binary is the safe choice).
+	 */
+	public static function is_default_php( $bin ) {
+		$real = self::path_allowed( $bin ) ? @realpath( $bin ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( ! $real ) {
+			return false;
+		}
+		foreach ( array( '/usr/local/bin/php', '/usr/bin/php', '/bin/php' ) as $default ) {
+			if ( ! self::path_allowed( $default ) || ! @is_file( $default ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				continue;
+			}
+			$target = @realpath( $default ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return $target && wp_normalize_path( $target ) === wp_normalize_path( $real );
+		}
+		return false;
+	}
+
+	/**
+	 * Where the wp program is installed ('' when not found here).
+	 *
+	 * @return string
+	 */
+	public static function wp_cli_path() {
+		foreach ( array( '/usr/local/bin/wp', '/usr/bin/wp', '/usr/local/bin/wp-cli', '/usr/local/bin/wp-cli.phar', '/usr/bin/wp-cli' ) as $candidate ) {
+			if ( self::path_allowed( $candidate ) && @is_file( $candidate ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				return $candidate;
+			}
+		}
+		return '';
+	}
+
+	/**
+	 * Short name of this site for server-wide files that several sites of one
+	 * server may each add (fapolicyd rules, the inotify watcher): the host with
+	 * dots as dashes, so two sites never overwrite each other's file.
+	 *
+	 * @return string
+	 */
+	public static function site_slug() {
+		$host = sanitize_title( (string) wp_parse_url( Network::home_url(), PHP_URL_HOST ) );
+		$path = trim( (string) wp_parse_url( Network::home_url(), PHP_URL_PATH ), '/' );
+		if ( '' !== $path ) {
+			$host .= '-' . sanitize_title( str_replace( '/', '-', $path ) );
+		}
+		return '' !== $host ? $host : 'site';
 	}
 
 	/**
@@ -555,6 +634,7 @@ class Sysadmin_Tools {
 			'check_open_basedir',
 			'check_zip',
 			'check_wp_config',
+			'check_world_writable',
 			'check_file_edit',
 			'check_hosting',
 			'check_server',
@@ -890,6 +970,13 @@ class Sysadmin_Tools {
 			/* translators: 1: prepend file, 2: folder of the other site */
 			$check['detail'] = sprintf( __( 'PHP runs %1$s before every request, a file of another WordPress site (%2$s). This site depends on that site and runs its code with its settings, usually a leftover from copying a site.', 'cybergate-security' ), $prepend, $other );
 			$check['fix']    = __( 'Remove that auto_prepend_file line (.user.ini or .htaccess in this site\'s folder, the hosting panel\'s PHP settings, or the web server\'s settings for this site) and restart PHP. If this site uses Wordfence, run Wordfence > Firewall > Optimize the Wordfence Firewall again so it creates this site\'s own file. Then install the early guard.', 'cybergate-security' );
+			$gm              = self::service( 'guard_manager' );
+			if ( $gm && method_exists( $gm, 'foreign_prepend_hint' ) ) {
+				$where         = $gm->foreign_prepend_hint();
+				$check['fix'] .= ' ' . $where['text'];
+				$check['code'] = $where['code'];
+				$check['detail'] .= ' ' . __( 'It can also be set in the server-wide php.ini.', 'cybergate-security' ) . ' ' . $where['note'];
+			}
 			return $check;
 		}
 		$check['status'] = 'info';
@@ -1299,6 +1386,209 @@ class Sysadmin_Tools {
 			$check['detail'] = sprintf( __( 'Not readable by other users (%s).', 'cybergate-security' ), $mode );
 		}
 		return $check;
+	}
+
+	/**
+	 * Code folders and files that every user of the server may write (mode
+	 * o+w): any other account, a hacked site next door or a service user can
+	 * then plant code that this site runs. wp-config.php has its own check.
+	 *
+	 * @return array
+	 */
+	private function check_world_writable() {
+		$check = array(
+			'id'    => 'world_writable',
+			'label' => __( 'Code folders other users can write to', 'cybergate-security' ),
+		);
+		$scan = self::world_writable_scan();
+		if ( null === $scan ) {
+			$check['status'] = 'info';
+			$check['detail'] = __( 'File permissions cannot be checked on Windows servers.', 'cybergate-security' );
+			return $check;
+		}
+		if ( ! $scan['checked'] ) {
+			$check['status'] = 'info';
+			$check['detail'] = __( 'The code folders could not be checked here (open_basedir hides them).', 'cybergate-security' );
+			return $check;
+		}
+		if ( ! $scan['paths'] ) {
+			$check['status'] = 'pass';
+			/* translators: %s: number of folders and files */
+			$check['detail'] = sprintf( __( 'No code folder can be written by every user of the server (%s folders and files checked).', 'cybergate-security' ), number_format_i18n( $scan['checked'] ) );
+			return $check;
+		}
+		$count           = count( $scan['paths'] );
+		$check['status'] = 'fail';
+		$check['detail'] = sprintf(
+			/* translators: 1: number of folders and files, 2: example paths */
+			_n(
+				'%1$s folder or file of the site\'s code can be written by every user of the server (mode o+w): %2$s. Any other account or service on the server can put code there that this site then runs.',
+				'%1$s folders and files of the site\'s code can be written by every user of the server (mode o+w), for example %2$s. Any other account or service on the server can put code there that this site then runs.',
+				$count,
+				'cybergate-security'
+			),
+			number_format_i18n( $count ) . ( $scan['truncated'] ? '+' : '' ),
+			implode( ', ', array_map( array( __CLASS__, 'display_path' ), array_slice( $scan['paths'], 0, 3 ) ) )
+		);
+		$check['signals'] = array_map( array( __CLASS__, 'display_path' ), array_slice( $scan['paths'], 0, 20 ) );
+		$check['fix']     = __( 'Remove write access for other users (it changes nothing for the owner and the web server):', 'cybergate-security' );
+		$check['code']    = self::world_writable_command( $scan['roots'] );
+		return $check;
+	}
+
+	/**
+	 * The code folders world_writable_scan() looks at: { path, children }.
+	 * children = also the entries one level below (plugin and theme folders).
+	 *
+	 * @return array[]
+	 */
+	public static function world_writable_roots() {
+		$abs    = self::abspath();
+		$themes = function_exists( 'get_theme_root' ) ? (string) get_theme_root() : WP_CONTENT_DIR . '/themes';
+		$roots  = array(
+			array( WPCYBERSEC_DIR, false ),
+			array( WP_CONTENT_DIR, false ),
+			array( WP_PLUGIN_DIR, true ),
+			array( $themes, true ),
+			array( defined( 'WPMU_PLUGIN_DIR' ) ? WPMU_PLUGIN_DIR : WP_CONTENT_DIR . '/mu-plugins', false ),
+			array( $abs, false ),
+			array( $abs . '/wp-admin', false ),
+			array( $abs . '/' . WPINC, false ),
+		);
+		$out  = array();
+		$seen = array();
+		foreach ( $roots as $root ) {
+			$path = untrailingslashit( wp_normalize_path( (string) $root[0] ) );
+			if ( '' === $path || isset( $seen[ $path ] ) ) {
+				continue;
+			}
+			$seen[ $path ] = true;
+			$out[]         = array(
+				'path'     => $path,
+				'children' => (bool) $root[1],
+			);
+		}
+		return $out;
+	}
+
+	/**
+	 * Finds code folders and files with the write bit for other users: each
+	 * folder of world_writable_roots() itself, plus one level of entries in the
+	 * plugin and theme folders. Never follows symlinks (lstat), never looks
+	 * outside open_basedir, stops after $cap entries.
+	 *
+	 * @param int $cap Entries looked at, at most.
+	 * @return array|null { paths: string[], roots: string[] (folders with a finding), checked, truncated }; null on Windows.
+	 */
+	public static function world_writable_scan( $cap = 500 ) {
+		if ( '\\' === DIRECTORY_SEPARATOR ) {
+			return null;
+		}
+		$result = array(
+			'paths'     => array(),
+			'roots'     => array(),
+			'checked'   => 0,
+			'truncated' => false,
+		);
+		$add = static function ( $path, $root ) use ( &$result ) {
+			if ( ! in_array( $path, $result['paths'], true ) ) {
+				$result['paths'][] = $path;
+			}
+			if ( ! in_array( $root, $result['roots'], true ) ) {
+				$result['roots'][] = $root;
+			}
+		};
+		foreach ( self::world_writable_roots() as $root ) {
+			$dir = $root['path'];
+			if ( $result['checked'] >= $cap ) {
+				$result['truncated'] = true;
+				break;
+			}
+			$mode = self::lmode( $dir );
+			if ( null === $mode || 0120000 === ( $mode & 0170000 ) ) {
+				continue; // Missing, hidden by open_basedir, or a symlink: never followed.
+			}
+			++$result['checked'];
+			if ( $mode & 0002 ) {
+				$add( $dir, $dir );
+			}
+			if ( ! $root['children'] || 0040000 !== ( $mode & 0170000 ) ) {
+				continue;
+			}
+			$handle = @opendir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( ! $handle ) {
+				continue;
+			}
+			while ( false !== ( $entry = readdir( $handle ) ) ) { // phpcs:ignore WordPress.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition
+				if ( '.' === $entry || '..' === $entry ) {
+					continue;
+				}
+				if ( $result['checked'] >= $cap ) {
+					$result['truncated'] = true;
+					break;
+				}
+				$path = $dir . '/' . $entry;
+				$mode = self::lmode( $path );
+				if ( null === $mode || 0120000 === ( $mode & 0170000 ) ) {
+					continue;
+				}
+				++$result['checked'];
+				if ( $mode & 0002 ) {
+					$add( $path, $dir );
+				}
+			}
+			closedir( $handle );
+		}
+		return $result;
+	}
+
+	/**
+	 * Mode of a path itself (a symlink is not followed), null when it cannot be read.
+	 *
+	 * @param string $path Path.
+	 * @return int|null
+	 */
+	private static function lmode( $path ) {
+		if ( ! self::path_allowed( $path ) ) {
+			return null;
+		}
+		$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		return is_array( $stat ) && isset( $stat['mode'] ) ? (int) $stat['mode'] : null;
+	}
+
+	/**
+	 * The safe shell command that removes the write bit for other users below
+	 * these folders (symlinks are skipped, nothing else changes).
+	 *
+	 * @param string[] $roots Folders.
+	 * @return string
+	 */
+	public static function world_writable_command( array $roots ) {
+		$lines = array();
+		foreach ( $roots as $root ) {
+			foreach ( $roots as $other ) {
+				if ( $other !== $root && 0 === strpos( $root . '/', rtrim( $other, '/' ) . '/' ) ) {
+					continue 2; // find walks $other recursively, which covers this folder.
+				}
+			}
+			$lines[] = 'find ' . self::shell_arg( $root ) . ' -perm -o+w -not -type l -exec chmod o-w {} +';
+		}
+		return implode( "\n", $lines );
+	}
+
+	/**
+	 * A path for messages: relative to the WordPress folder when inside it.
+	 *
+	 * @param string $path Absolute path.
+	 * @return string
+	 */
+	public static function display_path( $path ) {
+		$abs  = self::abspath();
+		$path = wp_normalize_path( (string) $path );
+		if ( $path === $abs ) {
+			return $abs . '/';
+		}
+		return 0 === strpos( $path, $abs . '/' ) ? substr( $path, strlen( $abs ) + 1 ) : $path;
 	}
 
 	/**
@@ -2147,9 +2437,15 @@ class Sysadmin_Tools {
 		$path = self::shell_arg( self::abspath() );
 		$off  = self::cron_disable_step();
 
+		// The site's own PHP when the default php is another version (wp_cli()).
+		$cli        = self::wp_cli();
 		$wpcli_cron = is_multisite()
-			? "*/5 * * * * wp site list --field=url --path={$path} | xargs -I{} wp cron event run --due-now --url={} --path={$path} --quiet"
-			: "*/5 * * * * wp cron event run --due-now --path={$wp} --quiet";
+			? "*/5 * * * * {$cli} site list --field=url --path={$path} | xargs -I{} {$cli} cron event run --due-now --url={} --path={$path} --quiet"
+			: "*/5 * * * * {$cli} cron event run --due-now --path={$wp} --quiet";
+		$cli_help   = 'wp' !== $cli
+			/* translators: %s: PHP binary */
+			? ' ' . sprintf( __( 'The lines start WP-CLI with this site\'s PHP (%s) because the server\'s default php is another one; a plain "wp" could stop with a fatal error from a plugin that needs this PHP version.', 'cybergate-security' ), self::php_binary() )
+			: '';
 
 		return array(
 			array(
@@ -2165,12 +2461,12 @@ class Sysadmin_Tools {
 				'id'    => 'wpcli',
 				'label' => __( 'The same with WP-CLI', 'cybergate-security' ),
 				'file'  => __( 'crontab -e (as the web server user)', 'cybergate-security' ),
-				'code'  => $jobs[0]['schedule'] . " wp wpcybersec scan --path={$wp} --quiet\n"
-					. $jobs[1]['schedule'] . " wp wpcybersec scan --full --path={$wp} --quiet\n"
+				'code'  => $jobs[0]['schedule'] . " {$cli} wpcybersec scan --path={$wp} --quiet\n"
+					. $jobs[1]['schedule'] . " {$cli} wpcybersec scan --full --path={$wp} --quiet\n"
 					. $wpcli_cron,
-				'help'  => is_multisite()
+				'help'  => ( is_multisite()
 					? __( 'Use this variant instead when WP-CLI is installed. Use the full path to wp if cron cannot find it. The last line runs the due WordPress cron events of every site of the network.', 'cybergate-security' )
-					: __( 'Use this variant instead when WP-CLI is installed. Use the full path to wp if cron cannot find it.', 'cybergate-security' ),
+					: __( 'Use this variant instead when WP-CLI is installed. Use the full path to wp if cron cannot find it.', 'cybergate-security' ) ) . $cli_help,
 			),
 			array(
 				'id'    => 'wpconfig',
@@ -2325,7 +2621,7 @@ class Sysadmin_Tools {
 		$store = self::service( 'store' );
 		yield '# fapolicyd trust file generated by CyberGate Security on ' . gmdate( 'Y-m-d H:i:s' ) . ' UTC';
 		yield '# Site: ' . home_url( '/' );
-		yield '# Format: path size sha256. Install it as /etc/fapolicyd/trust.d/wordpress.trust and run: fapolicyd-cli --update';
+		yield '# Format: path size sha256. Install it as /etc/fapolicyd/trust.d/wordpress-' . self::site_slug() . '.trust and run: fapolicyd-cli --update';
 		if ( ! $store || ! method_exists( $store, 'manifest_page' ) ) {
 			yield '# The file manifest is not available.';
 			return;
@@ -2361,12 +2657,14 @@ class Sysadmin_Tools {
 		$bin  = defined( 'PHP_BINARY' ) ? wp_normalize_path( (string) PHP_BINARY ) : '';
 		$fpm  = ( '' !== $bin && false !== strpos( basename( $bin ), 'fpm' ) ) ? $bin : '/usr/sbin/php-fpm';
 		$root = rtrim( Paths::scan_root(), '/' ) . '/';
-		return "# /etc/fapolicyd/rules.d/35-wordpress.rules\n"
+		// One rules and trust file per site: several sites of one server each add their own.
+		$name = 'wordpress-' . self::site_slug();
+		return "# /etc/fapolicyd/rules.d/35-{$name}.rules\n"
 			. '# ' . __( 'PHP-FPM may only open PHP files of this site that are in the trust list.', 'cybergate-security' ) . "\n"
 			. "allow perm=open exe={$fpm} : dir={$root} ftype=text/x-php trust=1\n"
 			. "deny_audit perm=open exe={$fpm} : dir={$root} ftype=text/x-php\n\n"
 			. '# ' . __( 'Install the trust list downloaded above and reload:', 'cybergate-security' ) . "\n"
-			. "#   cp wordpress.trust /etc/fapolicyd/trust.d/wordpress.trust\n"
+			. "#   cp {$name}.trust /etc/fapolicyd/trust.d/{$name}.trust\n"
 			. "#   fagenrules --load && fapolicyd-cli --update\n"
 			. '# ' . __( 'Download a fresh trust list after every update you approve, or PHP will be denied the new files.', 'cybergate-security' );
 	}
@@ -2379,6 +2677,16 @@ class Sysadmin_Tools {
 	 */
 	private static function ere_quote( $value ) {
 		return preg_replace( '/([.\[\](){}*+?|^$\\\\])/', '\\\\$1', (string) $value );
+	}
+
+	/**
+	 * Where the inotify watcher of this site is installed: one file per site,
+	 * so two sites of one server keep their own.
+	 *
+	 * @return string
+	 */
+	public static function inotify_script_path() {
+		return '/usr/local/bin/wpcybersec-watch-' . self::site_slug() . '.sh';
 	}
 
 	/**
@@ -2403,7 +2711,7 @@ class Sysadmin_Tools {
 			'# Run it as the web server user, for example from a systemd service:',
 			'#   [Service]',
 			'#   User=www-data',
-			'#   ExecStart=/usr/local/bin/wpcybersec-watch.sh',
+			'#   ExecStart=' . self::inotify_script_path(),
 			'#   Restart=always',
 			'',
 			'SITE=' . self::shell_arg( $root ),
@@ -2479,12 +2787,12 @@ class Sysadmin_Tools {
 				'code' => $install,
 			),
 			array(
-				'text' => __( 'Add this site to the monitored folders (safe to run again):', 'cybergate-security' ),
+				'text' => __( 'Add this site to the monitored folders (safe to run again). maldet is installed once per server and shared by every site on it: a second site only needs this line, not its own install.', 'cybergate-security' ),
 				'code' => 'grep -qxF ' . $path . ' ' . $list . ' || echo ' . $path . ' >> ' . $list,
 			),
 			array(
-				'text' => __( 'Start the monitor, then check its log:', 'cybergate-security' ),
-				'code' => 'maldet --monitor ' . $list . "\ntail -n 20 /usr/local/maldetect/logs/inotify_log",
+				'text' => __( 'Start the monitor, or restart it when it already runs for other sites (it reads the folder list only when it starts), then check its log:', 'cybergate-security' ),
+				'code' => 'maldet --kill-monitor >/dev/null 2>&1; maldet --monitor ' . $list . "\ntail -n 20 /usr/local/maldetect/logs/inotify_log",
 			),
 			array(
 				'text' => __( 'Big sites: allow more inotify watches, now and after a reboot:', 'cybergate-security' ),
@@ -2541,9 +2849,12 @@ class Sysadmin_Tools {
 		if ( '' === $script ) {
 			return '';
 		}
+		// One cgav serves every site of the server: self-install adds this site to
+		// its SITES list, and add-site puts it in the maldet monitor (restarting it).
+		$site = self::shell_arg( untrailingslashit( wp_normalize_path( ABSPATH ) ) );
 		return "cat > /root/cgav.sh <<'CGAV_EOF'\n" . rtrim( $script, "\n" ) . "\nCGAV_EOF\n"
-			. 'bash /root/cgav.sh self-install ' . self::shell_arg( untrailingslashit( wp_normalize_path( ABSPATH ) ) ) . "\n"
-			. 'cgav status';
+			. 'bash /root/cgav.sh self-install ' . $site . "\n"
+			. 'cgav add-site ' . $site;
 	}
 
 	/**
@@ -2553,7 +2864,11 @@ class Sysadmin_Tools {
 	 */
 	public static function cgav_commands() {
 		return array(
-			'cgav status'                     => __( 'What is installed and running. Run it before and after anything.', 'cybergate-security' ),
+			'cgav status'                     => __( 'What is installed and running, and every site the monitor watches. Run it before and after anything.', 'cybergate-security' ),
+			'cgav sites'                      => __( 'Lists the WordPress sites on this server and which of them the monitor watches.', 'cybergate-security' ),
+			'cgav add-site <path>'            => __( 'Adds one more site of this server to the monitor and restarts it. ClamAV and maldet are installed once per server.', 'cybergate-security' ),
+			'cgav remove-site <path>'         => __( 'Stops watching one site.', 'cybergate-security' ),
+			'cgav add-all'                    => __( 'Adds every WordPress site found on this server.', 'cybergate-security' ),
 			'cgav install-clamav'             => __( 'Install ClamAV, download signatures, start the scanner service.', 'cybergate-security' ),
 			'cgav install-maldet'             => __( 'Install Linux Malware Detect and inotify-tools, watch this site in real time, start on boot, report-only.', 'cybergate-security' ),
 			'cgav monitor start|stop|status'  => __( 'Control the maldet real-time monitor.', 'cybergate-security' ),
@@ -2613,9 +2928,24 @@ class Sysadmin_Tools {
 	 * a check that the hosting does not let PHP do (open_basedir, no exec,
 	 * no /proc) is reported as unknown.
 	 *
-	 * @return array[] Each { label, state ok|bad|unknown|na, text }.
+	 * @return array[] Each { id, label, state ok|bad|unknown|na, text, hint, code }; hint and code
+	 *                 (may be '') say why a row is unknown or not set up and give the root command.
 	 */
 	public function antivirus_live() {
+		if ( null !== $this->live_cache ) {
+			return $this->live_cache;
+		}
+		$this->live_cache = $this->antivirus_live_rows();
+		return $this->live_cache;
+	}
+
+	/** @var array[]|null antivirus_live() of this request. */
+	private $live_cache = null;
+
+	/**
+	 * @return array[] See antivirus_live().
+	 */
+	private function antivirus_live_rows() {
 		$hidden = __( 'Unknown (hosting hides it)', 'cybergate-security' );
 		$av     = $this->antivirus_status();
 		$rows   = array();
@@ -2668,9 +2998,9 @@ class Sysadmin_Tools {
 			$running = null;
 			// Servers that mount /proc with hidepid (common on hardened and CloudLinux
 			// hosts) hide other users' processes from PHP: the root-owned monitor is
-			// invisible there, so "not found" means unknown, not stopped. Process 1
-			// (init) always exists, so not seeing it shows the processes are hidden.
-			$procs_visible = self::path_allowed( '/proc' ) && @is_dir( '/proc/self' ) && @file_exists( '/proc/1' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			// invisible there, so "not found" means unknown, not stopped.
+			$procs_hidden  = self::processes_hidden();
+			$procs_visible = ! $procs_hidden && self::path_allowed( '/proc' ) && @is_dir( '/proc/self' ) && @file_exists( '/proc/1' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			if ( $procs_visible ) {
 				// maldet 1.6 keeps the monitor's pid in monitor.pid; older versions in inotifywait.pid.
 				foreach ( array( 'monitor.pid', 'inotifywait.pid' ) as $name ) {
@@ -2707,7 +3037,9 @@ class Sysadmin_Tools {
 				}
 			}
 			if ( null === $running ) {
-				$rows[] = array( $label, 'unknown', $hidden );
+				// Say why it cannot be told, and how root checks it.
+				$hint   = self::monitor_check_hint( $procs_hidden );
+				$rows[] = array( $label, 'unknown', $hidden, $hint['text'], $hint['code'] );
 			} else {
 				$text = $running ? __( 'Running', 'cybergate-security' ) : __( 'Not running', 'cybergate-security' );
 				if ( $running && null !== $active_ago ) {
@@ -2727,15 +3059,18 @@ class Sysadmin_Tools {
 			$rows[] = array( $label, 'unknown', $hidden );
 		} else {
 			$lines = @file( $list, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
-			$found = false;
-			foreach ( is_array( $lines ) ? $lines : array() as $line ) {
-				if ( untrailingslashit( wp_normalize_path( trim( $line ) ) ) === $site ) {
-					$found = true;
-					break;
-				}
+			$found = self::monitor_watches( is_array( $lines ) ? $lines : array(), $site );
+			if ( $site === $found ) {
+				$rows[] = array( $label, 'ok', __( 'Yes, in monitor_paths', 'cybergate-security' ) );
+			} elseif ( '' !== $found ) {
+				// maldet watches folders recursively: a listed parent folder covers this site.
+				/* translators: %s: folder path */
+				$rows[] = array( $label, 'ok', sprintf( __( 'Yes, as part of %s', 'cybergate-security' ), $found ) );
+			} else {
+				$add    = self::monitor_add_site_step();
+				/* translators: %s: file path */
+				$rows[] = array( $label, 'bad', sprintf( __( 'No: not listed in %s', 'cybergate-security' ), $list ), $add['text'], $add['code'] );
 			}
-			/* translators: %s: file path */
-			$rows[] = array( $label, $found ? 'ok' : 'bad', $found ? __( 'Yes, in monitor_paths', 'cybergate-security' ) : sprintf( __( 'No: not listed in %s', 'cybergate-security' ), $list ) );
 		}
 
 		// maldet quarantine off: CyberGate Security decides.
@@ -2757,15 +3092,138 @@ class Sysadmin_Tools {
 			}
 		}
 
+		// Always the same five rows, in this order.
+		$ids = array( 'clamd', 'maldet', 'maldet_monitor', 'maldet_watch', 'maldet_quarantine' );
 		$out = array();
-		foreach ( $rows as $row ) {
+		foreach ( $rows as $i => $row ) {
 			$out[] = array(
+				'id'    => isset( $ids[ $i ] ) ? $ids[ $i ] : 'row' . $i,
 				'label' => $row[0],
 				'state' => $row[1],
 				'text'  => $row[2],
+				'hint'  => isset( $row[3] ) ? (string) $row[3] : '',
+				'code'  => isset( $row[4] ) ? (string) $row[4] : '',
 			);
 		}
 		return $out;
+	}
+
+	/**
+	 * The monitor_paths line that covers a folder: the folder itself or a
+	 * parent folder (maldet watches folders recursively).
+	 *
+	 * @param string[] $lines Lines of monitor_paths.
+	 * @param string   $site  Folder, normalized, no trailing slash.
+	 * @return string The matching line (normalized), '' when none covers it.
+	 */
+	public static function monitor_watches( array $lines, $site ) {
+		$site  = untrailingslashit( wp_normalize_path( (string) $site ) );
+		$found = '';
+		foreach ( $lines as $line ) {
+			$line = trim( (string) $line );
+			if ( '' === $line || '#' === $line[0] ) {
+				continue;
+			}
+			$dir = untrailingslashit( wp_normalize_path( $line ) );
+			if ( '' === $dir ) {
+				$dir = '/';
+			}
+			if ( $dir === $site ) {
+				return $site;
+			}
+			if ( '' === $found && ( '/' === $dir || 0 === strpos( $site . '/', $dir . '/' ) ) ) {
+				$found = $dir;
+			}
+		}
+		return $found;
+	}
+
+	/**
+	 * Whether /proc hides other users' processes from PHP: it is mounted with
+	 * hidepid (1, 2, invisible), normal on hardened and CloudLinux servers.
+	 * PHP then sees its own processes (/proc/self) but not process 1 (init,
+	 * which always exists). A check that looks for a root-owned process (pgrep,
+	 * a pid file) cannot tell "stopped" from "hidden" there; checks through a
+	 * socket, like the ClamAV service (clamd), are not affected.
+	 *
+	 * @return bool False without /proc (Windows, macOS) or when open_basedir hides it.
+	 */
+	public static function processes_hidden() {
+		if ( '\\' === DIRECTORY_SEPARATOR || ! self::path_allowed( '/proc/self' ) || ! @is_dir( '/proc/self' ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return false;
+		}
+		return ! @file_exists( '/proc/1' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
+
+	/**
+	 * The sentence for a process check that processes_hidden() made unknown.
+	 *
+	 * @return string
+	 */
+	public static function processes_hidden_text() {
+		return __( 'This server hides other users\' processes from PHP (/proc is mounted with hidepid), which is normal on hardened servers, so PHP cannot see a service that runs as root.', 'cybergate-security' );
+	}
+
+	/**
+	 * Whether the cgav server script is installed (null when open_basedir hides /usr/local/bin).
+	 *
+	 * @return bool|null
+	 */
+	public static function cgav_installed() {
+		$bin = '/usr/local/bin/cgav';
+		if ( ! self::path_allowed( $bin ) ) {
+			return null;
+		}
+		return @is_file( $bin ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
+
+	/**
+	 * Why the maldet monitor state is unknown, and the root command that checks it.
+	 *
+	 * @param bool|null $hidden processes_hidden() (computed when null).
+	 * @return array { text, code }
+	 */
+	public static function monitor_check_hint( $hidden = null ) {
+		$hidden = null === $hidden ? self::processes_hidden() : (bool) $hidden;
+		$text   = $hidden
+			? self::processes_hidden_text() . ' ' . __( 'Check the monitor as root:', 'cybergate-security' )
+			: __( 'PHP may not look for running programs here (exec() is disabled or open_basedir hides the maldet folder). Check the monitor as root:', 'cybergate-security' );
+		$cgav = self::cgav_installed();
+		if ( true === $cgav ) {
+			$code = "cgav monitor status\n# or: pgrep -af inotifywait";
+		} elseif ( null === $cgav ) {
+			$code = "pgrep -af inotifywait\n# with the cgav script installed: cgav monitor status";
+		} else {
+			$code = 'pgrep -af inotifywait';
+		}
+		return array(
+			'text' => $text,
+			'code' => $code,
+		);
+	}
+
+	/**
+	 * How to add this site to the maldet monitor. One maldet serves every site
+	 * of the server, so a second site only needs its folder added: the cgav
+	 * command, else the line in monitor_paths and a monitor restart (maldet's
+	 * reload_monitor only reloads its configuration, not the watched folders).
+	 *
+	 * @return array { text, code }
+	 */
+	public static function monitor_add_site_step() {
+		$site = self::shell_arg( untrailingslashit( wp_normalize_path( ABSPATH ) ) );
+		$list = '/usr/local/maldetect/monitor_paths';
+		$cgav = 'cgav add-site ' . $site;
+		if ( true === self::cgav_installed() ) {
+			return array(
+				'text' => __( 'maldet is installed once per server and watches every site listed in monitor_paths. Add this site as root:', 'cybergate-security' ),
+				'code' => $cgav,
+			);
+		}
+		return array(
+			'text' => __( 'maldet is installed once per server and watches every site listed in monitor_paths. Add this site as root with the cgav script, or without it add the line and restart the monitor:', 'cybergate-security' ),
+			'code' => $cgav . "\n# without cgav:\ngrep -qxF " . $site . ' ' . $list . ' || echo ' . $site . ' >> ' . $list . "\nsystemctl restart maldet\n# without systemd: maldet --kill-monitor && maldet --monitor " . $list,
+		);
 	}
 
 	/**
@@ -3579,6 +4037,11 @@ class Sysadmin_Tools {
 				);
 				$result = $hardening->reping( 10 );
 				$text   = isset( $texts[ $result ] ) ? $texts[ $result ] : $texts['unknown'];
+				$ols    = 'inactive' === $result ? Guard_Manager::ols_activation_step() : null;
+				if ( $ols ) {
+					// OpenLiteSpeed: the line is there, lsphp has not read it. Say what to run.
+					$text[0] .= ' ' . $ols['inline'];
+				}
 				self::flash( $text[0], $text[1] );
 			} else {
 				$result = $hardening->run( 'guard' );
@@ -3623,6 +4086,11 @@ class Sysadmin_Tools {
 				'uninstall'      => __( 'Early guard switched off. If you added auto_prepend_file to the server configuration, remove that line too.', 'cybergate-security' ),
 				'write_user_ini' => __( 'auto_prepend_file was added to .user.ini. PHP picks it up within 5 minutes (user_ini.cache_ttl).', 'cybergate-security' ),
 			);
+			$ols = 'write_user_ini' === $op ? Guard_Manager::ols_activation_step() : null;
+			if ( $ols ) {
+				// OpenLiteSpeed does not reread .user.ini by itself: "within 5 minutes" would not come true.
+				$messages['write_user_ini'] = __( 'auto_prepend_file was added to .user.ini.', 'cybergate-security' ) . ' ' . $ols['inline'];
+			}
 			// Guard_Manager logs what it did (guard_installed, guard_user_ini, guard_uninstalled): one entry, not two.
 			self::flash( $messages[ $op ], 'ok' );
 		}
@@ -3665,7 +4133,7 @@ class Sysadmin_Tools {
 			self::log( 'fapolicyd_exported', __( 'fapolicyd trust list downloaded.', 'cybergate-security' ) );
 			nocache_headers();
 			header( 'Content-Type: text/plain; charset=utf-8' );
-			header( 'Content-Disposition: attachment; filename="wordpress-' . $host . '.trust"' );
+			header( 'Content-Disposition: attachment; filename="wordpress-' . self::site_slug() . '.trust"' );
 			header( 'X-Content-Type-Options: nosniff' );
 			while ( ob_get_level() > 0 ) {
 				ob_end_flush();

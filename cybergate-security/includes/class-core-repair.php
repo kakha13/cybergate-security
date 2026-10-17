@@ -638,7 +638,7 @@ class Core_Repair {
 					),
 					array(
 						'text' => __( 'Check the result and run a full scan in CyberGate Security (Dashboard > Full malware scan):', 'cybergate-security' ),
-						'code' => 'wp core verify-checksums',
+						'code' => Sysadmin_Tools::wp_cli() . ' core verify-checksums',
 					),
 				),
 				$after
@@ -713,7 +713,7 @@ class Core_Repair {
 		}
 		$steps[] = array(
 			'text' => $wpcli,
-			'code' => 'wp core verify-checksums',
+			'code' => Sysadmin_Tools::wp_cli() . ' core verify-checksums',
 		);
 		return $steps;
 	}
@@ -727,7 +727,7 @@ class Core_Repair {
 		return array(
 			array(
 				'text' => __( 'Afterwards change the password of every administrator account (Users), and replace the secret keys and salts in wp-config.php with new ones (everyone has to log in again). New keys: https://api.wordpress.org/secret-key/1.1/salt/ or with WP-CLI:', 'cybergate-security' ),
-				'code' => 'wp config shuffle-salts',
+				'code' => Sysadmin_Tools::wp_cli() . ' config shuffle-salts',
 			),
 			array( 'text' => __( 'A core reinstall does not clean plugins, themes or uploads: review the remaining reports, update every plugin and theme, and delete the ones you do not use.', 'cybergate-security' ) ),
 		);

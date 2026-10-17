@@ -4,7 +4,7 @@ Tags: security, malware scanner, file integrity, upload, quarantine
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.0.0
+Stable tag: 1.0.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -123,6 +123,21 @@ Data kept on your site: for every held file the plugin records the uploading use
 8. Recent changes: every recently modified code file and what explains the change.
 
 == Changelog ==
+
+= 1.0.1 =
+* The maldet real-time monitor no longer shows "Not running" on servers that hide other users' processes from PHP (/proc mounted with hidepid). It is detected from maldet's own log, or shown as unknown with the reason and the command that checks it as root.
+* A site inside a folder the maldet monitor already watches now counts as watched. When the site is not watched, the Antivirus card shows the command that adds it (cgav add-site).
+* ClamAV and maldet are installed once per server: the Antivirus card, the cgav script block and Developer instructions now say so, and the one-paste block adds this site to the monitor instead of assuming it is the only site.
+* New check "Code folders other users can write to": finds world-writable plugin, theme and core folders, with a one-click fix that removes only the write permission for other users from files PHP owns, and safe commands for the rest.
+* WP-CLI commands shown by the plugin (real cron lines, core reinstall checks) now use this site's PHP when the server's default php is another version, as on CyberPanel and OpenLiteSpeed.
+* OpenLiteSpeed and CyberPanel: after the early guard is written to .user.ini, the guard page says exactly how to restart lsphp and what to do if it still is not loaded, instead of "within 5 minutes".
+* A prepend file of another site now comes with the command that finds where it is set (often the server-wide php.ini) and what removing it means for the other site.
+* Real cron run with WP-CLI (wp wpcybersec scan or wp cron event run from a crontab) now counts as real cron, so the "Switch off visitor-triggered cron" button appears.
+* The Allowlist filter "File fingerprints" now also lists files approved under executable names.
+* GridPane and SpinupWP cron steps now list only the two scan jobs they ask for.
+* The help text of the guard's "Not checked by the guard" list now describes exactly how lines are matched.
+* The cgav server script now handles many sites per server: cgav sites lists every WordPress site and whether it is watched, cgav add-site, remove-site and add-all change the list, and the monitor is restarted so a new site is really watched (maldet's own reload does not pick up new folders).
+* fapolicyd files, the inotify watcher and the HestiaCP template are now named per site, so several sites on one server do not overwrite each other's.
 
 = 1.0.0 =
 * First release.

@@ -33,7 +33,7 @@ class Hardening {
 	 * are left out on purpose: they change how every request starts, so they
 	 * need their own click.
 	 */
-	const AUTO = array( 'data_dir', 'wp_config_perms', 'file_edit', 'uploads_php', 'hmac_key' );
+	const AUTO = array( 'data_dir', 'wp_config_perms', 'world_writable', 'file_edit', 'uploads_php', 'hmac_key' );
 
 	public function register() {
 		add_filter( 'wpcybersec_diagnostics', array( $this, 'enrich' ), 20 );
@@ -146,6 +146,26 @@ class Hardening {
 					'id'          => 'wp_config_perms',
 					'label'       => __( 'Fix permissions', 'cybergate-security' ),
 					'description' => __( 'Makes wp-config.php readable only by its owner and group (640). The site keeps working; the change is undone automatically if WordPress could no longer read the file.', 'cybergate-security' ),
+				);
+
+			case 'world_writable':
+				$own = count( $this->world_writable_owned() );
+				if ( ! $own ) {
+					return null; // Windows, no posix functions, or every path belongs to another user.
+				}
+				return array(
+					'id'          => 'world_writable',
+					'label'       => __( 'Remove write access for other users', 'cybergate-security' ),
+					'description' => sprintf(
+						/* translators: %s: number of folders and files */
+						_n(
+							'Removes only the write permission for other users (chmod o-w) from the %s folder or file PHP owns. The owner and the web server keep their access, symlinks are never followed, and the folders are checked again afterwards.',
+							'Removes only the write permission for other users (chmod o-w) from the %s folders and files PHP owns. The owner and the web server keep their access, symlinks are never followed, and the folders are checked again afterwards.',
+							$own,
+							'cybergate-security'
+						),
+						number_format_i18n( $own )
+					),
 				);
 
 			case 'file_edit':
@@ -269,6 +289,30 @@ class Hardening {
 						'code' => 'chmod 640 ' . ( $config ? $config : 'wp-config.php' ),
 					),
 				);
+
+			case 'world_writable':
+				$scan = Sysadmin_Tools::world_writable_scan();
+				if ( ! $scan || ! $scan['roots'] ) {
+					return array();
+				}
+				$owned  = $this->world_writable_owned( $scan );
+				$others = array_values( array_diff( $scan['paths'], $owned ) );
+				$steps  = array();
+				if ( $others ) {
+					$steps[] = array(
+						'text' => sprintf(
+							/* translators: %s: paths */
+							__( 'PHP does not own these, so it may not change them: %s. Someone with SSH access (the owner of the files, or root) has to.', 'cybergate-security' ),
+							implode( ', ', array_map( array( '\WPCyberSecurity\Sysadmin_Tools', 'display_path' ), array_slice( $others, 0, 10 ) ) ) . ( count( $others ) > 10 ? ', ...' : '' )
+						),
+					);
+				}
+				$steps[] = array(
+					'text' => __( 'With SSH, as the owner of the files or as root, run this. It removes only the write permission for other users, below each folder too, and skips symlinks:', 'cybergate-security' ),
+					'code' => Sysadmin_Tools::world_writable_command( $scan['roots'] ),
+				);
+				$steps[] = array( 'text' => __( 'If PHP runs as a user that neither owns these files nor is in their group, it writes through exactly this permission: give the files to that user first (chown), or plugin updates and uploads stop working. Then reload this page.', 'cybergate-security' ) );
+				return $this->for_panel( 'permissions', $steps );
 
 			case 'file_edit':
 				return array(
@@ -441,6 +485,9 @@ class Hardening {
 			case 'wp_config_perms':
 				$result = $this->fix_wp_config_perms();
 				break;
+			case 'world_writable':
+				$result = $this->fix_world_writable();
+				break;
 			case 'file_edit':
 				$result = $this->fix_file_edit();
 				break;
@@ -509,6 +556,96 @@ class Hardening {
 			return new \WP_Error( 'wpcybersec_fix', __( 'WordPress could not read wp-config.php after the change, so it was undone.', 'cybergate-security' ) );
 		}
 		return true;
+	}
+
+	/**
+	 * The paths of world_writable_scan() that PHP owns (only the owner may chmod).
+	 * Strict: without the posix functions nothing counts as owned.
+	 *
+	 * @param array|null $scan Sysadmin_Tools::world_writable_scan() (run when null).
+	 * @return string[]
+	 */
+	private function world_writable_owned( $scan = null ) {
+		if ( ! function_exists( 'posix_geteuid' ) ) {
+			return array();
+		}
+		$scan = is_array( $scan ) ? $scan : Sysadmin_Tools::world_writable_scan();
+		if ( ! $scan ) {
+			return array();
+		}
+		$uid = posix_geteuid();
+		$out = array();
+		foreach ( $scan['paths'] as $path ) {
+			$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( is_array( $stat ) && 0120000 !== ( $stat['mode'] & 0170000 ) && (int) $stat['uid'] === $uid ) {
+				$out[] = $path;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Removes the write bit for other users (o-w) from the code folders and
+	 * files of the world-writable check that PHP owns. Nothing else of the mode
+	 * changes, symlinks are never touched, then the check runs again.
+	 *
+	 * @return string|\WP_Error String = done, with what changed.
+	 */
+	private function fix_world_writable() {
+		$scan = Sysadmin_Tools::world_writable_scan();
+		if ( null === $scan ) {
+			return new \WP_Error( 'wpcybersec_fix', __( 'File permissions cannot be changed on Windows servers.', 'cybergate-security' ) );
+		}
+		$fixed  = 0;
+		$failed = array();
+		foreach ( $this->world_writable_owned( $scan ) as $path ) {
+			clearstatcache( true, $path );
+			$stat = @lstat( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			if ( ! is_array( $stat ) || 0120000 === ( $stat['mode'] & 0170000 ) ) {
+				continue; // Became a symlink meanwhile: never followed.
+			}
+			$mode = (int) $stat['mode'] & 07777;
+			$new  = $mode & ~0002;
+			if ( $new === $mode ) {
+				continue;
+			}
+			if ( $new > 0 && Fs::chmod( $path, $new ) ) {
+				++$fixed;
+			} else {
+				$failed[] = $path;
+			}
+		}
+		clearstatcache();
+		$after = Sysadmin_Tools::world_writable_scan();
+		$left  = $after ? count( $after['paths'] ) : 0;
+		if ( $left > 0 && 0 === $fixed ) {
+			return new \WP_Error(
+				'wpcybersec_fix',
+				/* translators: %s: number of folders and files */
+				sprintf( __( 'Nothing was changed: PHP does not own the %s folders and files that other users can write, so it may not change them. The steps below do it with SSH or the hosting panel.', 'cybergate-security' ), number_format_i18n( $left ) )
+			);
+		}
+		if ( $left > 0 ) {
+			return new \WP_Error(
+				'wpcybersec_fix',
+				sprintf(
+					/* translators: 1: number of folders and files fixed, 2: number left */
+					_n(
+						'Removed write access for other users from %1$s folders and files. %2$s folder or file still has it: PHP does not own it, so it may not change it. The steps below do it with SSH or the hosting panel.',
+						'Removed write access for other users from %1$s folders and files. %2$s folders and files still have it: PHP does not own them, so it may not change them. The steps below do it with SSH or the hosting panel.',
+						$left,
+						'cybergate-security'
+					),
+					number_format_i18n( $fixed ),
+					number_format_i18n( $left )
+				)
+			);
+		}
+		return sprintf(
+			/* translators: %s: number of folders and files */
+			_n( 'Removed write access for other users from %s folder or file. Checked again: no code folder is writable by every user now.', 'Removed write access for other users from %s folders and files. Checked again: no code folder is writable by every user now.', max( 1, $fixed ), 'cybergate-security' ),
+			number_format_i18n( $fixed )
+		);
 	}
 
 	/**
@@ -742,6 +879,8 @@ class Hardening {
 			$check = $this->last_check;
 			if ( 'active' === $check ) {
 				$shown = __( 'A live test confirmed that PHP loads it.', 'cybergate-security' );
+			} elseif ( 'user_ini' === $how && 'inactive' === $check && Guard_Manager::ols_activation_step() ) {
+				$shown = __( 'Not loaded yet: OpenLiteSpeed reads .user.ini only after lsphp restarts.', 'cybergate-security' );
 			} elseif ( 'user_ini' === $how && 'inactive' === $check ) {
 				$shown = __( 'PHP reads .user.ini again within a few minutes; the Dashboard shows when the guard runs.', 'cybergate-security' );
 			} else {
@@ -779,9 +918,9 @@ class Hardening {
 			return $installed;
 		}
 		$minutes = max( 1, (int) ceil( max( 0, (int) ini_get( 'user_ini.cache_ttl' ) ) / 60 ) );
-		$ols     = 'litespeed' === PHP_SAPI
-			? ' ' . __( 'On OpenLiteSpeed, .user.ini is only read when lsphp has user ini files switched on, and only after PHP restarts. If the Dashboard does not show the guard as active soon, use the OpenLiteSpeed snippet under Settings > Advanced > Early guard (WebAdmin php.ini Override) instead.', 'cybergate-security' )
-			: '';
+		// OpenLiteSpeed: .user.ini needs an lsphp restart, so say exactly what to run instead of "within N minutes".
+		$ols_step = Guard_Manager::ols_activation_step();
+		$ols      = $ols_step ? ' ' . $ols_step['inline'] : '';
 		$count   = count( $methods );
 		foreach ( $methods as $i => $method ) {
 			$more             = $i < $count - 1;
@@ -813,16 +952,21 @@ class Hardening {
 			if ( 'unknown' === $check ) {
 				// A timeout, a blocked loopback, an HTTP password or a firewall page: nothing is known about the change, so keep it.
 				$parts = array( __( 'Installed, but it could not be verified from here because the site did not answer its own test request (a firewall, an HTTP password or a slow server can cause this).', 'cybergate-security' ) );
-				if ( 'user_ini' === $method ) {
+				if ( 'user_ini' === $method && $ols_step ) {
+					$parts[] = $ols_step['inline'];
+				} elseif ( 'user_ini' === $method ) {
 					/* translators: %d: minutes */
-					$parts[] = sprintf( __( 'PHP reads .user.ini every %d minutes, so the guard becomes active within that time.', 'cybergate-security' ), $minutes ) . $ols;
+					$parts[] = sprintf( __( 'PHP reads .user.ini every %d minutes, so the guard becomes active within that time.', 'cybergate-security' ), $minutes );
 				}
 				$parts[] = __( 'The Dashboard shows when the guard is active.', 'cybergate-security' );
 				return implode( ' ', $parts );
 			}
+			if ( 'user_ini' === $method && $ols_step ) {
+				return __( 'Installed, but PHP has not loaded it yet.', 'cybergate-security' ) . $ols;
+			}
 			if ( 'user_ini' === $method ) {
 				/* translators: %d: minutes */
-				return sprintf( __( 'Installed. PHP reads .user.ini every %d minutes, so the guard becomes active within that time. The Dashboard shows when it is.', 'cybergate-security' ), $minutes ) . $ols;
+				return sprintf( __( 'Installed. PHP reads .user.ini every %d minutes, so the guard becomes active within that time. The Dashboard shows when it is.', 'cybergate-security' ), $minutes );
 			}
 			if ( $more ) {
 				// The server ignored php_value (OpenLiteSpeed does): try the next way.

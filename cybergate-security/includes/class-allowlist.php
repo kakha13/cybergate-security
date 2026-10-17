@@ -192,7 +192,12 @@ class Allowlist {
 		$table  = Store::table( 'allowlist' );
 		$where  = array( '1=1' );
 		$params = array();
-		if ( $args['kind'] ) {
+		if ( self::KIND_HASH === $args['kind'] ) {
+			// "File fingerprints": approvals under executable names are fingerprints too.
+			$where[]  = 'kind IN (%s, %s)';
+			$params[] = self::KIND_HASH;
+			$params[] = self::KIND_HASH_EXEC;
+		} elseif ( $args['kind'] ) {
 			$where[]  = 'kind = %s';
 			$params[] = $args['kind'];
 		}
