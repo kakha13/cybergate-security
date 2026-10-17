@@ -4,7 +4,7 @@ Tags: security, malware scanner, file integrity, upload, quarantine
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.0.2
+Stable tag: 1.0.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -123,6 +123,10 @@ Data kept on your site: for every held file the plugin records the uploading use
 8. Recent changes: every recently modified code file and what explains the change.
 
 == Changelog ==
+
+= 1.0.3 =
+* The Antivirus engines "On the server now" rows always use the newest ClamAV self-test: "Check again" now tests before any part of the page reads the state, so the clamd row no longer shows an old "Not running".
+* A failed ClamAV self-test (for example while clamd restarts or the server is short of memory) is tested again within 15 minutes instead of being kept for 6 hours, and real cron (bin/cron.php) retests it when needed.
 
 = 1.0.2 =
 * "Code folders other users can write to" now also looks one level inside the WordPress folder and wp-content: a second WordPress install in a subfolder, translation files (PHP since WordPress 6.5), upgrade, uploads and backup folders. The one-click fix covers them too.

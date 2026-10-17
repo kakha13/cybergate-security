@@ -711,7 +711,12 @@ class Settings_Page {
 		// phpcs:disable WordPress.Security.NonceVerification.Recommended -- navigation and display only.
 		$tab     = ( isset( $_GET['tab'] ) && 'advanced' === sanitize_key( wp_unslash( $_GET['tab'] ) ) ) ? 'advanced' : 'general';
 		$updated = ! empty( $_GET['settings-updated'] );
+		$recheck = ! empty( $_GET['recheck'] );
 		// phpcs:enable
+		if ( $recheck && 'advanced' === $tab ) {
+			// "Check again": test ClamAV before any part of the page reads its state.
+			Sysadmin_Tools::call( 'scanner', 'clamav_selftest', array( true ), null );
+		}
 
 		$actions = '<a class="button" href="' . esc_url( Sysadmin_Tools::wizard_url() ) . '">' . esc_html__( 'Run setup wizard', 'cybergate-security' ) . '</a>';
 		?>
@@ -1323,10 +1328,6 @@ class Settings_Page {
 	 * @param Sysadmin_Tools $tools Tools.
 	 */
 	private function section_antivirus( array $s, Sysadmin_Tools $tools ) {
-		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read only: "Check again" runs the ClamAV self-test now.
-		if ( ! empty( $_GET['recheck'] ) ) {
-			Sysadmin_Tools::call( 'scanner', 'clamav_selftest', array( true ), null );
-		}
 		$av     = $tools->antivirus_status();
 		$clam   = $av['clamav'];
 		$maldet = $av['maldet'];

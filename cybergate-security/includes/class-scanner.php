@@ -1687,7 +1687,14 @@ class Scanner {
 			return;
 		}
 		$cached = $this->clamav_selftest_cached();
-		if ( ! $cached || (int) $cached['at'] <= time() - self::SELFTEST_TTL ) {
+		$failed = false;
+		foreach ( $cached && isset( $cached['bins'] ) ? (array) $cached['bins'] : array() as $row ) {
+			$failed = $failed || empty( $row['ok'] );
+		}
+		// A failure is often temporary (clamd restarting, the server short of memory), so it is
+		// tested again after 15 minutes instead of being kept for the whole SELFTEST_TTL.
+		$ttl = $failed ? 15 * MINUTE_IN_SECONDS : self::SELFTEST_TTL;
+		if ( ! $cached || (int) $cached['at'] <= time() - $ttl ) {
 			$this->clamav_selftest( true );
 		}
 	}

@@ -443,6 +443,12 @@ if ( $wpcybersec_options['isolated'] ) {
 }
 
 $wpcybersec_job    = $wpcybersec_plugin->scan_job;
+
+// Real cron is the right place to retest ClamAV: nobody waits for this run, and a
+// failed self-test (clamd restarting, a server short of memory) is retried within the hour.
+if ( isset( $wpcybersec_plugin->scanner ) && method_exists( $wpcybersec_plugin->scanner, 'refresh_selftest_if_stale' ) ) {
+	$wpcybersec_plugin->scanner->refresh_selftest_if_stale();
+}
 $wpcybersec_status = $wpcybersec_job->status();
 
 if ( in_array( $wpcybersec_status['state'], array( 'enumerating', 'processing', 'finishing' ), true ) ) {

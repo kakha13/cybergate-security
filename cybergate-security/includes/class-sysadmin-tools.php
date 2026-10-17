@@ -2937,15 +2937,23 @@ class Sysadmin_Tools {
 	 *                 (may be '') say why a row is unknown or not set up and give the root command.
 	 */
 	public function antivirus_live() {
-		if ( null !== $this->live_cache ) {
+		// Kept for this request, but rebuilt when a newer ClamAV self-test was stored in the
+		// meantime ("Check again" runs one after other parts of the page already asked).
+		$test = self::call( 'scanner', 'clamav_selftest_cached', array(), null );
+		$at   = is_array( $test ) && isset( $test['at'] ) ? (int) $test['at'] : 0;
+		if ( null !== $this->live_cache && $at === $this->live_cache_at ) {
 			return $this->live_cache;
 		}
-		$this->live_cache = $this->antivirus_live_rows();
+		$this->live_cache    = $this->antivirus_live_rows();
+		$this->live_cache_at = $at;
 		return $this->live_cache;
 	}
 
 	/** @var array[]|null antivirus_live() of this request. */
 	private $live_cache = null;
+
+	/** @var int Self-test time the cached rows were built with. */
+	private $live_cache_at = 0;
 
 	/**
 	 * @return array[] See antivirus_live().
