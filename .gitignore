@@ -5,3 +5,4 @@ dist/
 
 # Site-specific paste blocks generated from server-tools/cgav.sh
 server-tools/install-*.txt
+screenshots/

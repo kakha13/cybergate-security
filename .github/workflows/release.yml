@@ -1,0 +1,63 @@
+name: Release
+
+# Push a tag like v1.0.1 to build the plugin ZIP and publish a GitHub release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '7.4'
+          tools: none
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check the tag matches the plugin version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="$(sed -n "s/.*define( 'WPCYBERSEC_VERSION', '\([^']*\)' ).*/\1/p" cybergate-security/cybergate-security.php)"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match plugin version $VERSION" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build and verify the ZIP
+        run: scripts/build.sh --wporg
+
+      - name: Release notes from the readme changelog
+        run: |
+          awk -v v="= $VERSION =" '$0 == v {f=1; next} /^= / && f {exit} f' cybergate-security/readme.txt > notes.md
+          {
+            echo
+            echo "**Install:** download \`cybergate-security.zip\` below, then in WordPress open Plugins > Add New Plugin > Upload Plugin."
+            echo
+            echo "**SHA-256:** \`$(cut -d' ' -f1 "dist/cybergate-security-$VERSION.zip.sha256")\`"
+            echo
+            echo "Documentation: https://qartvelo.com/cybergate-security/docs"
+          } >> notes.md
+          cat notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp "dist/cybergate-security-$VERSION.zip" dist/cybergate-security.zip
+          gh release create "$GITHUB_REF_NAME" \
+            --title "CyberGate Security $VERSION" \
+            --notes-file notes.md \
+            "dist/cybergate-security-$VERSION.zip" \
+            "dist/cybergate-security-$VERSION.zip.sha256" \
+            dist/cybergate-security.zip

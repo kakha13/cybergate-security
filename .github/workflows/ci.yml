@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['7.4', '8.3']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: none
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Lint, package and verify
+        run: scripts/build.sh --wporg
+
+      - name: Check the server script
+        run: |
+          bash -n server-tools/cgav.sh
+          shellcheck -S warning server-tools/cgav.sh
+          cmp server-tools/cgav.sh cybergate-security/includes/admin/cgav-script.txt
