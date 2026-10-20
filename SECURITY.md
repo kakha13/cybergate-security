@@ -8,7 +8,7 @@ Security fixes are released for the latest version. Please update before reporti
 
 Please do not open a public issue for a security problem.
 
-Report it privately through [GitHub security advisories](https://github.com/kakha13/cybergate-security/security/advisories/new) or by email to info@qartvelo.com, with:
+Report it privately through [GitHub security advisories](https://github.com/kakha13/qartvelo-guard/security/advisories/new) or by email to info@qartvelo.com, with:
 
 - the plugin version and WordPress version,
 - what an attacker can do and what they need (for example a logged-in role),

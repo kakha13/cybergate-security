@@ -30,4 +30,4 @@ jobs:
         run: |
           bash -n server-tools/cgav.sh
           shellcheck -S warning server-tools/cgav.sh
-          cmp server-tools/cgav.sh cybergate-security/includes/admin/cgav-script.txt
+          cmp server-tools/cgav.sh qartvelo-guard/includes/admin/cgav-script.txt

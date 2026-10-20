@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# cgav - CyberGate antivirus helper for the server (ClamAV + Linux Malware Detect).
+# cgav - Qartvelo Guard antivirus helper for the server (ClamAV + Linux Malware Detect).
 #
 # Install once (as root):   bash cgav.sh self-install /path/to/wordpress
 # Then use:                 cgav <command>
@@ -12,7 +12,7 @@
 #   remove-site PATH        stop watching a site
 #   install-clamav          install ClamAV, download signatures, start the scanner service
 #   install-maldet          install Linux Malware Detect + inotify-tools, watch the sites in
-#                           real time, start on boot, report-only (CyberGate decides)
+#                           real time, start on boot, report-only (Qartvelo Guard decides)
 #   monitor start|stop|status|reload   control maldet's real-time monitor (reload = restart
 #                           with the current site list)
 #   test [PATH]             harmless EICAR test: both engines must report it
@@ -96,7 +96,7 @@ watched_by() {
 }
 
 site_version() {
-  sed -n 's/^[ *]*Version:[[:space:]]*\([^[:space:]]*\).*/\1/p' "$1/wp-content/plugins/cybergate-security/cybergate-security.php" 2>/dev/null | head -1
+  sed -n 's/^[ *]*Version:[[:space:]]*\([^[:space:]]*\).*/\1/p' "$1/wp-content/plugins/qartvelo-guard/qartvelo-guard.php" 2>/dev/null | head -1
 }
 
 need_site() {
@@ -164,7 +164,7 @@ cmd_status() {
   while IFS= read -r s; do
     [ -n "$s" ] || continue; n=$((n+1))
     if ! is_wp "$s"; then no "$s: not a WordPress folder any more (cgav remove-site $s)"
-    elif grep -qx "$s" "$MON_PATHS" 2>/dev/null; then local v; v="$(site_version "$s")"; ok "$s: watched by the monitor${v:+, CyberGate $v}"
+    elif grep -qx "$s" "$MON_PATHS" 2>/dev/null; then local v; v="$(site_version "$s")"; ok "$s: watched by the monitor${v:+, Qartvelo Guard $v}"
     else warn "$s: not in $MON_PATHS (cgav add-site $s)"; fi
   done < <(sites_list)
   [ "$n" = 0 ] && warn "no site watched yet: cgav sites, then cgav add-site PATH (or cgav add-all)"
@@ -186,7 +186,7 @@ cmd_status() {
   if [ -x "$MALDET/maldet" ]; then
     ok "installed: $("$MALDET/maldet" --help 2>/dev/null | sed -n 's/^Linux Malware Detect \(v[0-9.]*\).*/\1/p' | head -1), signatures $(cat "$MALDET/sigs/maldet.sigs.ver" 2>/dev/null || echo unknown)"
     Q="$(sed -n 's/^quarantine_hits="\([0-9]\)".*/\1/p' "$MALDET/conf.maldet" 2>/dev/null)"
-    [ "$Q" = 0 ] && ok "report-only (quarantine_hits=0): CyberGate Security decides what to hold" || warn "quarantine_hits=$Q: maldet moves files itself"
+    [ "$Q" = 0 ] && ok "report-only (quarantine_hits=0): Qartvelo Guard decides what to hold" || warn "quarantine_hits=$Q: maldet moves files itself"
     if have inotifywait && have ed && have perl && have which; then ok "inotify-tools, ed, perl and which installed"; else no "inotify-tools, ed, perl or which missing: real-time monitor cannot run (cgav install-maldet)"; fi
     if [ -n "$(monitor_pids)" ]; then ok "real-time monitor RUNNING (pid $(monitor_pids | tr '\n' ' '))"; else no "real-time monitor not running (cgav monitor start)"; fi
     if grep -q "^MONITOR_MODE=\"$MON_PATHS\"" "$MALDET_DEFAULTS" 2>/dev/null && systemctl is-enabled --quiet maldet 2>/dev/null; then ok "monitor starts on boot"; else warn "monitor does not start on boot (cgav install-maldet fixes it)"; fi
@@ -212,7 +212,7 @@ cmd_install_clamav() {
         echo "      Then run: cgav status. To use the system packages anyway: CGAV_OS_PACKAGES=1 cgav install-clamav"
         return 0
       fi ;;
-    plesk)       warn "Plesk: its own ClamAV comes with the Plesk Email Security extension (mail); for site files Plesk offers the Imunify extension. Installing ClamAV from the system packages for CyberGate Security." ;;
+    plesk)       warn "Plesk: its own ClamAV comes with the Plesk Email Security extension (mail); for site files Plesk offers the Imunify extension. Installing ClamAV from the system packages for Qartvelo Guard." ;;
     unknown)     : ;;
     *)           ok "$PANEL_NAME: no ClamAV of its own for site files, using the system packages" ;;
   esac
@@ -241,7 +241,7 @@ cmd_install_clamav() {
   systemctl enable --now "$CLAMD_SVC" >/dev/null 2>&1 && ok "scanner service $CLAMD_SVC started"
   sleep 5
   head1 "After"; cmd_status | sed -n '/== ClamAV ==/,/== Linux/p' | sed '$d'
-  echo "  Next: cgav test   (then turn on 'Also scan uploads with ClamAV' in CyberGate Security > Settings > Advanced > Antivirus engines)"
+  echo "  Next: cgav test   (then turn on 'Also scan uploads with ClamAV' in Qartvelo Guard > Settings > Advanced > Antivirus engines)"
 }
 
 # ------------------------------------------------------------------ maldet
@@ -263,7 +263,7 @@ cmd_install_maldet() {
   fi
   if "$MALDET/maldet" -u >/dev/null 2>&1 && [ -s "$MALDET/sigs/maldet.sigs.ver" ]; then ok "signatures updated"; else warn "signature update failed: see $MALDET/logs/event_log"; fi
 
-  # Report only: CyberGate Security holds files for approval, maldet just reports.
+  # Report only: Qartvelo Guard holds files for approval, maldet just reports.
   sed -i 's/^quarantine_hits=.*/quarantine_hits="0"/' "$MALDET/conf.maldet"
   # Use the ClamAV engine for maldet scans when ClamAV is installed (faster, more signatures).
   have clamscan && sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' "$MALDET/conf.maldet"
@@ -387,9 +387,9 @@ cmd_sites() {
     found=1
     local v; v="$(site_version "$s")"
     local w; w="$(watched_by "$s")"
-    if [ "$w" = "$s" ]; then ok "$s  (watched${v:+, CyberGate $v})"
-    elif [ -n "$w" ]; then ok "$s  (watched as part of $w${v:+, CyberGate $v})"
-    else warn "$s  (not watched${v:+, CyberGate $v}): cgav add-site $s"; fi
+    if [ "$w" = "$s" ]; then ok "$s  (watched${v:+, Qartvelo Guard $v})"
+    elif [ -n "$w" ]; then ok "$s  (watched as part of $w${v:+, Qartvelo Guard $v})"
+    else warn "$s  (not watched${v:+, Qartvelo Guard $v}): cgav add-site $s"; fi
   done < <({ discover_sites; sites_list; } | awk '!seen[$0]++')
   [ "$found" = 1 ] || warn "none found in the usual folders: cgav add-site /path/to/wordpress"
   echo

@@ -1,15 +1,15 @@
-# CyberGate Security
+# Qartvelo Guard
 
-WordPress security plugin: full-site malware scan, holds every new upload/install/unknown file until an admin approves it, approvals remembered by SHA-256. Plugin lives in `cybergate-security/`; module contracts in `docs/ARCHITECTURE.md` (read it before changing cross-module APIs).
+WordPress security plugin: full-site malware scan, holds every new upload/install/unknown file until an admin approves it, approvals remembered by SHA-256. Plugin lives in `qartvelo-guard/`; module contracts in `docs/ARCHITECTURE.md` (read it before changing cross-module APIs).
 
 ## Commands
 - `scripts/build.sh` - lint, stage without dev files, rebuild checksums, zip to `dist/` and verify
 - `scripts/build.sh --wporg` - same plus WordPress.org checks (needs real `Contributors:` in readme.txt)
 - `scripts/build.sh --svn PATH` - sync trunk/tags/assets into a wp.org SVN checkout (prints svn commands, does not commit)
-- `php cybergate-security/bin/build-checksums.php` - regenerate `checksums.json`; run after ANY plugin file change, or the plugin flags its own edited files as tampered
-- `php cybergate-security/bin/cron.php [--full|--baseline] [--isolated] [--url=URL]` - run a scan to completion from the CLI (inside a WP install); `--isolated` loads no other plugin and no theme (mu-plugins still load); `--url` is the network address on multisite
+- `php qartvelo-guard/bin/build-checksums.php` - regenerate `checksums.json`; run after ANY plugin file change, or the plugin flags its own edited files as tampered
+- `php qartvelo-guard/bin/cron.php [--full|--baseline] [--isolated] [--url=URL]` - run a scan to completion from the CLI (inside a WP install); `--isolated` loads no other plugin and no theme (mu-plugins still load); `--url` is the network address on multisite
 - `wp wpcybersec report --file=report.html` - the downloadable security report (also Reports > Download report)
-- Lint: `for f in $(find cybergate-security -name '*.php'); do php -l $f; done` and `node --check` on `assets/js/*.js`
+- Lint: `for f in $(find qartvelo-guard -name '*.php'); do php -l $f; done` and `node --check` on `assets/js/*.js`
 
 ## Code rules
 - PHP 7.4 compatible syntax (no match, `?->`, named args, union types, `str_contains`); WordPress 6.0+
@@ -21,6 +21,8 @@ WordPress security plugin: full-site malware scan, holds every new upload/instal
 - Allowlist approvals are bound to executability: `is_allowed_hash( $sha, $executable )`
 
 ## Gotchas
+- Renamed from CyberGate Security (slug cybergate-security) to Qartvelo Guard (slug qartvelo-guard) in 1.1.0 for the WordPress.org review: "wp" is a restricted term in plugin names and slugs. Internal identifiers stay `wpcybersec`/`WPCYBERSEC_`/`WPCyberSecurity\` (options, tables, hooks, WP-CLI). Files written by older versions carry legacy markers that must stay recognised: `Guard_Manager::LEGACY_MARKER`, `Sysadmin_Tools::LEGACY_MARKER`, the wp-config "Added by CyberGate Security" comment, settings exports with `plugin: cybergate-security`
+- The data folder defaults to uploads/qartvelo-guard (`Storage::default_dir()`); the pre-1.1.0 wp-content/wpcybersec is only read and moved once by `Hardening::move_legacy_data_dir()`
 - `class-signatures.php` contains malware patterns as data; it only passes scans because `checksums.json` matches it
 - Activation runs after `plugins_loaded`, so `Installer` must not rely on booted services
 - A whole-site scan without a baseline (`wpcybersec_baseline_at`) is converted to a baseline; never run an incremental scan on an empty manifest

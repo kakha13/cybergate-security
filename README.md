@@ -1,15 +1,16 @@
-# CyberGate Security
+# Qartvelo Guard
 
 **Nothing new runs on your WordPress site until you approve it.**
 
-CyberGate Security scans the whole site for malware and backdoors, holds every new upload, plugin or theme install and unknown file until an administrator approves it, and remembers each approval by its SHA-256 fingerprint: allowed once, allowed always.
+Qartvelo Guard scans the whole site for malware and backdoors, holds every new upload, plugin or theme install and unknown file until an administrator approves it, and remembers each approval by its SHA-256 fingerprint: allowed once, allowed always.
 
-- Website and documentation: https://qartvelo.com/cybergate-security
-- Download: [latest release](https://github.com/kakha13/cybergate-security/releases/latest) (WordPress.org listing pending review)
+- Website and documentation: https://qartvelo.com/qartvelo-guard
+- Previously named CyberGate Security (renamed in 1.1.0).
+- Download: [latest release](https://github.com/kakha13/qartvelo-guard/releases/latest) (WordPress.org listing pending review)
 
-[![Watch CyberGate Security in 22 seconds](media/cybergate-security-promo.jpg)](media/cybergate-security-promo.mp4)
+[![Watch Qartvelo Guard in 22 seconds](media/qartvelo-guard-promo.jpg)](media/qartvelo-guard-promo.mp4)
 
-**Watch the 22-second video:** [landscape](media/cybergate-security-promo.mp4) or [vertical for Reels, Shorts and TikTok](media/cybergate-security-promo-vertical.mp4).
+**Watch the 22-second video:** [landscape](media/qartvelo-guard-promo.mp4) or [vertical for Reels, Shorts and TikTok](media/qartvelo-guard-promo-vertical.mp4).
 
 ## Features
 
@@ -31,17 +32,17 @@ WordPress 6.0 or newer, PHP 7.4 or newer. Apache, nginx, LiteSpeed/OpenLiteSpeed
 
 ## Install
 
-1. Download `cybergate-security.zip` from the [latest release](https://github.com/kakha13/cybergate-security/releases/latest).
+1. Download `qartvelo-guard.zip` from the [latest release](https://github.com/kakha13/qartvelo-guard/releases/latest).
 2. In WordPress open **Plugins > Add New Plugin > Upload Plugin**, choose the ZIP, install and activate.
 3. The setup wizard opens. Follow it: it takes a few minutes.
 
-Every release lists its SHA-256 checksum. Older versions stay available on the [releases page](https://github.com/kakha13/cybergate-security/releases).
+Every release lists its SHA-256 checksum. Older versions stay available on the [releases page](https://github.com/kakha13/qartvelo-guard/releases).
 
 ## Repository layout
 
 | Path | What it is |
 |---|---|
-| `cybergate-security/` | The plugin |
+| `qartvelo-guard/` | The plugin |
 | `docs/ARCHITECTURE.md` | Module contracts, read before changing cross-module APIs |
 | `scripts/build.sh` | Lint, package and verify the release ZIP (`--wporg` adds WordPress.org checks) |
 | `server-tools/cgav.sh` | Server helper for ClamAV and Linux Malware Detect (run by an administrator, never by the plugin) |
@@ -54,21 +55,21 @@ Every release lists its SHA-256 checksum. Older versions stay available on the [
 scripts/build.sh
 ```
 
-The build checks PHP syntax, JavaScript syntax and the version numbers, stages the plugin without development files, rebuilds `checksums.json` and writes `dist/cybergate-security-<version>.zip` with a `.sha256` file.
+The build checks PHP syntax, JavaScript syntax and the version numbers, stages the plugin without development files, rebuilds `checksums.json` and writes `dist/qartvelo-guard-<version>.zip` with a `.sha256` file.
 
 After changing any plugin file, rebuild the checksums so the plugin does not report its own files as modified:
 
 ```bash
-php cybergate-security/bin/build-checksums.php
+php qartvelo-guard/bin/build-checksums.php
 ```
 
 Code rules: PHP 7.4 compatible syntax, WordPress 6.0+, capability checks and nonces on every handler, no em or en dashes. See `CLAUDE.md` and `docs/ARCHITECTURE.md`.
 
 ## Releasing
 
-1. Raise the version in `cybergate-security/cybergate-security.php` (header and `WPCYBERSEC_VERSION`) and the readme `Stable tag`, and add a changelog entry.
+1. Raise the version in `qartvelo-guard/qartvelo-guard.php` (header and `WPCYBERSEC_VERSION`) and the readme `Stable tag`, and add a changelog entry.
 2. Commit, then tag and push: `git tag v1.0.1 && git push origin v1.0.1`.
-3. The release workflow builds the ZIP, checks the tag matches the plugin version and publishes a GitHub release with `cybergate-security-<version>.zip`, `cybergate-security.zip` and the checksum.
+3. The release workflow builds the ZIP, checks the tag matches the plugin version and publishes a GitHub release with `qartvelo-guard-<version>.zip`, `qartvelo-guard.zip` and the checksum.
 
 ## Security
 

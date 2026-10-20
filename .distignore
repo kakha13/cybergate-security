@@ -1,4 +1,4 @@
-# Files left out of the release zip (rsync patterns, relative to cybergate-security/).
+# Files left out of the release zip (rsync patterns, relative to qartvelo-guard/).
 .DS_Store
 .git
 .gitignore

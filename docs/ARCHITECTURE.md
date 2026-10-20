@@ -1,6 +1,6 @@
-# CyberGate Security - architecture and module contracts
+# Qartvelo Guard - architecture and module contracts
 
-Plugin folder: `cybergate-security/` (slug `cybergate-security`, text domain `cybergate-security`).
+Plugin folder: `qartvelo-guard/` (slug `qartvelo-guard`, text domain `qartvelo-guard`).
 Namespace `WPCyberSecurity\`, admin classes in `WPCyberSecurity\Admin\`. Prefix for options,
 hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0+. No build step.
 
@@ -34,7 +34,7 @@ hooks, cron, AJAX, CSS classes: `wpcybersec_` / `wpcs-`. PHP 7.4+, WordPress 6.0
   `delete_option()` (network options on multisite), plugin cron events through
   `Network::schedule_event()` and friends (main site only), plugin page links through
   `Admin\Admin::page_url()` (Network Admin on multisite). See "Multisite network mode".
-- Translatable strings use text domain `cybergate-security`. **Never use em dashes or en dashes**
+- Translatable strings use text domain `qartvelo-guard`. **Never use em dashes or en dashes**
   in any string or comment; use a plain hyphen.
 - Icons: Dashicons only (`<span class="dashicons dashicons-shield"></span>`). No emojis.
 - Datetimes in the DB are UTC; display with `get_date_from_gmt( $utc, get_option('date_format') . ' ' . get_option('time_format') )`.
@@ -134,7 +134,7 @@ Static helpers: `Paths` (core), `Fs` (core), `Guard_Config` (core), `Installer` 
   uploads and home folders are the main site's (`Network::on_main()`).
 - `Config_Editor` (static): `path()`, `can_check()` (tokenizer), `can_edit()`, `has_constant()`,
   `set_constant($name, $value)` (replaces a define in place, else adds it above "That's all, stop
-  editing!" under a `// Added by CyberGate Security on <date>.` line; refuses when the constant is
+  editing!" under a `// Added by Qartvelo Guard on <date>.` line; refuses when the constant is
   defined in another file wp-config.php loads, never adds a duplicate), `remove_constant($name)`,
   `remove_marked_constant($name)` (only defines below that marker comment; uninstall),
   `parses($code)`. Every write is parse-checked, atomic (`Fs::replace()`), backed up into the data
@@ -876,7 +876,7 @@ Alerts step and the "Usage statistics" card of Settings > General), endpoint and
 - WordPress.org guideline 7: setting `share_stats` (default false) is the only switch, no notice ever asks for it.
   The Alerts step saves it with "Save and continue" ("Skip" saves nothing); a settings import never copies it.
   `WPCYBERSEC_DISABLE_STATS` (true) stops every message whatever the setting says.
-- Endpoint `Stats::endpoint()`: `WPCYBERSEC_STATS_URL`, else `https://qartvelo.com/api/cybergate-security/stats`,
+- Endpoint `Stats::endpoint()`: `WPCYBERSEC_STATS_URL`, else `https://qartvelo.com/api/qartvelo-guard/stats`,
   filter `wpcybersec_stats_url`. `wp_remote_post`, JSON, timeout 5 s, no redirects.
 - Events: `opt_in` (on the switch from off to on, `wpcybersec_settings_updated`), `heartbeat` (cron
   `wpcybersec_stats_heartbeat`, weekly, main site only, kept in shape on `init` (autoloaded cron option, no query); first run 10 minutes after
@@ -905,9 +905,9 @@ Alerts step and the "Usage statistics" card of Settings > General), endpoint and
   site's option before migration) it also: loads the plugin and removes only the define lines it
   marked (`Config_Editor::remove_marked_constant()` for `WPCYBERSEC_HMAC_KEY` and
   `DISABLE_WP_CRON`, never a hand-written one, never when wp-config.php does not parse); removes
-  the guard lines (`; BEGIN/END CyberGate Security Guard` block and the `auto_prepend_file` line)
-  from .user.ini and the `# BEGIN/END CyberGate Security Guard` block from .htaccess, in ABSPATH
-  and the front controller folder; removes the `# BEGIN/END CyberGate Security` block from the
+  the guard lines (`; BEGIN/END Qartvelo Guard Guard` block and the `auto_prepend_file` line)
+  from .user.ini and the `# BEGIN/END Qartvelo Guard Guard` block from .htaccess, in ABSPATH
+  and the front controller folder; removes the `# BEGIN/END Qartvelo Guard` block from the
   (main site's) uploads .htaccess (deleting the file when nothing else was in it); drops the
   tables, deletes options, transients and site transients (`_site_transient_wpcybersec_*` and
   their timeouts, in the options table on single sites) and cron events of every site (multisite:

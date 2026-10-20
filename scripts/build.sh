@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Builds the CyberGate Security release.
+# Builds the Qartvelo Guard release.
 #
 #   scripts/build.sh               upload-ready zip in dist/ (Plugins > Add New > Upload)
 #   scripts/build.sh --wporg       same, plus the WordPress.org submission checks
@@ -8,13 +8,13 @@
 #                                  checkout (trunk/, tags/<version>/, assets/) and
 #                                  prints the svn commands to review and commit
 #
-# Output: dist/cybergate-security-<version>.zip and a .sha256 file next to it.
-# The zip holds one top folder, cybergate-security/, as WordPress expects.
+# Output: dist/qartvelo-guard-<version>.zip and a .sha256 file next to it.
+# The zip holds one top folder, qartvelo-guard/, as WordPress expects.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SLUG="cybergate-security"
+SLUG="qartvelo-guard"
 SRC="$ROOT/$SLUG"
 DIST="$ROOT/dist"
 STAGE="$DIST/build/$SLUG"
